@@ -27,6 +27,7 @@ PHASE2A_INITIAL = "0007_vulnerability_finding_lifecycle"
 PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
+PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
 FROZEN = (
     "0001_baseline_current_schema.py",
     "0002_sites_networks.py",
@@ -37,6 +38,7 @@ FROZEN = (
     "0007_vulnerability_finding_lifecycle.py",
     "0008_phase2a_finding_identity_repair.py",
     "0009_phase2a_detector_identity_partition.py",
+    "0010_cve_intelligence_priority.py",
 )
 VULN_STAGES = {
     "discovery": True,
@@ -152,7 +154,7 @@ def test_fresh_db_reaches_phase2a_head(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE2B_HEAD
+    assert revision == head_revision() == current_revision() == PHASE2C_HEAD
     tables = _tables(engine)
     assert {
         "vulnerabilities",
@@ -297,7 +299,7 @@ def test_0006_to_0007_preserves_legacy_findings_and_does_not_fabricate_resolutio
         ).scalar_one()
 
     command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE2B_HEAD
+    assert current_revision() == head_revision() == PHASE2C_HEAD
     db = SessionLocal()
     try:
         evidence = db.query(Finding).filter(Finding.tenant_id == tenant_id).order_by(Finding.id).all()

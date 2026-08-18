@@ -2,6 +2,7 @@ import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { api, download } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
+import { ControlMapping } from "../components/ControlMapping";
 import { formatUtc, useTimezone } from "../timezone";
 import type {
   Asset,
@@ -149,6 +150,7 @@ export function AssetsPanel({ tenantId }: { tenantId: number }) {
       )}
       {selected && (
         <AssetDrawer
+          tenantId={tenantId}
           asset={selected}
           write={write}
           timezone={defaultTimezone}
@@ -275,12 +277,14 @@ function ExpectedForm({
 }
 
 function AssetDrawer({
+  tenantId,
   asset,
   write,
   timezone,
   onClose,
   onChanged,
 }: {
+  tenantId: number;
   asset: AssetDetail;
   write: boolean;
   timezone: string;
@@ -415,6 +419,11 @@ function AssetDrawer({
               <button className="text-cyan-400 text-sm">Add</button>
             </form>
           )}
+        </section>
+
+        <section className="space-y-2">
+          <h3 className="text-sm uppercase tracking-wide text-slate-400">Related controls</h3>
+          <ControlMapping tenantId={tenantId} subjectType="asset" subjectId={asset.id} />
         </section>
 
         {asset.latest_correlation && (

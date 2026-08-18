@@ -380,6 +380,9 @@ export interface AssetFinding {
   kev?: boolean | null;
   kev_date_added?: string | null;
   cwe_ids?: string[];
+  treatment_display_status?: string;
+  treatment_review_due_at?: string | null;
+  treatment_expires_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -432,6 +435,101 @@ export interface AssetFindingDetail extends AssetFinding {
   priority_explanation?: PriorityExplanation | null;
   history: AssetFindingHistory[];
   evidence: Finding[];
+  current_treatment?: FindingTreatment | null;
+  treatments?: FindingTreatment[];
+  control_references?: ControlReference[];
+  mapping_disclaimer?: string;
+}
+
+export interface CompensatingControl {
+  id: number;
+  tenant_id: number;
+  treatment_id: number;
+  name: string;
+  description: string;
+  evidence_notes: string;
+  status: string;
+  created_by_username?: string | null;
+  created_at: string;
+  updated_at: string;
+  retired_at?: string | null;
+  retired_by_username?: string | null;
+  retirement_reason?: string | null;
+}
+
+export interface FindingTreatment {
+  id: number;
+  tenant_id: number;
+  asset_finding_id: number;
+  treatment_type: string;
+  status: string;
+  display_status: string;
+  rationale: string;
+  evidence_notes: string;
+  source: string;
+  created_by_username?: string | null;
+  reviewed_by_username?: string | null;
+  revoked_by_username?: string | null;
+  created_at: string;
+  updated_at: string;
+  reviewed_at?: string | null;
+  review_due_at?: string | null;
+  expires_at?: string | null;
+  revoked_at?: string | null;
+  revocation_reason?: string | null;
+  review_notes?: string | null;
+  compensating_controls: CompensatingControl[];
+}
+
+export interface ComplianceFramework {
+  id: number;
+  slug: string;
+  name: string;
+  version: string;
+  publisher: string;
+  description: string;
+  source_url: string;
+  source_release_date?: string | null;
+  source_metadata?: Record<string, unknown>;
+  builtin: boolean;
+  archived_at?: string | null;
+  control_count?: number;
+  mapping_disclaimer?: string;
+  controls?: ComplianceControl[];
+}
+
+export interface ComplianceControl {
+  id: number;
+  framework_id: number;
+  control_key: string;
+  family?: string | null;
+  title: string;
+  description: string;
+  archived_at?: string | null;
+  framework_name?: string | null;
+  framework_version?: string | null;
+  framework_slug?: string | null;
+}
+
+export interface ControlReference {
+  id: number;
+  tenant_id: number;
+  control_id: number;
+  subject_type: string;
+  subject_id: number;
+  reference_type: string;
+  notes: string;
+  created_by_username?: string | null;
+  created_at: string;
+  removed_at?: string | null;
+  removal_reason?: string | null;
+  control_key: string;
+  control_title: string;
+  control_family?: string | null;
+  framework_name: string;
+  framework_version: string;
+  framework_slug: string;
+  mapping_disclaimer?: string;
 }
 
 export interface AlertItem {

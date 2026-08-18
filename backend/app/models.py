@@ -145,6 +145,69 @@ PRIORITY_P4 = "p4"
 PRIORITIES = frozenset({PRIORITY_P1, PRIORITY_P2, PRIORITY_P3, PRIORITY_P4})
 PRIORITY_MODEL_VERSION = "2b.1"
 
+TREATMENT_RECORD_MITIGATED = "mitigated"
+TREATMENT_RECORD_ACCEPTED_RISK = "accepted_risk"
+TREATMENT_RECORD_FALSE_POSITIVE = "false_positive"
+TREATMENT_RECORD_TYPES = frozenset(
+    {TREATMENT_RECORD_MITIGATED, TREATMENT_RECORD_ACCEPTED_RISK, TREATMENT_RECORD_FALSE_POSITIVE}
+)
+
+TREATMENT_STATUS_PENDING_REVIEW = "pending_review"
+TREATMENT_STATUS_ACTIVE = "active"
+TREATMENT_STATUS_EXPIRED = "expired"
+TREATMENT_STATUS_REVOKED = "revoked"
+TREATMENT_STATUS_SUPERSEDED = "superseded"
+TREATMENT_STATUSES = frozenset(
+    {
+        TREATMENT_STATUS_PENDING_REVIEW,
+        TREATMENT_STATUS_ACTIVE,
+        TREATMENT_STATUS_EXPIRED,
+        TREATMENT_STATUS_REVOKED,
+        TREATMENT_STATUS_SUPERSEDED,
+    }
+)
+
+TREATMENT_SOURCE_MANUAL = "manual"
+TREATMENT_SOURCE_LEGACY_PROJECTION = "legacy_projection"
+TREATMENT_SOURCES = frozenset({TREATMENT_SOURCE_MANUAL, TREATMENT_SOURCE_LEGACY_PROJECTION})
+
+COMPENSATING_STATUS_ACTIVE = "active"
+COMPENSATING_STATUS_RETIRED = "retired"
+COMPENSATING_STATUSES = frozenset({COMPENSATING_STATUS_ACTIVE, COMPENSATING_STATUS_RETIRED})
+
+CONTROL_REF_RELATED = "related"
+CONTROL_REF_EVIDENCE = "evidence"
+CONTROL_REF_SUPPORTS = "supports"
+CONTROL_REFERENCE_TYPES = frozenset({CONTROL_REF_RELATED, CONTROL_REF_EVIDENCE, CONTROL_REF_SUPPORTS})
+
+CONTROL_SUBJECT_ASSET = "asset"
+CONTROL_SUBJECT_ASSET_FINDING = "asset_finding"
+CONTROL_SUBJECT_FINDING = "finding"
+CONTROL_SUBJECT_TREATMENT = "treatment"
+CONTROL_SUBJECT_SCAN_JOB = "scan_job"
+CONTROL_SUBJECT_TYPES = frozenset(
+    {
+        CONTROL_SUBJECT_ASSET,
+        CONTROL_SUBJECT_ASSET_FINDING,
+        CONTROL_SUBJECT_FINDING,
+        CONTROL_SUBJECT_TREATMENT,
+        CONTROL_SUBJECT_SCAN_JOB,
+    }
+)
+
+TREATMENT_DISPLAY_UNADDRESSED = "unaddressed"
+TREATMENT_DISPLAY_PENDING_REVIEW = "pending_review"
+TREATMENT_DISPLAY_ACTIVE = "active"
+TREATMENT_DISPLAY_REVIEW_DUE = "review_due"
+TREATMENT_DISPLAY_REVIEW_OVERDUE = "review_overdue"
+TREATMENT_DISPLAY_EXPIRED = "expired"
+TREATMENT_DISPLAY_REVOKED = "revoked"
+TREATMENT_DISPLAY_SUPERSEDED = "superseded"
+
+LEGACY_TREATMENT_RATIONALE = (
+    "Imported from pre-Phase-2C treatment projection; original rationale and reviewer were not recorded."
+)
+
 INTEL_SOURCE_NVD = "nvd"
 INTEL_SOURCE_EPSS = "epss"
 INTEL_SOURCE_CISA_KEV = "cisa_kev"
@@ -1096,6 +1159,9 @@ class AssetFinding(Base):
     evaluations: Mapped[list["AssetFindingRunEvaluation"]] = relationship(
         back_populates="asset_finding", cascade="all, delete-orphan"
     )
+    treatments: Mapped[list["FindingTreatment"]] = relationship(
+        back_populates="asset_finding", cascade="all, delete-orphan"
+    )
 
 
 class AssetFindingHistory(Base):
@@ -1281,3 +1347,217 @@ class VulnerabilityIntelligenceSync(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     extra_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, server_default=text("'{}'::jsonb"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FindingTreatment(Base):
+    __tablename__ = "finding_treatments"
+    __table_args__ = (
+        CheckConstraint(
+            "treatment_type IN ('mitigated', 'accepted_risk', 'false_positive')",
+            name="ck_finding_treatments_treatment_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending_review', 'active', 'expired', 'revoked', 'superseded')",
+            name="ck_finding_treatments_status",
+        ),
+        CheckConstraint(
+            "source IN ('manual', 'legacy_projection')",
+            name="ck_finding_treatments_source",
+        ),
+        Index("ix_finding_treatments_tenant_id", "tenant_id"),
+        Index("ix_finding_treatments_asset_finding_id", "asset_finding_id"),
+        Index("ix_finding_treatments_status", "status"),
+        Index("ix_finding_treatments_expires_at", "expires_at"),
+        Index("ix_finding_treatments_review_due_at", "review_due_at"),
+        Index("ix_finding_treatments_status_expires_at", "status", "expires_at"),
+        Index(
+            "uq_finding_treatments_one_active",
+            "asset_finding_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    asset_finding_id: Mapped[int] = mapped_column(ForeignKey("asset_findings.id", ondelete="CASCADE"), index=True)
+    treatment_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    rationale: Mapped[str] = mapped_column(Text)
+    evidence_notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    source: Mapped[str] = mapped_column(String(32), default=TREATMENT_SOURCE_MANUAL, server_default="manual")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    revoked_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    asset_finding: Mapped["AssetFinding"] = relationship(back_populates="treatments")
+    compensating_controls: Mapped[list["CompensatingControl"]] = relationship(
+        back_populates="treatment", cascade="all, delete-orphan"
+    )
+
+
+class CompensatingControl(Base):
+    __tablename__ = "compensating_controls"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'retired')",
+            name="ck_compensating_controls_status",
+        ),
+        Index("ix_compensating_controls_tenant_id", "tenant_id"),
+        Index("ix_compensating_controls_treatment_id", "treatment_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    treatment_id: Mapped[int] = mapped_column(ForeignKey("finding_treatments.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    evidence_notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    status: Mapped[str] = mapped_column(String(20), default=COMPENSATING_STATUS_ACTIVE, server_default="active")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    retirement_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    treatment: Mapped["FindingTreatment"] = relationship(back_populates="compensating_controls")
+
+
+class ComplianceFramework(Base):
+    __tablename__ = "compliance_frameworks"
+    __table_args__ = (UniqueConstraint("slug", "version", name="uq_compliance_frameworks_slug_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str] = mapped_column(String(80), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    version: Mapped[str] = mapped_column(String(80))
+    publisher: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    source_url: Mapped[str] = mapped_column(String(2000), default="", server_default="")
+    source_release_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    controls: Mapped[list["ComplianceControl"]] = relationship(
+        back_populates="framework", cascade="all, delete-orphan"
+    )
+
+
+class ComplianceControl(Base):
+    __tablename__ = "compliance_controls"
+    __table_args__ = (
+        UniqueConstraint("framework_id", "control_key", name="uq_compliance_controls_framework_id_control_key"),
+        Index("ix_compliance_controls_framework_id", "framework_id"),
+        Index("ix_compliance_controls_control_key", "control_key"),
+        Index("ix_compliance_controls_family", "family"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    framework_id: Mapped[int] = mapped_column(ForeignKey("compliance_frameworks.id", ondelete="CASCADE"), index=True)
+    control_key: Mapped[str] = mapped_column(String(80))
+    family: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    title: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    source_metadata: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    framework: Mapped["ComplianceFramework"] = relationship(back_populates="controls")
+
+
+class ComplianceControlReference(Base):
+    __tablename__ = "compliance_control_references"
+    __table_args__ = (
+        CheckConstraint(
+            "("
+            "(CASE WHEN asset_id IS NOT NULL THEN 1 ELSE 0 END) + "
+            "(CASE WHEN asset_finding_id IS NOT NULL THEN 1 ELSE 0 END) + "
+            "(CASE WHEN finding_id IS NOT NULL THEN 1 ELSE 0 END) + "
+            "(CASE WHEN treatment_id IS NOT NULL THEN 1 ELSE 0 END) + "
+            "(CASE WHEN scan_job_id IS NOT NULL THEN 1 ELSE 0 END)"
+            ") = 1",
+            name="ck_compliance_control_references_exactly_one_subject",
+        ),
+        CheckConstraint(
+            "reference_type IN ('related', 'evidence', 'supports')",
+            name="ck_compliance_control_references_reference_type",
+        ),
+        Index("ix_compliance_control_references_tenant_id", "tenant_id"),
+        Index("ix_compliance_control_references_control_id", "control_id"),
+        Index("ix_compliance_control_references_asset_id", "asset_id"),
+        Index("ix_compliance_control_references_asset_finding_id", "asset_finding_id"),
+        Index("ix_compliance_control_references_finding_id", "finding_id"),
+        Index("ix_compliance_control_references_treatment_id", "treatment_id"),
+        Index("ix_compliance_control_references_scan_job_id", "scan_job_id"),
+        Index(
+            "uq_compliance_control_references_active_asset_id",
+            "control_id",
+            "asset_id",
+            unique=True,
+            postgresql_where=text("asset_id IS NOT NULL AND removed_at IS NULL"),
+        ),
+        Index(
+            "uq_compliance_control_references_active_asset_finding_id",
+            "control_id",
+            "asset_finding_id",
+            unique=True,
+            postgresql_where=text("asset_finding_id IS NOT NULL AND removed_at IS NULL"),
+        ),
+        Index(
+            "uq_compliance_control_references_active_finding_id",
+            "control_id",
+            "finding_id",
+            unique=True,
+            postgresql_where=text("finding_id IS NOT NULL AND removed_at IS NULL"),
+        ),
+        Index(
+            "uq_compliance_control_references_active_treatment_id",
+            "control_id",
+            "treatment_id",
+            unique=True,
+            postgresql_where=text("treatment_id IS NOT NULL AND removed_at IS NULL"),
+        ),
+        Index(
+            "uq_compliance_control_references_active_scan_job_id",
+            "control_id",
+            "scan_job_id",
+            unique=True,
+            postgresql_where=text("scan_job_id IS NOT NULL AND removed_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    control_id: Mapped[int] = mapped_column(ForeignKey("compliance_controls.id", ondelete="RESTRICT"), index=True)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), nullable=True)
+    asset_finding_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_findings.id", ondelete="CASCADE"), nullable=True
+    )
+    finding_id: Mapped[int | None] = mapped_column(ForeignKey("findings.id", ondelete="CASCADE"), nullable=True)
+    treatment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("finding_treatments.id", ondelete="CASCADE"), nullable=True
+    )
+    scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id", ondelete="CASCADE"), nullable=True)
+    reference_type: Mapped[str] = mapped_column(String(20), default=CONTROL_REF_RELATED, server_default="related")
+    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    removed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    removal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    control: Mapped["ComplianceControl"] = relationship()

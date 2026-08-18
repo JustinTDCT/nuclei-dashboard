@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0010_cve_intelligence_priority` (after frozen `0001_baseline` through `0009_phase2a_detector_identity_partition`).
+Current head revision: `0011_phase2c_treatments_compliance` (after frozen `0001_baseline` through `0010_cve_intelligence_priority`).
 
-`0001_baseline` through `0010_cve_intelligence_priority` are immutable. Phase 2B CVE intelligence and operational priority lives in `0010_cve_intelligence_priority`; later correctness fixes belong in application code unless a new revision is truly required.
+`0001_baseline` through `0010_cve_intelligence_priority` are immutable. Phase 2C treatments and compliance live in `0011_phase2c_treatments_compliance`; later correctness fixes belong in application code unless a new revision is truly required.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -40,6 +40,8 @@ Current head revision: `0010_cve_intelligence_priority` (after frozen `0001_base
 `alembic downgrade` from `0009_phase2a_detector_identity_partition` is **refused**. It would rejoin partitioned detector evidence onto the wrong Vulnerability and restore incorrect CVE identity from mixed multi-CVE history.
 
 `alembic downgrade` from `0010_cve_intelligence_priority` is **refused**. It would destroy normalized NVD/EPSS/KEV intelligence and AssetFinding operational priority explanations.
+
+`alembic downgrade` from `0011_phase2c_treatments_compliance` is **refused**. It would destroy treatment history, compensating controls, framework/control catalog rows, and evidence-to-control mappings.
 
 ### Fresh install
 
@@ -206,6 +208,25 @@ Viewer is read-only and cannot refresh or change intelligence settings.
 P1–P4 is **Nuclei Dashboard operational priority** (model `2b.1`), not an NVD, FIRST, or CISA risk rating. The finding detail surface shows the scored factors. Two Assets with the same CVE can have different priorities. NULL priority means not yet calculated; unknown risk is never silently labeled P4.
 
 This product uses the NVD API but is not endorsed or certified by the NVD.
+
+## Phase 2C treatments and compliance frameworks
+
+`0011_phase2c_treatments_compliance` turns `AssetFinding.treatment_state` into a projection of documented treatment records. Technical state and treatment stay separate.
+
+- **Technical state** (`open` / `resolved`) is scanner-independent lifecycle. Treatments never set `technical_state = resolved`.
+- **Treatment projection** is `unaddressed` when there is no currently effective treatment.
+- **Mitigation** may become active immediately when rationale is supplied. Compensating controls are optional documentation.
+- **Accepted risk** and **false positive** start as `pending_review`. They do not change the projection until an Admin or User explicitly approves them. The reviewer is recorded. Separation of duties is not required.
+- A finding has at most one `active` treatment. Activating a new treatment supersedes the previous active record. A pending record does not supersede an active one.
+- **Revoke** and **expire** preserve history. The projection returns to `unaddressed` unless another effective treatment remains. Scheduler expiration runs every 15 minutes; GET endpoints compute `review_overdue` / `expired` display status without mutating rows.
+- **Review due** is not expiration. Past `review_due_at` with a future `expires_at` stays active and is marked review overdue.
+- **Compensating controls** belong to a treatment. They are retired, not deleted.
+- **Framework / Control** is a generic catalog. Framework version is part of identity (`slug` + `version`). NIST SP 800-171 Rev. 3 is bundled from the official NIST OSCAL catalog and imported offline. DoD CMMC Level 2 is **not** bundled and is **not** aliased to Rev. 3: current official CMMC Level 2 self-assessment still uses NIST SP 800-171 Rev. 2.
+- Evidence objects (Asset, Asset Finding, Detection Evidence, Treatment, Scan Run) may reference controls. A mapping means related evidence only. It does **not** mean compliant, certified, implemented, or control satisfied.
+- Admin may create/edit/archive custom frameworks and controls and import built-ins. User may manage treatments, compensating controls, and tenant evidence mappings. Viewer is read-only.
+- Phase 2B P1–P4 scoring is unchanged. Treatment remains 0 priority points. `PRIORITY_MODEL_VERSION` stays `2b.1`.
+
+Built-in catalog files live under `backend/app/data/compliance/`. Import is idempotent, transactional, and does not require live Internet access.
 
 ## Viewer / Auditor
 

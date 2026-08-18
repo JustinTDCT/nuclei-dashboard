@@ -85,6 +85,11 @@ POST_BASELINE_TABLES = frozenset(
         "vulnerability_cwes",
         "vulnerability_references",
         "vulnerability_intelligence_sync",
+        "finding_treatments",
+        "compensating_controls",
+        "compliance_frameworks",
+        "compliance_controls",
+        "compliance_control_references",
     }
 )
 PHASE1A_MARKER_COLUMNS = {

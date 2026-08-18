@@ -19,3 +19,7 @@ def seed(db: Session) -> None:
         )
         db.commit()
     save_settings(db, {})
+    from app.compliance import import_builtin_frameworks
+
+    import_builtin_frameworks(db)
+    db.commit()

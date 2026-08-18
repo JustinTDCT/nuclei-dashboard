@@ -19,6 +19,7 @@ PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
+PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
@@ -246,7 +247,7 @@ def test_upgrade_0002_to_0003_preserves_phase1a_data(reset_db):
     command.upgrade(alembic_config(), PHASE1A_REVISION)
     ids = _insert_phase1a_representative(engine)
     command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE2B_HEAD
+    assert current_revision() == head_revision() == PHASE2C_HEAD
     assert PHASE1B_TABLES.issubset(_tables(engine))
 
     db = SessionLocal()
@@ -905,7 +906,7 @@ def test_upgrade_0003_to_0004_fixes_lifecycle_and_placeholder_hostnames(reset_db
         )
 
     command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE2B_HEAD
+    assert current_revision() == head_revision() == PHASE2C_HEAD
 
     db = SessionLocal()
     try:

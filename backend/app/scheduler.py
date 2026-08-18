@@ -110,6 +110,24 @@ def refresh_vulnerability_intelligence() -> None:
         db.close()
 
 
+def expire_finding_treatments() -> None:
+    db: Session = SessionLocal()
+    try:
+        from app.treatments import expire_due_treatments
+
+        expired = expire_due_treatments(db)
+        if expired:
+            db.commit()
+            log.info("Expired %s finding treatments", expired)
+        else:
+            db.commit()
+    except Exception:
+        log.exception("Finding treatment expiration failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def recalculate_finding_age_priority() -> None:
     db: Session = SessionLocal()
     try:
@@ -143,6 +161,13 @@ def start_scheduler() -> None:
         "interval",
         hours=12,
         id="finding-age-priority",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        expire_finding_treatments,
+        "interval",
+        minutes=15,
+        id="treatment-expiration",
         replace_existing=True,
     )
     scheduler.start()

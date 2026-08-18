@@ -439,6 +439,9 @@ class AssetFindingOut(BaseModel):
     kev: bool | None = None
     kev_date_added: date | None = None
     cwe_ids: list[str] = []
+    treatment_display_status: str = "unaddressed"
+    treatment_review_due_at: datetime | None = None
+    treatment_expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -516,6 +519,13 @@ class AssetFindingDetail(AssetFindingOut):
     priority_explanation: dict[str, Any] | None = None
     history: list[AssetFindingHistoryOut] = []
     evidence: list[FindingOut] = []
+    current_treatment: "FindingTreatmentOut | None" = None
+    treatments: list["FindingTreatmentOut"] = []
+    control_references: list["ControlReferenceOut"] = []
+    mapping_disclaimer: str = (
+        "A control mapping means this evidence is related to the selected control. "
+        "It does not mean the control is implemented, assessed, satisfied, or certified."
+    )
 
 
 class EnrollIn(BaseModel):
@@ -804,7 +814,210 @@ class HistoryPage(BaseModel):
     offset: int
 
 
+class CompensatingControlIn(BaseModel):
+    name: str
+    description: str = ""
+    evidence_notes: str = ""
+
+
+class CompensatingControlUpdateIn(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    evidence_notes: str | None = None
+
+
+class CompensatingControlRetireIn(BaseModel):
+    reason: str
+
+
+class CompensatingControlOut(BaseModel):
+    id: int
+    tenant_id: int
+    treatment_id: int
+    name: str
+    description: str
+    evidence_notes: str
+    status: str
+    created_by_user_id: int | None = None
+    created_by_username: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    retired_at: datetime | None = None
+    retired_by_user_id: int | None = None
+    retired_by_username: str | None = None
+    retirement_reason: str | None = None
+
+
+class FindingTreatmentIn(BaseModel):
+    treatment_type: str
+    rationale: str
+    evidence_notes: str = ""
+    review_due_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+class TreatmentApproveIn(BaseModel):
+    review_notes: str | None = None
+
+
+class TreatmentReviewIn(BaseModel):
+    review_notes: str | None = None
+    review_due_at: datetime | None = None
+
+
+class TreatmentRevokeIn(BaseModel):
+    reason: str
+
+
+class FindingTreatmentOut(BaseModel):
+    id: int
+    tenant_id: int
+    asset_finding_id: int
+    treatment_type: str
+    status: str
+    display_status: str
+    rationale: str
+    evidence_notes: str
+    source: str
+    created_by_user_id: int | None = None
+    created_by_username: str | None = None
+    reviewed_by_user_id: int | None = None
+    reviewed_by_username: str | None = None
+    revoked_by_user_id: int | None = None
+    revoked_by_username: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    reviewed_at: datetime | None = None
+    review_due_at: datetime | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+    revocation_reason: str | None = None
+    review_notes: str | None = None
+    compensating_controls: list[CompensatingControlOut] = []
+
+
+class FrameworkIn(BaseModel):
+    slug: str
+    name: str
+    version: str
+    publisher: str = ""
+    description: str = ""
+    source_url: str = ""
+    source_release_date: date | None = None
+    source_metadata: dict[str, Any] = {}
+
+
+class FrameworkUpdateIn(BaseModel):
+    name: str | None = None
+    publisher: str | None = None
+    description: str | None = None
+    source_url: str | None = None
+    source_release_date: date | None = None
+    source_metadata: dict[str, Any] | None = None
+
+
+class ControlIn(BaseModel):
+    control_key: str
+    title: str
+    description: str = ""
+    family: str | None = None
+    source_metadata: dict[str, Any] = {}
+    sort_order: int | None = None
+
+
+class ControlUpdateIn(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    family: str | None = None
+    sort_order: int | None = None
+
+
+class ControlOut(BaseModel):
+    id: int
+    framework_id: int
+    control_key: str
+    family: str | None = None
+    title: str
+    description: str
+    source_metadata: dict[str, Any] = {}
+    sort_order: int | None = None
+    archived_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    framework_slug: str | None = None
+    framework_name: str | None = None
+    framework_version: str | None = None
+    framework_publisher: str | None = None
+
+
+class FrameworkOut(BaseModel):
+    id: int
+    slug: str
+    name: str
+    version: str
+    publisher: str
+    description: str
+    source_url: str
+    source_release_date: date | None = None
+    source_metadata: dict[str, Any] = {}
+    builtin: bool
+    archived_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    control_count: int = 0
+    mapping_disclaimer: str = (
+        "A control mapping means this evidence is related to the selected control. "
+        "It does not mean the control is implemented, assessed, satisfied, or certified."
+    )
+
+
+class FrameworkDetailOut(FrameworkOut):
+    controls: list[ControlOut] = []
+
+
+class ControlReferenceIn(BaseModel):
+    control_id: int
+    subject_type: str
+    subject_id: int
+    reference_type: str = "related"
+    notes: str = ""
+
+
+class ControlReferenceRemoveIn(BaseModel):
+    reason: str
+
+
+class ControlReferenceOut(BaseModel):
+    id: int
+    tenant_id: int
+    control_id: int
+    subject_type: str
+    subject_id: int
+    reference_type: str
+    notes: str
+    created_by_user_id: int | None = None
+    created_by_username: str | None = None
+    created_at: datetime
+    removed_at: datetime | None = None
+    removed_by_user_id: int | None = None
+    removed_by_username: str | None = None
+    removal_reason: str | None = None
+    control_key: str
+    control_title: str
+    control_family: str | None = None
+    framework_name: str
+    framework_version: str
+    framework_slug: str
+    mapping_disclaimer: str = (
+        "A control mapping means this evidence is related to the selected control. "
+        "It does not mean the control is implemented, assessed, satisfied, or certified."
+    )
+
+
 SiteOut.model_rebuild()
 NetworkOut.model_rebuild()
 AssetListItem.model_rebuild()
 AssetDetail.model_rebuild()
+AssetFindingDetail.model_rebuild()
+FindingTreatmentOut.model_rebuild()
+

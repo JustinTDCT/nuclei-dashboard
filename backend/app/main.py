@@ -13,6 +13,7 @@ from app.routers import (
     alerts,
     assets,
     auth,
+    compliance,
     devices,
     exclusions,
     findings,
@@ -22,6 +23,7 @@ from app.routers import (
     sites,
     subnets,
     tenants,
+    treatments,
     users,
     wan_targets,
 )
@@ -68,6 +70,8 @@ app.include_router(exclusions.router, prefix="/api")
 app.include_router(devices.router, prefix="/api")
 app.include_router(assets.router, prefix="/api")
 app.include_router(findings.router, prefix="/api")
+app.include_router(treatments.router, prefix="/api")
+app.include_router(compliance.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(agent_api.router, prefix="/api")

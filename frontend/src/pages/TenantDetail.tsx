@@ -3,12 +3,14 @@ import { Link, useParams } from "react-router-dom";
 import { api, download } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
+import { ControlMapping } from "../components/ControlMapping";
 import { Alerts } from "./Alerts";
 import { formatUtc, useTimezone } from "../timezone";
 import type {
   Agent,
   AssetFinding,
   AssetFindingDetail,
+  FindingTreatment,
   AuthorizedWanTarget,
   Network,
   Scan,
@@ -832,6 +834,10 @@ function Scans({ tenantId }: { tenantId: number }) {
               2
             )}
           </pre>
+          <div>
+            <h4 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Related controls</h4>
+            <ControlMapping tenantId={tenantId} subjectType="scan_job" subjectId={selectedJob.id} />
+          </div>
         </div>
       )}
     </div>
@@ -849,25 +855,33 @@ function percentileLabel(value: number | null | undefined) {
 }
 
 function Findings({ tenantId }: { tenantId: number }) {
+  const { user } = useAuth();
+  const write = canWrite(user?.role);
   const { defaultTimezone } = useTimezone();
   const [rows, setRows] = useState<AssetFinding[]>([]);
   const [severity, setSeverity] = useState("");
   const [technicalState, setTechnicalState] = useState("open");
   const [priority, setPriority] = useState("");
   const [kev, setKev] = useState("");
+  const [treatmentState, setTreatmentState] = useState("");
+  const [reviewOverdue, setReviewOverdue] = useState("");
   const [selected, setSelected] = useState<AssetFindingDetail | null>(null);
+  const [evidenceId, setEvidenceId] = useState<number | null>(null);
   function load() {
     const qs = new URLSearchParams();
     if (severity) qs.set("severity", severity);
     if (technicalState) qs.set("technical_state", technicalState);
     if (priority) qs.set("priority", priority);
     if (kev) qs.set("kev", kev);
+    if (treatmentState) qs.set("treatment_state", treatmentState);
+    if (reviewOverdue) qs.set("treatment_review_overdue", reviewOverdue);
     api<AssetFinding[]>(`/api/tenants/${tenantId}/asset-findings?${qs}`).then(setRows);
   }
-  useEffect(load, [tenantId, severity, technicalState, priority, kev]);
+  useEffect(load, [tenantId, severity, technicalState, priority, kev, treatmentState, reviewOverdue]);
   async function openDetail(id: number) {
     const detail = await api<AssetFindingDetail>(`/api/tenants/${tenantId}/asset-findings/${id}`);
     setSelected(detail);
+    setEvidenceId(detail.evidence[0]?.id ?? null);
   }
   return (
     <div className="space-y-4">
@@ -908,6 +922,23 @@ function Findings({ tenantId }: { tenantId: number }) {
             <option value="false">Not KEV</option>
           </select>
         </div>
+        <div>
+          <label>Treatment</label>
+          <select value={treatmentState} onChange={(e) => setTreatmentState(e.target.value)}>
+            <option value="">All</option>
+            <option value="unaddressed">Unaddressed</option>
+            <option value="mitigated">Mitigated</option>
+            <option value="accepted_risk">Accepted risk</option>
+            <option value="false_positive">False positive</option>
+          </select>
+        </div>
+        <div>
+          <label>Review</label>
+          <select value={reviewOverdue} onChange={(e) => setReviewOverdue(e.target.value)}>
+            <option value="">All</option>
+            <option value="true">Review overdue</option>
+          </select>
+        </div>
         <button
           className="text-cyan-400 text-sm"
           onClick={() => download(`/api/tenants/${tenantId}/findings/export`, `detection-evidence-${tenantId}.csv`)}
@@ -919,7 +950,7 @@ function Findings({ tenantId }: { tenantId: number }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-900 text-slate-400 text-left">
             <tr>
-              {["Priority", "Asset", "Finding", "CVE / identity", "CVSS", "EPSS", "KEV", "State", "Last seen"].map((h) => (
+              {["Priority", "Asset", "Finding", "CVE / identity", "CVSS", "EPSS", "KEV", "State", "Treatment", "Last seen"].map((h) => (
                 <th key={h} className="px-3 py-2 font-medium">
                   {h}
                 </th>
@@ -929,7 +960,7 @@ function Findings({ tenantId }: { tenantId: number }) {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td className="px-3 py-4 text-slate-500" colSpan={9}>
+                <td className="px-3 py-4 text-slate-500" colSpan={10}>
                   None yet.
                 </td>
               </tr>
@@ -951,6 +982,9 @@ function Findings({ tenantId }: { tenantId: number }) {
                 <td className="px-3 py-2">{f.kev == null ? "—" : f.kev ? "KEV" : "No"}</td>
                 <td className="px-3 py-2">
                   <Badge value={f.technical_state} />
+                </td>
+                <td className="px-3 py-2">
+                  <Badge value={f.treatment_display_status || f.treatment_state} />
                 </td>
                 <td className="px-3 py-2">{formatUtc(f.last_seen, defaultTimezone)}</td>
               </tr>
@@ -1023,6 +1057,13 @@ function Findings({ tenantId }: { tenantId: number }) {
               <div>KEV fetched: {selected.kev_fetched_at ? formatUtc(selected.kev_fetched_at, defaultTimezone) : "—"}</div>
             </div>
           </section>
+          <TreatmentPanel
+            tenantId={tenantId}
+            selected={selected}
+            write={write}
+            timezone={defaultTimezone}
+            onChanged={() => openDetail(selected.id)}
+          />
           <div className="grid md:grid-cols-2 gap-2 text-sm text-slate-300">
             <div>First seen: {formatUtc(selected.first_seen, defaultTimezone)}</div>
             <div>Last seen: {formatUtc(selected.last_seen, defaultTimezone)}</div>
@@ -1051,17 +1092,226 @@ function Findings({ tenantId }: { tenantId: number }) {
             <Table
               headers={["When", "Severity", "Template", "Host", "Run"]}
               rows={selected.evidence.map((row) => [
-                formatUtc(row.found_at, defaultTimezone),
+                <button className="text-cyan-400" onClick={() => setEvidenceId(row.id)}>
+                  {formatUtc(row.found_at, defaultTimezone)}
+                </button>,
                 <Badge value={row.severity} />,
                 row.template_id || row.detector_key || "—",
                 row.host || row.matched_at || row.hostname || "—",
                 row.scan_job_id ? `#${row.scan_job_id}` : "—",
               ])}
             />
+            {evidenceId && (
+              <div className="mt-3">
+                <h5 className="text-sm font-medium mb-2">Related controls for detection evidence #{evidenceId}</h5>
+                <ControlMapping tenantId={tenantId} subjectType="finding" subjectId={evidenceId} />
+              </div>
+            )}
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+function treatmentLabel(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+function TreatmentPanel({
+  tenantId,
+  selected,
+  write,
+  timezone,
+  onChanged,
+}: {
+  tenantId: number;
+  selected: AssetFindingDetail;
+  write: boolean;
+  timezone: string;
+  onChanged: () => void;
+}) {
+  const current = selected.current_treatment;
+  const [kind, setKind] = useState("mitigated");
+  const [rationale, setRationale] = useState("");
+  const [notes, setNotes] = useState("");
+  const [controlName, setControlName] = useState("");
+  const [controlDesc, setControlDesc] = useState("");
+  const [reviewDue, setReviewDue] = useState("");
+  const [expires, setExpires] = useState("");
+  const [error, setError] = useState("");
+
+  async function createTreatment(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    try {
+      await api(`/api/tenants/${tenantId}/asset-findings/${selected.id}/treatments`, {
+        method: "POST",
+        body: JSON.stringify({
+          treatment_type: kind,
+          rationale,
+          evidence_notes: notes,
+          review_due_at: reviewDue ? new Date(reviewDue).toISOString() : null,
+          expires_at: expires ? new Date(expires).toISOString() : null,
+        }),
+      });
+      setRationale("");
+      setNotes("");
+      setReviewDue("");
+      setExpires("");
+      onChanged();
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "Unable to record treatment");
+    }
+  }
+
+  async function act(path: string, body: Record<string, string>) {
+    await api(`/api/tenants/${tenantId}/asset-findings/${selected.id}/treatments/${current?.id}/${path}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    onChanged();
+  }
+
+  return (
+    <section className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3">
+      <h4 className="text-sm uppercase tracking-wide text-slate-400">Treatment & Compliance</h4>
+      <p className="text-xs text-slate-500">
+        Technical state and treatment are separate. A documented mitigation or accepted risk does not resolve the
+        technical finding. Control mappings are evidence references, not a compliance or certification result.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Badge value={selected.treatment_state} />
+        <Badge value={selected.treatment_display_status || "unaddressed"} />
+      </div>
+      {current ? (
+        <div className="text-sm text-slate-300 space-y-1">
+          <div>Status: {treatmentLabel(current.display_status)}</div>
+          <div>Rationale: {current.rationale}</div>
+          <div>Created by: {current.created_by_username || "—"} · {formatUtc(current.created_at, timezone)}</div>
+          <div>Reviewed by: {current.reviewed_by_username || "—"} {current.reviewed_at ? `· ${formatUtc(current.reviewed_at, timezone)}` : ""}</div>
+          <div>Review due: {current.review_due_at ? formatUtc(current.review_due_at, timezone) : "—"}</div>
+          <div>Expires: {current.expires_at ? formatUtc(current.expires_at, timezone) : "—"}</div>
+          {current.evidence_notes && <div>Evidence notes: {current.evidence_notes}</div>}
+        </div>
+      ) : (
+        <div className="text-sm text-slate-500">No current treatment. This finding is unaddressed.</div>
+      )}
+      {write && (
+        <div className="flex flex-wrap gap-2">
+          {current?.status === "pending_review" && (
+            <button className="text-cyan-400 text-sm" onClick={() => act("approve", { review_notes: "Approved" })}>
+              Review / approve
+            </button>
+          )}
+          {current && (current.status === "active" || current.status === "pending_review") && (
+            <button
+              className="text-rose-300 text-sm"
+              onClick={() => {
+                const reason = window.prompt("Why is this treatment being revoked?");
+                if (reason) act("revoke", { reason });
+              }}
+            >
+              Revoke
+            </button>
+          )}
+        </div>
+      )}
+      <div>
+        <h5 className="text-sm font-medium mb-2">Compensating controls</h5>
+        {(current?.compensating_controls || []).length === 0 && <div className="text-sm text-slate-500">None documented.</div>}
+        {(current?.compensating_controls || []).map((row) => (
+          <div key={row.id} className="text-sm border border-slate-800 rounded p-2 mb-2">
+            <div className="flex gap-2">
+              <Badge value={row.status} />
+              <span>{row.name}</span>
+            </div>
+            <div className="text-slate-400">{row.description}</div>
+            {row.evidence_notes && <div>Evidence: {row.evidence_notes}</div>}
+            {write && current && row.status === "active" && (
+              <button
+                className="text-rose-300 text-sm"
+                onClick={() => {
+                  const reason = window.prompt("Why is this compensating control being retired?");
+                  if (!reason) return;
+                  api(
+                    `/api/tenants/${tenantId}/asset-findings/${selected.id}/treatments/${current.id}/compensating-controls/${row.id}/retire`,
+                    { method: "POST", body: JSON.stringify({ reason }) }
+                  ).then(onChanged);
+                }}
+              >
+                Retire
+              </button>
+            )}
+          </div>
+        ))}
+        {write && current && (
+          <form
+            className="grid md:grid-cols-3 gap-2"
+            onSubmit={async (event) => {
+              event.preventDefault();
+              await api(`/api/tenants/${tenantId}/asset-findings/${selected.id}/treatments/${current.id}/compensating-controls`, {
+                method: "POST",
+                body: JSON.stringify({ name: controlName, description: controlDesc }),
+              });
+              setControlName("");
+              setControlDesc("");
+              onChanged();
+            }}
+          >
+            <input className="w-full" placeholder="Control name" value={controlName} onChange={(e) => setControlName(e.target.value)} required />
+            <input className="w-full" placeholder="Description" value={controlDesc} onChange={(e) => setControlDesc(e.target.value)} />
+            <button className="text-cyan-400 text-sm">Add compensating control</button>
+          </form>
+        )}
+      </div>
+      <div>
+        <h5 className="text-sm font-medium mb-2">Related controls</h5>
+        <ControlMapping tenantId={tenantId} subjectType="asset_finding" subjectId={selected.id} />
+        {current && <ControlMapping tenantId={tenantId} subjectType="treatment" subjectId={current.id} />}
+      </div>
+      {(selected.treatments || []).length > 1 && (
+        <details className="text-sm text-slate-400">
+          <summary>Treatment history</summary>
+          {(selected.treatments || []).map((row: FindingTreatment) => (
+            <div key={row.id} className="py-1">
+              {treatmentLabel(row.treatment_type)} · {treatmentLabel(row.status)} · {formatUtc(row.created_at, timezone)}
+            </div>
+          ))}
+        </details>
+      )}
+      {write && (
+        <form className="space-y-2 border border-slate-800 rounded-lg p-3" onSubmit={createTreatment}>
+          <h5 className="text-sm font-medium">Document a treatment</h5>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className={`px-3 py-1 rounded ${kind === "mitigated" ? "bg-cyan-800" : "bg-slate-800"}`} onClick={() => setKind("mitigated")}>
+              Add mitigation
+            </button>
+            <button type="button" className={`px-3 py-1 rounded ${kind === "accepted_risk" ? "bg-cyan-800" : "bg-slate-800"}`} onClick={() => setKind("accepted_risk")}>
+              Accept risk
+            </button>
+            <button type="button" className={`px-3 py-1 rounded ${kind === "false_positive" ? "bg-cyan-800" : "bg-slate-800"}`} onClick={() => setKind("false_positive")}>
+              Mark false positive
+            </button>
+          </div>
+          <textarea className="w-full" placeholder="Rationale" value={rationale} onChange={(e) => setRationale(e.target.value)} required />
+          <textarea className="w-full" placeholder="Evidence notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+          <div className="grid md:grid-cols-2 gap-2">
+            <div>
+              <label>Review due</label>
+              <input className="w-full" type="datetime-local" value={reviewDue} onChange={(e) => setReviewDue(e.target.value)} />
+            </div>
+            <div>
+              <label>Expires</label>
+              <input className="w-full" type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)} />
+            </div>
+          </div>
+          {kind !== "mitigated" && <p className="text-xs text-slate-500">Accepted risk and false positive stay pending until explicitly reviewed.</p>}
+          {error && <div className="text-rose-300 text-sm">{error}</div>}
+          <button className="bg-cyan-700 text-white rounded-md px-3 py-1.5 text-sm">Save decision</button>
+        </form>
+      )}
+    </section>
   );
 }
 

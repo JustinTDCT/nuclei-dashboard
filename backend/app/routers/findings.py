@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import exists, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.auth import require_any
+from app.compliance import COMPLIANCE_MAPPING_DISCLAIMER, list_asset_finding_control_references
 from app.database import get_db
 from app.finding_lifecycle import (
     apply_severity_filter,
@@ -19,11 +21,14 @@ from app.intel.priority import (
     real_cwe_ids,
 )
 from app.models import (
+    TREATMENT_STATUS_ACTIVE,
+    TREATMENT_UNADDRESSED,
     Asset,
     AssetFinding,
     AssetFindingHistory,
     Device,
     Finding,
+    FindingTreatment,
     Tenant,
     User,
     Vulnerability,
@@ -31,7 +36,9 @@ from app.models import (
     VulnerabilityReference,
 )
 from app.routers.assets import _current_hostname
+from app.routers.compliance import serialize_reference
 from app.routers.devices import _finding_out
+from app.routers.treatments import serialize_treatment
 from app.schemas import (
     AssetFindingDetail,
     AssetFindingHistoryOut,
@@ -39,6 +46,7 @@ from app.schemas import (
     FindingOut,
     VulnerabilityIntelligenceOut,
 )
+from app.treatments import display_status, utcnow as treatment_utcnow
 
 router = APIRouter(tags=["findings"])
 
@@ -60,6 +68,7 @@ def _serialize_asset_finding(
     *,
     display: dict | None = None,
     intel_map: dict | None = None,
+    active_treatments: dict[int, FindingTreatment] | None = None,
 ) -> AssetFindingOut:
     vulnerability = row.vulnerability
     info = (display or {}).get(row.id) if display is not None else None
@@ -102,9 +111,31 @@ def _serialize_asset_finding(
         kev=intel.kev if intel else None,
         kev_date_added=intel.kev_date_added if intel else None,
         cwe_ids=cwe_ids,
+        treatment_display_status=_treatment_display(row, active_treatments),
+        treatment_review_due_at=(active_treatments or {}).get(row.id).review_due_at if (active_treatments or {}).get(row.id) else None,
+        treatment_expires_at=(active_treatments or {}).get(row.id).expires_at if (active_treatments or {}).get(row.id) else None,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def _treatment_display(row: AssetFinding, active_treatments: dict[int, FindingTreatment] | None) -> str:
+    current = (active_treatments or {}).get(row.id)
+    if current is not None:
+        return display_status(current)
+    return row.treatment_state or TREATMENT_UNADDRESSED
+
+
+def _active_treatments_for(db: Session, rows: list[AssetFinding]) -> dict[int, FindingTreatment]:
+    ids = [row.id for row in rows]
+    if not ids:
+        return {}
+    found = (
+        db.query(FindingTreatment)
+        .filter(FindingTreatment.asset_finding_id.in_(ids), FindingTreatment.status == TREATMENT_STATUS_ACTIVE)
+        .all()
+    )
+    return {item.asset_finding_id: item for item in found}
 
 
 def _get_tenant_asset_finding(db: Session, tenant_id: int, asset_finding_id: int) -> AssetFinding:
@@ -116,6 +147,7 @@ def _get_tenant_asset_finding(db: Session, tenant_id: int, asset_finding_id: int
             selectinload(AssetFinding.asset).selectinload(Asset.identifiers),
             selectinload(AssetFinding.evidence),
             selectinload(AssetFinding.history),
+            selectinload(AssetFinding.treatments).selectinload(FindingTreatment.compensating_controls),
         )
         .filter(AssetFinding.id == asset_finding_id, AssetFinding.tenant_id == tenant_id)
         .first()
@@ -200,6 +232,8 @@ def list_asset_findings(
     cve_id: str | None = None,
     priority: str | None = None,
     kev: bool | None = None,
+    treatment_state: str | None = None,
+    treatment_review_overdue: bool | None = None,
     _: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -214,6 +248,19 @@ def list_asset_findings(
     )
     if technical_state:
         query = query.filter(AssetFinding.technical_state == technical_state)
+    if treatment_state:
+        query = query.filter(AssetFinding.treatment_state == treatment_state)
+    if treatment_review_overdue:
+        now = treatment_utcnow()
+        query = query.filter(
+            exists().where(
+                FindingTreatment.asset_finding_id == AssetFinding.id,
+                FindingTreatment.status == TREATMENT_STATUS_ACTIVE,
+                FindingTreatment.review_due_at.isnot(None),
+                FindingTreatment.review_due_at <= now,
+                or_(FindingTreatment.expires_at.is_(None), FindingTreatment.expires_at > now),
+            )
+        )
     if asset_id:
         query = query.filter(AssetFinding.asset_id == asset_id)
     if vulnerability_id:
@@ -234,7 +281,11 @@ def list_asset_findings(
     )
     display = load_asset_finding_display(db, rows)
     intel_map = load_finding_intelligence(db, rows)
-    return [_serialize_asset_finding(db, row, display=display, intel_map=intel_map) for row in rows]
+    active_treatments = _active_treatments_for(db, rows)
+    return [
+        _serialize_asset_finding(db, row, display=display, intel_map=intel_map, active_treatments=active_treatments)
+        for row in rows
+    ]
 
 
 @router.get("/tenants/{tenant_id}/asset-findings/{asset_finding_id}", response_model=AssetFindingDetail)
@@ -326,6 +377,7 @@ def _load_asset_finding(db: Session, asset_finding_id: int) -> AssetFinding:
             selectinload(AssetFinding.asset).selectinload(Asset.identifiers),
             selectinload(AssetFinding.evidence),
             selectinload(AssetFinding.history),
+            selectinload(AssetFinding.treatments).selectinload(FindingTreatment.compensating_controls),
         )
         .filter(AssetFinding.id == asset_finding_id)
         .first()
@@ -338,10 +390,14 @@ def _load_asset_finding(db: Session, asset_finding_id: int) -> AssetFinding:
 def _asset_finding_detail(db: Session, row: AssetFinding) -> AssetFindingDetail:
     mapping = nuclei_mapping_for(db, row.vulnerability_id)
     intel_map = load_finding_intelligence(db, [row])
-    base = _serialize_asset_finding(db, row, intel_map=intel_map)
+    treatments = sorted(row.treatments, key=lambda item: (item.created_at, item.id))
+    active = {item.asset_finding_id: item for item in treatments if item.status == TREATMENT_STATUS_ACTIVE}
+    base = _serialize_asset_finding(db, row, intel_map=intel_map, active_treatments=active)
     intel = (intel_map.get(row.id) or {}).get("intel")
     history = sorted(row.history, key=lambda item: (item.occurred_at, item.id))
     evidence = sorted(row.evidence, key=lambda item: (item.found_at, item.id), reverse=True)
+    current = active.get(row.id)
+    refs = list_asset_finding_control_references(db, tenant_id=row.tenant_id, asset_finding=row)
     return AssetFindingDetail(
         **base.model_dump(),
         description=row.vulnerability.description or "",
@@ -360,6 +416,10 @@ def _asset_finding_detail(db: Session, row: AssetFinding) -> AssetFindingDetail:
         priority_explanation=row.priority_explanation,
         history=[AssetFindingHistoryOut.model_validate(item) for item in history],
         evidence=[_finding_out(item) for item in evidence],
+        current_treatment=serialize_treatment(db, current) if current else None,
+        treatments=[serialize_treatment(db, item) for item in treatments],
+        control_references=[serialize_reference(db, item) for item in refs],
+        mapping_disclaimer=COMPLIANCE_MAPPING_DISCLAIMER,
     )
 
 

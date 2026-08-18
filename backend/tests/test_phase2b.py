@@ -13,6 +13,7 @@ from tests.test_phase2a import _finding_payload, _run_detected
 
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
+PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
 CVE = "CVE-2024-1234"
 
 
@@ -111,7 +112,7 @@ def test_fresh_db_reaches_0010(reset_db):
     from sqlalchemy import inspect
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE2B_HEAD
+    assert revision == head_revision() == current_revision() == PHASE2C_HEAD
     tables = set(inspect(engine).get_table_names())
     assert {
         "vulnerability_intelligence",

@@ -5,6 +5,7 @@ import { Layout } from "./components/Layout";
 import { AdminSettings } from "./pages/AdminSettings";
 import { AdminUsers } from "./pages/AdminUsers";
 import { Alerts } from "./pages/Alerts";
+import { Compliance } from "./pages/Compliance";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { TenantDetail } from "./pages/TenantDetail";
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="tenants" element={<Tenants />} />
         <Route path="tenants/:id" element={<TenantDetail />} />
         <Route path="alerts" element={<Alerts />} />
+        <Route path="compliance" element={<Compliance />} />
         <Route
           path="admin/users"
           element={

@@ -1473,8 +1473,9 @@ def _merge_duplicate_asset_findings(
         stamps = [stamp for stamp in (keeper.resolved_at, donor.resolved_at) if stamp]
         keeper.resolved_at = max(stamps) if stamps else keeper.resolved_at
         keeper.consecutive_clean_scans = max(keeper.consecutive_clean_scans or 0, donor.consecutive_clean_scans or 0)
-    if keeper.treatment_state != donor.treatment_state:
-        keeper.treatment_state = TREATMENT_UNADDRESSED
+    from app.treatments import merge_finding_treatments
+
+    merge_finding_treatments(db, keeper=keeper, donor=donor, now=now)
     keeper.updated_at = now
     db.query(Finding).filter(Finding.asset_finding_id == donor.id).update(
         {

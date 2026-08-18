@@ -16,5 +16,8 @@ build/
 .vscode/
 frontend/dist/
 data/
+!backend/app/data/
+!backend/app/data/compliance/
+!backend/app/data/compliance/**
 postgres-data/
 certs/
