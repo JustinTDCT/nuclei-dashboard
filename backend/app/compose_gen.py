@@ -15,9 +15,9 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
 #
 # TLS verification is on by default (TLS_VERIFY=1).
 # Publicly trusted certificates: no extra files.
-# Internal CA: copy the CA PEM to ./certs/ca.pem next to this file, then set
+# Internal CA: copy the CA PEM to ./agent-certs/ca.pem next to this file, then set
 #   TLS_CA_FILE=/certs/ca.pem
-# in agent.env. The ./certs directory is mounted into the container at /certs.
+# in agent.env. The ./agent-certs directory is mounted into the container at /certs.
 # Lab opt-out only: TLS_VERIFY=0
 
 services:
@@ -38,7 +38,7 @@ services:
     volumes:
       - agent-keys:/data
       - nuclei-templates:/root/nuclei-templates
-      - ${{TLS_CA_HOST_DIR:-./certs}}:/certs:ro
+      - ${{TLS_CA_HOST_DIR:-./agent-certs}}:/certs:ro
 
 volumes:
   agent-keys:
@@ -54,6 +54,6 @@ def agent_env(agent: Agent, central_url: str, include_secret: bool = True) -> st
     if include_secret and agent.enrollment_secret:
         lines.append(f"ENROLLMENT_SECRET={agent.enrollment_secret}")
     lines.append(f"TLS_VERIFY={settings.agent_tls_verify}")
-    lines.append("# Optional internal CA. Copy the PEM to ./certs/ca.pem, then:")
+    lines.append("# Optional internal CA. Copy the PEM to ./agent-certs/ca.pem, then:")
     lines.append("# TLS_CA_FILE=/certs/ca.pem")
     return "\n".join(lines) + "\n"

@@ -69,10 +69,12 @@ Publicly trusted certificates need no extra agent configuration.
 Internal CA: keep verification **on**. The CA file must be visible **inside the agent container**.
 
 1. On the agent host, next to `docker-compose.yml`:
-   `mkdir -p certs && cp /path/on/host/your-ca.pem certs/ca.pem`
+   `mkdir -p agent-certs && cp /path/on/host/your-ca.pem agent-certs/ca.pem`
 2. In `agent.env` (or the environment):
    `TLS_CA_FILE=/certs/ca.pem`
-3. The stock/generated compose bind-mounts `${TLS_CA_HOST_DIR:-./certs}` to `/certs`.
+3. The stock/generated compose bind-mounts `${TLS_CA_HOST_DIR:-./agent-certs}` to `/certs`.
+
+Keep agent trust material in `./agent-certs`. Caddy's `./certs` directory is only for the server `cert.pem` / `key.pem` and must not be mounted into the agent.
 
 `TLS_CA_FILE` is a container path. A host path such as `/home/tech/ca.pem` is not visible unless that file is mounted into the container. `--env-file` only sets variables that the compose file passes through; the stock file passes `TLS_CA_FILE`.
 

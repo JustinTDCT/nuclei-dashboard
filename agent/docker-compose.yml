@@ -7,9 +7,10 @@
 # Linux sites should keep network_mode: host so LAN subnets are reachable.
 #
 # TLS verification is on by default. For an internal CA:
-#   mkdir -p certs && cp /path/on/host/ca.pem certs/ca.pem
+#   mkdir -p agent-certs && cp /path/on/host/ca.pem agent-certs/ca.pem
 #   set TLS_CA_FILE=/certs/ca.pem in agent.env
-# The host ./certs directory is mounted at /certs in the container.
+# The host ./agent-certs directory is mounted at /certs in the container.
+# Do not reuse the central server's ./certs directory (that holds cert.pem/key.pem).
 
 services:
   nuclei-agent:
@@ -30,7 +31,7 @@ services:
     volumes:
       - agent-keys:/data
       - nuclei-templates:/root/nuclei-templates
-      - ${TLS_CA_HOST_DIR:-./certs}:/certs:ro
+      - ${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro
 
 volumes:
   agent-keys:

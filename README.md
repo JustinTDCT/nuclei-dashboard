@@ -27,7 +27,7 @@ The **central** stack is this repo (`backend/`, `frontend/`, `scan_runtime/`, `C
 
 Open `https://localhost:8118` and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. Caddy serves HTTPS with `./certs/cert.pem` and `./certs/key.pem`. Set `SITE_ADDRESS` and `PUBLIC_URL` to `https://your-hostname:8118` if the dashboard is reached by a name other than localhost.
 
-Agent TLS verification is **on** by default. Publicly trusted certificates need no extra agent files. For a private/internal CA, copy the CA PEM to `./certs/ca.pem` on the agent host and set `TLS_CA_FILE=/certs/ca.pem` (that path is inside the container; `./certs` is bind-mounted). Lab opt-out only: `AGENT_TLS_VERIFY=0` / `TLS_VERIFY=0`. See `docs/DEVELOPMENT.md`.
+Agent TLS verification is **on** by default. Publicly trusted certificates need no extra agent files. For a private/internal CA, copy the CA PEM to `./agent-certs/ca.pem` on the agent host and set `TLS_CA_FILE=/certs/ca.pem` (container path; host `./agent-certs` is bind-mounted). Do not reuse Caddy's `./certs` directory, which holds `cert.pem` / `key.pem`. Lab opt-out only: `AGENT_TLS_VERIFY=0` / `TLS_VERIFY=0`. See `docs/DEVELOPMENT.md`.
 
 ## Typical workflow
 

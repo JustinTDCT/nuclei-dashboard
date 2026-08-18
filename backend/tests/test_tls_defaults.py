@@ -29,7 +29,8 @@ def test_generated_agent_config_verifies_tls_by_default(monkeypatch):
     env = agent_env(agent, "https://dashboard.example.com:8118")
     assert "TLS_VERIFY: \"${TLS_VERIFY:-1}\"" in compose or "TLS_VERIFY: ${TLS_VERIFY:-1}" in compose
     assert "TLS_CA_FILE: ${TLS_CA_FILE:-}" in compose
-    assert "${TLS_CA_HOST_DIR:-./certs}:/certs:ro" in compose
+    assert "${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro" in compose
+    assert "${TLS_CA_HOST_DIR:-./certs}:/certs:ro" not in compose
     assert "TLS_VERIFY=1" in env
     assert "TLS_CA_FILE=/certs/ca.pem" in env
     assert "ENROLLMENT_SECRET: secret-value" in compose
@@ -62,15 +63,19 @@ def test_compose_files_default_tls_verify_on():
     assert "AGENT_TLS_VERIFY:-1" in root_compose
     assert "AGENT_TLS_VERIFY:-0" not in root_compose
     assert "TLS_CA_FILE: ${TLS_CA_FILE:-}" in root_compose
-    assert "${TLS_CA_HOST_DIR:-./certs}:/certs:ro" in root_compose
+    assert "${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro" in root_compose
+    assert "${TLS_CA_HOST_DIR:-./certs}:/certs:ro" not in root_compose
+    assert "./certs:/etc/caddy/certs:ro" in root_compose
     assert "TLS_VERIFY:-1" in agent_compose_file
     assert "TLS_VERIFY:-0" not in agent_compose_file
     assert "TLS_CA_FILE: ${TLS_CA_FILE:-}" in agent_compose_file
-    assert "${TLS_CA_HOST_DIR:-./certs}:/certs:ro" in agent_compose_file
+    assert "${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro" in agent_compose_file
     assert 'TLS_VERIFY: "1"' in template
     assert 'TLS_VERIFY: "0"' not in template
     assert "TLS_CA_FILE: ${TLS_CA_FILE:-}" in template
+    assert "${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro" in template
     assert "AGENT_TLS_VERIFY=1" in example
+    assert "agent-certs/ca.pem" in example
 
 
 def test_agent_client_tls_verify_default_and_opt_out(monkeypatch):

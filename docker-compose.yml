@@ -82,7 +82,7 @@ services:
     volumes:
       - agent-keys:/data
       - nuclei-templates:/root/nuclei-templates
-      - ${TLS_CA_HOST_DIR:-./certs}:/certs:ro
+      - ${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro
 
   caddy:
     image: caddy:2-alpine

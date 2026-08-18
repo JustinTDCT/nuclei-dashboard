@@ -78,7 +78,7 @@ def test_admin_and_user_can_download_deployment_material(reset_db):
             assert "${TLS_VERIFY:-1}" in compose.text
             assert "TLS_VERIFY=1" in env.text
             assert "TLS_CA_FILE" in compose.text
-            assert "${TLS_CA_HOST_DIR:-./certs}:/certs:ro" in compose.text
+            assert "${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro" in compose.text
 
 
 @requires_postgres
