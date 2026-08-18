@@ -962,3 +962,81 @@ def test_builtin_import_rejects_checksum_mismatch(reset_db):
         assert db.query(ComplianceFramework).count() == before
     finally:
         db.close()
+
+
+@requires_postgres
+def test_cannot_activate_treatment_that_has_already_expired(reset_db):
+    from app.database import SessionLocal
+    from app.models import AssetFinding, AuditLog, FindingTreatment
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        tenant_id = world["tenant"]["id"]
+        opened = _open_finding(client, token, world)
+        af_id = opened["asset_findings"][0]["id"]
+        headers = _headers(token)
+        mitigation = client.post(
+            _treat_url(tenant_id, af_id),
+            headers=headers,
+            json={"treatment_type": "mitigated", "rationale": "Current compensating ACL"},
+        )
+        assert mitigation.status_code == 200, mitigation.text
+        past = client.post(
+            _treat_url(tenant_id, af_id),
+            headers=headers,
+            json={
+                "treatment_type": "mitigated",
+                "rationale": "Already expired ACL",
+                "expires_at": (_now() - timedelta(minutes=1)).isoformat(),
+            },
+        )
+        assert past.status_code in {400, 422}
+
+        def _reject_expired_pending(treatment_type: str):
+            pending = client.post(
+                _treat_url(tenant_id, af_id),
+                headers=headers,
+                json={
+                    "treatment_type": treatment_type,
+                    "rationale": f"Document {treatment_type}",
+                    "expires_at": (_now() + timedelta(days=1)).isoformat(),
+                },
+            )
+            assert pending.status_code == 200, pending.text
+            assert pending.json()["status"] == "pending_review"
+            db = SessionLocal()
+            try:
+                row = db.get(FindingTreatment, pending.json()["id"])
+                row.expires_at = _now() - timedelta(minutes=1)
+                db.commit()
+            finally:
+                db.close()
+            approved = client.post(
+                _treat_url(tenant_id, af_id, f"/{pending.json()['id']}/approve"),
+                headers=headers,
+                json={"review_notes": "Too late"},
+            )
+            assert approved.status_code == 400
+            assert "expired" in approved.text.lower()
+            db = SessionLocal()
+            try:
+                finding = db.get(AssetFinding, af_id)
+                row = db.get(FindingTreatment, pending.json()["id"])
+                current = db.get(FindingTreatment, mitigation.json()["id"])
+                assert finding.technical_state == "open"
+                assert finding.treatment_state == "mitigated"
+                assert row.status == "pending_review"
+                assert current.status == "active"
+                audits = db.query(AuditLog).filter(AuditLog.object_id == row.id).all()
+                assert not any(item.action == "treatment.approved" for item in audits)
+                assert not any(item.action == "treatment.superseded" for item in audits)
+                assert not any(
+                    item.action == "treatment.superseded" and item.object_id == current.id
+                    for item in db.query(AuditLog).filter(AuditLog.object_id == current.id).all()
+                )
+            finally:
+                db.close()
+
+        _reject_expired_pending("accepted_risk")
+        _reject_expired_pending("false_positive")

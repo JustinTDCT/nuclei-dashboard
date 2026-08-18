@@ -217,7 +217,7 @@ This product uses the NVD API but is not endorsed or certified by the NVD.
 - **Treatment projection** is `unaddressed` when there is no currently effective treatment.
 - **Mitigation** may become active immediately when rationale is supplied. Compensating controls are optional documentation.
 - **Accepted risk** and **false positive** start as `pending_review`. They do not change the projection until an Admin or User explicitly approves them. The reviewer is recorded. Separation of duties is not required.
-- A finding has at most one `active` treatment. Activating a new treatment supersedes the previous active record. A pending record does not supersede an active one.
+- A finding has at most one `active` treatment. Activating a new treatment supersedes the previous active record. A pending record does not supersede an active one. A treatment whose `expires_at` is already due cannot be created or approved; it is never made `active`.
 - **Revoke** and **expire** preserve history. The projection returns to `unaddressed` unless another effective treatment remains. Scheduler expiration runs every 15 minutes; GET endpoints compute `review_overdue` / `expired` display status without mutating rows. Treatment writes also expire any active row whose `expires_at` has already passed, so the persisted history records `expired` rather than `superseded` during the scheduler gap.
 - **Review due** is not expiration. Past `review_due_at` with a future `expires_at` stays active and is marked review overdue.
 - **Compensating controls** belong to a treatment. They are retired, not deleted.

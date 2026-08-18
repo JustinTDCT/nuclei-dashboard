@@ -236,6 +236,14 @@ def _supersede_current(
     return current
 
 
+def _require_expiration_not_due(expires_at: datetime | None, now: datetime, *, approve: bool) -> None:
+    expires = _aware(expires_at)
+    if expires is not None and expires <= now:
+        if approve:
+            raise TreatmentError("Treatment has already expired and cannot be approved")
+        raise TreatmentError("Expiration is already due; the treatment cannot be created")
+
+
 def _activate(
     db: Session,
     finding: AssetFinding,
@@ -244,6 +252,7 @@ def _activate(
     actor: User | None,
     now: datetime,
 ) -> None:
+    _require_expiration_not_due(treatment.expires_at, now, approve=True)
     _supersede_current(db, finding, treatment, actor=actor, now=now)
     treatment.status = TREATMENT_STATUS_ACTIVE
     treatment.updated_at = now
@@ -274,6 +283,7 @@ def create_treatment(
     if source not in TREATMENT_SOURCES:
         raise TreatmentError("Unsupported treatment source")
     now = utcnow()
+    _require_expiration_not_due(expires_at, now, approve=False)
     finding = _lock_finding(db, tenant_id, asset_finding_id)
     row = FindingTreatment(
         tenant_id=finding.tenant_id,
@@ -330,6 +340,7 @@ def approve_treatment(
     treatment = _get_treatment(db, tenant_id, asset_finding_id, treatment_id)
     if treatment.status != TREATMENT_STATUS_PENDING_REVIEW:
         raise TreatmentError("Only treatments pending review can be approved")
+    _require_expiration_not_due(treatment.expires_at, now, approve=True)
     treatment.reviewed_by_user_id = actor.id
     treatment.reviewed_at = now
     if review_notes is not None:

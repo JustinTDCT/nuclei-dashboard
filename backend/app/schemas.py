@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -854,6 +854,16 @@ class FindingTreatmentIn(BaseModel):
     evidence_notes: str = ""
     review_due_at: datetime | None = None
     expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def expires_at_must_be_in_the_future(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return value
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if aware <= datetime.now(timezone.utc):
+            raise ValueError("expires_at must be in the future")
+        return value
 
 
 class TreatmentApproveIn(BaseModel):
