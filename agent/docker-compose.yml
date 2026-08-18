@@ -1,0 +1,30 @@
+# Site agent. Credentials come from a sibling .env (download from the dashboard).
+#   curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/JustinTDCT/nuclei-dashboard/main/agent/docker-compose.yml
+#   docker compose --env-file agent.env up -d --build
+#
+# Docker clones scan_runtime from this public repo and builds the image.
+# Rebuild after we push agent changes: docker compose up -d --build
+# Linux sites should keep network_mode: host so LAN subnets are reachable.
+
+services:
+  nuclei-agent:
+    image: nuclei-dashboard-agent:latest
+    pull_policy: build
+    build:
+      context: https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime
+    command: ["python", "agent_main.py"]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CENTRAL_URL: ${CENTRAL_URL}
+      AGENT_UUID: ${AGENT_UUID}
+      ENROLLMENT_SECRET: ${ENROLLMENT_SECRET:-}
+      TLS_VERIFY: ${TLS_VERIFY:-0}
+      SCAN_DRY_RUN: "0"
+    volumes:
+      - agent-keys:/data
+      - nuclei-templates:/root/nuclei-templates
+
+volumes:
+  agent-keys:
+  nuclei-templates:

@@ -199,9 +199,18 @@ function Agents({ tenantId }: { tenantId: number }) {
           {created.enrollment_secret && (
             <div className="font-mono text-xs break-all">Enrollment secret: {created.enrollment_secret}</div>
           )}
-          <button className="text-cyan-400" onClick={() => download(`/api/agents/${created.id}/compose`, `agent-${created.uuid}.yml`)}>
-            Download docker-compose.yml
-          </button>
+          <p className="text-slate-300">
+            On the LAN host run <span className="font-mono text-xs">docker compose up -d --build</span>. Docker
+            pulls <span className="font-mono text-xs">scan_runtime</span> from GitHub and builds the agent.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <button className="text-cyan-400" onClick={() => download(`/api/agents/${created.id}/compose`, `agent-${created.uuid}.yml`)}>
+              Download docker-compose.yml
+            </button>
+            <button className="text-cyan-400" onClick={() => download(`/api/agents/${created.id}/env`, `agent-${created.uuid}.env`)}>
+              Download .env
+            </button>
+          </div>
         </div>
       )}
       <Table
@@ -218,6 +227,9 @@ function Agents({ tenantId }: { tenantId: number }) {
           <div className="flex flex-col items-end gap-1 text-sm">
             <button className="text-cyan-400" onClick={() => download(`/api/agents/${a.id}/compose`, `agent-${a.uuid}.yml`)}>
               Compose
+            </button>
+            <button className="text-cyan-400" onClick={() => download(`/api/agents/${a.id}/env`, `agent-${a.uuid}.env`)}>
+              Env
             </button>
             {write && a.status === "pending_approval" && (
               <button className="text-emerald-300" onClick={() => api(`/api/agents/${a.id}/approve`, { method: "POST" }).then(load)}>

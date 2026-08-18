@@ -43,7 +43,7 @@ export function AdminSettings() {
       <div>
         <h1 className="text-2xl font-semibold">System settings</h1>
         <p className="text-slate-400 text-sm">
-          Central URL used in downloaded agent compose files, plus SMTP and inventory defaults.
+          Central URL agents phone home to (baked into downloaded compose), plus SMTP and inventory defaults. Agents build from the public GitHub repo.
         </p>
       </div>
       <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-2 gap-3">

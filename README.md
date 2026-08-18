@@ -21,7 +21,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Copy the **whole repo** to the server (`backend/`, `frontend/`, `scan_runtime/`, `Caddyfile`, `certs/`). The agent/scanner image is built locally — it is not on Docker Hub. On first start use `--build` so Compose does not try to pull `nuclei-dashboard-agent`.
+The **central** stack is this repo (`backend/`, `frontend/`, `scan_runtime/`, `Caddyfile`, `certs/`). On first start use `--build`. Site agents do **not** need a copy of the whole tree — they build `scan_runtime` from GitHub.
 
 Open `https://localhost:8118` and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. The first visit will warn about Caddy's internal certificate — continue past it. Set `SITE_ADDRESS` and `PUBLIC_URL` to `https://your-hostname:8118` if the dashboard is reached by a name other than localhost.
 
@@ -29,7 +29,7 @@ Open `https://localhost:8118` and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWOR
 
 1. Create a tenant (client)
 2. Add WAN and/or LAN CIDRs
-3. Create a site agent, download its `docker-compose.yml`, and start it on the remote LAN
+3. Create a site agent, download its compose (or `.env` + `agent/docker-compose.yml`), and start it on the remote LAN with `--build`
 4. Approve the agent once it appears as `pending approval`
 5. Create a scan (manual or interval) and run it
 6. Review devices (new / known / stale), findings, and alerts
@@ -38,14 +38,23 @@ New devices and impersonation attempts create in-app alerts and email staff when
 
 ## Site agent
 
-The UI generates a compose file per agent. Build/push the shared image first:
+The UI generates a compose file per agent. On the site host:
 
 ```bash
-docker compose build scanner
-# tags nuclei-dashboard-agent:latest
+docker compose up -d --build
 ```
 
-Copy that image to the site (registry or `docker save` / `docker load`), then run the downloaded compose file. Linux sites should keep `network_mode: host` so LAN subnets are reachable.
+Docker clones [`scan_runtime`](https://github.com/JustinTDCT/nuclei-dashboard/tree/main/scan_runtime) from the public repo and builds `nuclei-dashboard-agent:latest`. No image copy or `docker save` is required. After we push agent changes, run the same `--build` again.
+
+Alternatively, download only the `.env` from the dashboard and use the compose file in the repo:
+
+```bash
+curl -fsSL -o docker-compose.yml \
+  https://raw.githubusercontent.com/JustinTDCT/nuclei-dashboard/main/agent/docker-compose.yml
+docker compose --env-file agent.env up -d --build
+```
+
+Linux sites should keep `network_mode: host` so LAN subnets are reachable. The first build downloads naabu/httpx/nuclei and takes several minutes.
 
 The agent stores its private key on a Docker volume. Losing that volume after approval means the agent cannot be reused — create a new agent.
 

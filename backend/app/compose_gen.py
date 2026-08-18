@@ -7,13 +7,18 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
     if include_secret and agent.enrollment_secret:
         secret_line = f"      ENROLLMENT_SECRET: {agent.enrollment_secret}\n"
     return f"""# Site agent for {agent.name} ({agent.uuid})
-# Copy this file to the remote site and run: docker compose up -d
-# The agent only makes outbound HTTPS to the central server.
+# On the LAN host (outbound HTTPS to GitHub and {central_url}):
+#   docker compose up -d --build
+# Docker clones scan_runtime from the public repo and builds the image.
+# After we push agent changes: docker compose up -d --build
 # Linux sites should keep network_mode: host so LAN subnets are reachable.
 
 services:
   nuclei-agent:
     image: {settings.agent_image}
+    pull_policy: build
+    build:
+      context: {settings.agent_git_context}
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host

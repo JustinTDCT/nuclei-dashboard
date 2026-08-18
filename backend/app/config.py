@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     admin_email: str = "admin@localhost"
     public_url: str = "https://10.150.10.155:8118"
     agent_image: str = "nuclei-dashboard-agent:latest"
+    agent_git_context: str = (
+        "https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime"
+    )
     agent_tls_verify: str = "0"
     cors_origins: str = "http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118"
 

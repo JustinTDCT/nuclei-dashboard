@@ -1,9 +1,12 @@
-# Generated per agent by the dashboard. This file is a reference template.
-# The live file downloaded from the UI includes the agent UUID and enrollment secret.
+# Reference only. Prefer agent/docker-compose.yml plus a downloaded .env,
+# or the per-agent compose file from the dashboard.
 
 services:
   nuclei-agent:
     image: nuclei-dashboard-agent:latest
+    pull_policy: build
+    build:
+      context: https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
