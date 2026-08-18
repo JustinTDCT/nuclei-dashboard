@@ -44,6 +44,20 @@ export function Home() {
         <Card label="New devices" value={data.new_devices} />
         <Card label="Open alerts" value={data.open_alerts} to="/alerts" />
       </div>
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <h2 className="font-medium mb-3">Open findings by operational priority</h2>
+        <p className="text-xs text-slate-500 mb-3">
+          P1–P4 is Nuclei Dashboard operational priority. Severity remains a separate metric.
+        </p>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {(["p1", "p2", "p3", "p4"] as const).map((priority) => (
+            <div key={priority} className="bg-slate-950 border border-slate-800 rounded-lg p-3">
+              <div className="text-xs uppercase tracking-wide text-slate-400">{priority.toUpperCase()}</div>
+              <div className="text-2xl font-semibold mt-1">{data.priorities?.[priority] || 0}</div>
+            </div>
+          ))}
+        </div>
+      </section>
       <div className="grid lg:grid-cols-2 gap-6">
         <section className="bg-slate-900 border border-slate-800 rounded-xl p-4">
           <h2 className="font-medium mb-3">Recent alerts</h2>

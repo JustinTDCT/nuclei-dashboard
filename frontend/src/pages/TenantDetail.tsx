@@ -90,6 +90,8 @@ function Overview({ tenantId }: { tenantId: number }) {
         <Stat label="Pending agents" value={data.agents.pending} />
         <Stat label="Critical findings" value={data.findings.critical || 0} />
         <Stat label="High findings" value={data.findings.high || 0} />
+        <Stat label="P1 findings" value={data.priorities?.p1 || 0} />
+        <Stat label="P2 findings" value={data.priorities?.p2 || 0} />
       </div>
     </div>
   );
@@ -836,19 +838,33 @@ function Scans({ tenantId }: { tenantId: number }) {
   );
 }
 
+function dash(value: string | number | null | undefined) {
+  if (value === null || value === undefined || value === "") return "—";
+  return String(value);
+}
+
+function percentileLabel(value: number | null | undefined) {
+  if (value === null || value === undefined) return "—";
+  return `${Math.round(value * 100)}th percentile`;
+}
+
 function Findings({ tenantId }: { tenantId: number }) {
   const { defaultTimezone } = useTimezone();
   const [rows, setRows] = useState<AssetFinding[]>([]);
   const [severity, setSeverity] = useState("");
   const [technicalState, setTechnicalState] = useState("open");
+  const [priority, setPriority] = useState("");
+  const [kev, setKev] = useState("");
   const [selected, setSelected] = useState<AssetFindingDetail | null>(null);
   function load() {
     const qs = new URLSearchParams();
     if (severity) qs.set("severity", severity);
     if (technicalState) qs.set("technical_state", technicalState);
+    if (priority) qs.set("priority", priority);
+    if (kev) qs.set("kev", kev);
     api<AssetFinding[]>(`/api/tenants/${tenantId}/asset-findings?${qs}`).then(setRows);
   }
-  useEffect(load, [tenantId, severity, technicalState]);
+  useEffect(load, [tenantId, severity, technicalState, priority, kev]);
   async function openDetail(id: number) {
     const detail = await api<AssetFindingDetail>(`/api/tenants/${tenantId}/asset-findings/${id}`);
     setSelected(detail);
@@ -865,12 +881,31 @@ function Findings({ tenantId }: { tenantId: number }) {
           </select>
         </div>
         <div>
+          <label>Priority</label>
+          <select value={priority} onChange={(e) => setPriority(e.target.value)}>
+            <option value="">All</option>
+            {["p1", "p2", "p3", "p4"].map((item) => (
+              <option key={item} value={item}>
+                {item.toUpperCase()}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
           <label>Severity</label>
           <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
             <option value="">All</option>
             {["critical", "high", "medium", "low", "info"].map((s) => (
               <option key={s}>{s}</option>
             ))}
+          </select>
+        </div>
+        <div>
+          <label>CISA KEV</label>
+          <select value={kev} onChange={(e) => setKev(e.target.value)}>
+            <option value="">All</option>
+            <option value="true">KEV</option>
+            <option value="false">Not KEV</option>
           </select>
         </div>
         <button
@@ -884,7 +919,7 @@ function Findings({ tenantId }: { tenantId: number }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-900 text-slate-400 text-left">
             <tr>
-              {["State", "Severity", "Asset", "Finding", "Identity", "Treatment", "First seen", "Last seen"].map((h) => (
+              {["Priority", "Asset", "Finding", "CVE / identity", "CVSS", "EPSS", "KEV", "State", "Last seen"].map((h) => (
                 <th key={h} className="px-3 py-2 font-medium">
                   {h}
                 </th>
@@ -894,7 +929,7 @@ function Findings({ tenantId }: { tenantId: number }) {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td className="px-3 py-4 text-slate-500" colSpan={8}>
+                <td className="px-3 py-4 text-slate-500" colSpan={9}>
                   None yet.
                 </td>
               </tr>
@@ -906,18 +941,17 @@ function Findings({ tenantId }: { tenantId: number }) {
                 onClick={() => openDetail(f.id)}
               >
                 <td className="px-3 py-2">
-                  <Badge value={f.technical_state} />
-                </td>
-                <td className="px-3 py-2">
-                  <Badge value={f.severity} />
+                  {f.priority ? <Badge value={f.priority} /> : <span className="text-slate-500">—</span>}
                 </td>
                 <td className="px-3 py-2">{f.asset_hostname || f.asset_display_name || `Asset #${f.asset_id}`}</td>
                 <td className="px-3 py-2">{f.title || "—"}</td>
                 <td className="px-3 py-2 font-mono text-xs">{f.identity_label}</td>
+                <td className="px-3 py-2">{dash(f.cvss_base_score)}</td>
+                <td className="px-3 py-2">{f.epss_score == null ? "—" : Number(f.epss_score).toFixed(3)}</td>
+                <td className="px-3 py-2">{f.kev == null ? "—" : f.kev ? "KEV" : "No"}</td>
                 <td className="px-3 py-2">
-                  <Badge value={f.treatment_state} />
+                  <Badge value={f.technical_state} />
                 </td>
-                <td className="px-3 py-2">{formatUtc(f.first_seen, defaultTimezone)}</td>
                 <td className="px-3 py-2">{formatUtc(f.last_seen, defaultTimezone)}</td>
               </tr>
             ))}
@@ -938,10 +972,57 @@ function Findings({ tenantId }: { tenantId: number }) {
             </button>
           </div>
           <div className="flex flex-wrap gap-2">
+            {selected.priority && <Badge value={selected.priority} />}
             <Badge value={selected.technical_state} />
             <Badge value={selected.severity} />
             <Badge value={selected.treatment_state} />
           </div>
+          <section className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-3">
+            <h4 className="text-sm uppercase tracking-wide text-slate-400">Intelligence & Priority</h4>
+            <div className="text-lg font-semibold">
+              {(selected.priority || "—").toUpperCase()}
+              {selected.priority_score != null ? ` — Score ${selected.priority_score}` : ""}
+            </div>
+            <p className="text-xs text-slate-500">
+              Nuclei Dashboard operational priority using NVD, FIRST EPSS, and CISA KEV as inputs. This is not an NVD,
+              FIRST, or CISA risk rating.
+            </p>
+            <div>
+              <h5 className="text-sm font-medium mb-2">Why this priority</h5>
+              <div className="space-y-1 text-sm">
+                {(selected.priority_explanation?.factors || []).map((factor, index) => (
+                  <div key={`${factor.factor}-${index}`} className="flex gap-3">
+                    <span className="w-12 text-slate-400">{factor.points && factor.points > 0 ? `+${factor.points}` : factor.points || "+0"}</span>
+                    <span>
+                      {factor.factor.replaceAll("_", " ")}
+                      {factor.value !== undefined && factor.value !== null && factor.value !== ""
+                        ? `: ${String(factor.value)}`
+                        : ""}
+                      {factor.note ? ` — ${factor.note}` : ""}
+                    </span>
+                  </div>
+                ))}
+                {(selected.priority_explanation?.overrides || []).map((item, index) => (
+                  <div key={`override-${index}`} className="text-rose-200">
+                    Override: {item.reason || item.type} → {(item.priority || "").toUpperCase()}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="grid md:grid-cols-2 gap-2 text-sm text-slate-300">
+              <div>CVSS: {dash(selected.cvss_base_score)} {selected.cvss_base_severity || ""} {selected.cvss_version ? `(v${selected.cvss_version})` : ""}</div>
+              <div>Vector: {dash(selected.cvss_vector)}</div>
+              <div>EPSS probability: {selected.epss_score == null ? "—" : Number(selected.epss_score).toFixed(4)}</div>
+              <div>EPSS percentile: {percentileLabel(selected.epss_percentile)}</div>
+              <div>CISA KEV: {selected.kev == null ? "—" : selected.kev ? "Yes" : "No"}</div>
+              <div>KEV added: {selected.kev_date_added || "—"}</div>
+              <div>Ransomware campaign use: {selected.kev_known_ransomware_campaign_use == null ? "—" : selected.kev_known_ransomware_campaign_use ? "Known" : "Unknown"}</div>
+              <div>CWE: {(selected.cwe_ids || []).join(", ") || "—"}</div>
+              <div>NVD fetched: {selected.nvd_fetched_at ? formatUtc(selected.nvd_fetched_at, defaultTimezone) : "—"}</div>
+              <div>EPSS fetched: {selected.epss_fetched_at ? formatUtc(selected.epss_fetched_at, defaultTimezone) : "—"}</div>
+              <div>KEV fetched: {selected.kev_fetched_at ? formatUtc(selected.kev_fetched_at, defaultTimezone) : "—"}</div>
+            </div>
+          </section>
           <div className="grid md:grid-cols-2 gap-2 text-sm text-slate-300">
             <div>First seen: {formatUtc(selected.first_seen, defaultTimezone)}</div>
             <div>Last seen: {formatUtc(selected.last_seen, defaultTimezone)}</div>

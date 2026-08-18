@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -389,6 +389,7 @@ class SettingsOut(BaseModel):
     scan_cap_nuclei_timeout: int = 30
     scan_cap_nuclei_retries: int = 5
     finding_resolution_clean_scans: int = 2
+    vulnerability_intelligence_enabled: bool = True
 
     @field_validator("finding_resolution_clean_scans")
     @classmethod
@@ -426,6 +427,18 @@ class AssetFindingOut(BaseModel):
     consecutive_clean_scans: int
     reopened_count: int
     evidence_count: int = 0
+    priority: str | None = None
+    priority_score: int | None = None
+    priority_model_version: str | None = None
+    cvss_version: str | None = None
+    cvss_base_score: float | None = None
+    cvss_base_severity: str | None = None
+    epss_score: float | None = None
+    epss_percentile: float | None = None
+    epss_score_date: date | None = None
+    kev: bool | None = None
+    kev_date_added: date | None = None
+    cwe_ids: list[str] = []
     created_at: datetime
     updated_at: datetime
 
@@ -444,10 +457,63 @@ class AssetFindingHistoryOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PriorityFactorOut(BaseModel):
+    factor: str
+    value: Any = None
+    points: int = 0
+    source: str | None = None
+    note: str | None = None
+    epss_score: float | None = None
+
+
+class VulnerabilityIntelligenceOut(BaseModel):
+    vulnerability_id: int
+    canonical_key: str
+    cve_id: str | None = None
+    title: str = ""
+    description: str = ""
+    nvd_status: str | None = None
+    nvd_published_at: datetime | None = None
+    nvd_last_modified_at: datetime | None = None
+    cvss_version: str | None = None
+    cvss_base_score: float | None = None
+    cvss_base_severity: str | None = None
+    cvss_vector: str | None = None
+    cvss_source: str | None = None
+    epss_score: float | None = None
+    epss_percentile: float | None = None
+    epss_score_date: date | None = None
+    epss_model_version: str | None = None
+    kev: bool | None = None
+    kev_date_added: date | None = None
+    kev_due_date: date | None = None
+    kev_required_action: str | None = None
+    kev_known_ransomware_campaign_use: bool | None = None
+    kev_vendor_project: str | None = None
+    kev_product: str | None = None
+    cwe_ids: list[str] = []
+    references: list[dict[str, Any]] = []
+    nvd_fetched_at: datetime | None = None
+    epss_fetched_at: datetime | None = None
+    kev_fetched_at: datetime | None = None
+    attribution: dict[str, str] = {}
+
+
 class AssetFindingDetail(AssetFindingOut):
     description: str = ""
     detector_type: str = ""
     detector_key: str = ""
+    cvss_vector: str | None = None
+    cvss_source: str | None = None
+    epss_model_version: str | None = None
+    kev_due_date: date | None = None
+    kev_required_action: str | None = None
+    kev_known_ransomware_campaign_use: bool | None = None
+    nvd_status: str | None = None
+    nvd_fetched_at: datetime | None = None
+    epss_fetched_at: datetime | None = None
+    kev_fetched_at: datetime | None = None
+    priority_explanation: dict[str, Any] | None = None
     history: list[AssetFindingHistoryOut] = []
     evidence: list[FindingOut] = []
 

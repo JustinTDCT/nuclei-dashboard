@@ -26,6 +26,7 @@ PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_INITIAL = "0007_vulnerability_finding_lifecycle"
 PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
+PHASE2B_HEAD = "0010_cve_intelligence_priority"
 FROZEN = (
     "0001_baseline_current_schema.py",
     "0002_sites_networks.py",
@@ -35,6 +36,7 @@ FROZEN = (
     "0006_scan_definition_execution.py",
     "0007_vulnerability_finding_lifecycle.py",
     "0008_phase2a_finding_identity_repair.py",
+    "0009_phase2a_detector_identity_partition.py",
 )
 VULN_STAGES = {
     "discovery": True,
@@ -150,7 +152,7 @@ def test_fresh_db_reaches_phase2a_head(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE2A_HEAD
+    assert revision == head_revision() == current_revision() == PHASE2B_HEAD
     tables = _tables(engine)
     assert {
         "vulnerabilities",
@@ -214,7 +216,7 @@ def test_downgrade_from_0009_is_refused(reset_db):
 
     from app.migrate import alembic_config, apply_schema
 
-    apply_schema()
+    command.upgrade(alembic_config(), PHASE2A_HEAD)
     try:
         command.downgrade(alembic_config(), PHASE2A_COVERAGE)
     except (CommandError, RuntimeError) as exc:
@@ -295,7 +297,7 @@ def test_0006_to_0007_preserves_legacy_findings_and_does_not_fabricate_resolutio
         ).scalar_one()
 
     command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE2A_HEAD
+    assert current_revision() == head_revision() == PHASE2B_HEAD
     db = SessionLocal()
     try:
         evidence = db.query(Finding).filter(Finding.tenant_id == tenant_id).order_by(Finding.id).all()
@@ -1514,24 +1516,26 @@ def test_0008_to_0009_repairs_mixed_cve_union_and_partitions_shared_findings(res
         _insert("template-a", _cve_info(["CVE-2024-9999", "CVE-2024-8888"]), now - timedelta(days=1))
 
     command.upgrade(alembic_config(), PHASE2A_COVERAGE)
-    db = SessionLocal()
-    try:
-        mixed = (
-            db.query(VulnerabilityDetectorMapping)
-            .filter(VulnerabilityDetectorMapping.detector_key == "mixed-first-single")
-            .one()
-        )
-        assert db.get(Vulnerability, mixed.vulnerability_id).canonical_key == "cve:CVE-2024-1111"
-        shared = (
-            db.query(AssetFinding)
-            .join(Finding, Finding.asset_finding_id == AssetFinding.id)
-            .filter(Finding.detector_key.in_(["template-a", "template-b"]))
-            .distinct()
-            .all()
-        )
+    with engine.connect() as conn:
+        mixed_id = conn.execute(
+            text("SELECT vulnerability_id FROM vulnerability_detector_mappings WHERE detector_key = 'mixed-first-single'")
+        ).scalar_one()
+        canonical = conn.execute(
+            text("SELECT canonical_key FROM vulnerabilities WHERE id = :id"),
+            {"id": mixed_id},
+        ).scalar_one()
+        assert canonical == "cve:CVE-2024-1111"
+        shared = conn.execute(
+            text(
+                """
+                SELECT DISTINCT asset_findings.id
+                FROM asset_findings
+                JOIN findings ON findings.asset_finding_id = asset_findings.id
+                WHERE findings.detector_key IN ('template-a', 'template-b')
+                """
+            )
+        ).all()
         assert len(shared) == 1
-    finally:
-        db.close()
 
     command.upgrade(alembic_config(), "head")
     db = SessionLocal()

@@ -35,6 +35,10 @@ const colors: Record<string, string> = {
   mitigated: "bg-sky-500/20 text-sky-200",
   accepted_risk: "bg-violet-500/20 text-violet-200",
   false_positive: "bg-slate-500/20 text-slate-300",
+  p1: "bg-rose-600/40 text-rose-50",
+  p2: "bg-orange-500/30 text-orange-100",
+  p3: "bg-amber-500/20 text-amber-100",
+  p4: "bg-sky-500/20 text-sky-100",
 };
 
 export function Badge({ value }: { value: string }) {

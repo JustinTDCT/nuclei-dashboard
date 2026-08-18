@@ -368,6 +368,18 @@ export interface AssetFinding {
   consecutive_clean_scans: number;
   reopened_count: number;
   evidence_count?: number;
+  priority?: "p1" | "p2" | "p3" | "p4" | null;
+  priority_score?: number | null;
+  priority_model_version?: string | null;
+  cvss_version?: string | null;
+  cvss_base_score?: number | null;
+  cvss_base_severity?: string | null;
+  epss_score?: number | null;
+  epss_percentile?: number | null;
+  epss_score_date?: string | null;
+  kev?: boolean | null;
+  kev_date_added?: string | null;
+  cwe_ids?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -384,10 +396,40 @@ export interface AssetFindingHistory {
   details?: Record<string, unknown>;
 }
 
+export interface PriorityFactor {
+  factor: string;
+  value?: unknown;
+  points?: number;
+  source?: string;
+  note?: string;
+  epss_score?: number | null;
+}
+
+export interface PriorityExplanation {
+  model_version: string;
+  score: number;
+  priority: string;
+  overrides: { type?: string; priority?: string; reason?: string }[];
+  factors: PriorityFactor[];
+  data_freshness?: Record<string, string | null | undefined>;
+  label?: string;
+}
+
 export interface AssetFindingDetail extends AssetFinding {
   description: string;
   detector_type: string;
   detector_key: string;
+  cvss_vector?: string | null;
+  cvss_source?: string | null;
+  epss_model_version?: string | null;
+  kev_due_date?: string | null;
+  kev_required_action?: string | null;
+  kev_known_ransomware_campaign_use?: boolean | null;
+  nvd_status?: string | null;
+  nvd_fetched_at?: string | null;
+  epss_fetched_at?: string | null;
+  kev_fetched_at?: string | null;
+  priority_explanation?: PriorityExplanation | null;
   history: AssetFindingHistory[];
   evidence: Finding[];
 }
@@ -433,6 +475,25 @@ export interface Settings {
   scan_cap_nuclei_timeout?: number;
   scan_cap_nuclei_retries?: number;
   finding_resolution_clean_scans?: number;
+  vulnerability_intelligence_enabled?: boolean;
+}
+
+export interface IntelligenceSourceStatus {
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  source_updated_at: string | null;
+  records_seen: number | null;
+  records_updated: number | null;
+  last_error: string | null;
+  metadata?: Record<string, unknown>;
+  due?: boolean;
+  enabled?: boolean;
+}
+
+export interface IntelligenceStatus {
+  enabled: boolean;
+  nvd_api_key_configured: boolean;
+  sources: Record<string, IntelligenceSourceStatus>;
 }
 
 export interface Dashboard {
@@ -442,6 +503,7 @@ export interface Dashboard {
   new_devices: number;
   agents: { total: number; pending: number; online: number };
   findings: Record<string, number>;
+  priorities?: Record<string, number>;
   recent_alerts: AlertItem[];
   recent_jobs: ScanJob[];
 }
@@ -450,6 +512,7 @@ export interface TenantSummary {
   devices: { new: number; known: number; stale: number };
   assets?: { total: number; unreviewed: number; expected: number };
   findings: Record<string, number>;
+  priorities?: Record<string, number>;
   agents: { total: number; pending: number; approved: number; online: number };
   open_alerts: number;
   recent_jobs: ScanJob[];

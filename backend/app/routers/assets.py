@@ -486,6 +486,9 @@ def update_asset(
         if new_criticality != asset.criticality:
             previous = asset.criticality
             asset.criticality = new_criticality
+            from app.intel.priority import recalculate_priorities_for_assets
+
+            recalculate_priorities_for_assets(db, [asset.id])
             record_audit(
                 db,
                 actor=user,
@@ -532,6 +535,10 @@ def add_asset_tag(
         assign_tag(asset, tag)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if tag.normalized_name == "cui":
+        from app.intel.priority import recalculate_priorities_for_assets
+
+        recalculate_priorities_for_assets(db, [asset.id])
     record_audit(
         db,
         actor=user,
@@ -558,6 +565,10 @@ def delete_asset_tag(
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
     remove_tag(asset, tag)
+    if tag.normalized_name == "cui":
+        from app.intel.priority import recalculate_priorities_for_assets
+
+        recalculate_priorities_for_assets(db, [asset.id])
     record_audit(
         db,
         actor=user,

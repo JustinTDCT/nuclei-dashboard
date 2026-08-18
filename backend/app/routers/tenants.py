@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
+from app.intel.priority import open_finding_priority_counts
 from app.models import Agent, Alert, Asset, Device, ScanJob, Tenant, User
 from app.schemas import TenantIn, TenantOut
 
@@ -95,6 +96,7 @@ def tenant_summary(tenant_id: int, _: User = Depends(require_any), db: Session =
             "expected": expected,
         },
         "findings": {k: findings.get(k, 0) for k in ("critical", "high", "medium", "low", "info")},
+        "priorities": open_finding_priority_counts(db, tenant_id),
         "agents": {
             "total": len(agents),
             "pending": sum(1 for a in agents if a.status == "pending_approval"),

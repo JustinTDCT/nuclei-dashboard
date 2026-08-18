@@ -8,6 +8,8 @@ from app.audit import record_audit
 from app.auth import require_admin, require_any
 from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
+from app.intel.priority import open_finding_priority_counts
+from app.intel.sync import intelligence_status, refresh_intelligence
 from app.models import Agent, Alert, Device, ScanJob, Tenant, User
 from app.scan_dispatch import is_agent_healthy
 from app.scan_intensity import DEFAULT_CAPS
@@ -63,6 +65,21 @@ def display_settings(_: User = Depends(require_any), db: Session = Depends(get_d
     return DisplaySettingsOut(default_timezone=get_settings(db).get("default_timezone") or "UTC")
 
 
+@router.get("/admin/vulnerability-intelligence/status")
+def vulnerability_intelligence_status(_: User = Depends(require_admin), db: Session = Depends(get_db)):
+    return intelligence_status(db)
+
+
+@router.post("/admin/vulnerability-intelligence/refresh")
+def vulnerability_intelligence_refresh(
+    source: str | None = None,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    sources = [source] if source else None
+    return refresh_intelligence(db, sources=sources, force=True)
+
+
 @router.get("/timezones")
 def timezones(_: User = Depends(require_any)):
     return {"timezones": list_iana_timezones()}
@@ -82,6 +99,7 @@ def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
             "online": sum(1 for a in agents if is_agent_healthy(a)),
         },
         "findings": open_finding_severity_counts(db),
+        "priorities": open_finding_priority_counts(db),
         "recent_alerts": [
             {
                 "id": a.id,

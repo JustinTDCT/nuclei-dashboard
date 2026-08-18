@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0009_phase2a_detector_identity_partition` (after frozen `0001_baseline` through `0008_phase2a_finding_identity_repair`).
+Current head revision: `0010_cve_intelligence_priority` (after frozen `0001_baseline` through `0009_phase2a_detector_identity_partition`).
 
-`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, `0004_asset_observation_integrity`, `0005_asset_correlation_lifecycle`, `0006_scan_definition_execution`, `0007_vulnerability_finding_lifecycle`, and `0008_phase2a_finding_identity_repair` are immutable. Phase 2A identity-partition repair lives in `0009_phase2a_detector_identity_partition`.
+`0001_baseline` through `0009_phase2a_detector_identity_partition` are immutable. Phase 2B CVE intelligence and operational priority lives in `0010_cve_intelligence_priority`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -38,6 +38,8 @@ Current head revision: `0009_phase2a_detector_identity_partition` (after frozen 
 `alembic downgrade` from `0008_phase2a_finding_identity_repair` is **refused**. It would destroy Run detector-coverage evidence and reintroduce inconsistent catalog/mapping identity.
 
 `alembic downgrade` from `0009_phase2a_detector_identity_partition` is **refused**. It would rejoin partitioned detector evidence onto the wrong Vulnerability and restore incorrect CVE identity from mixed multi-CVE history.
+
+`alembic downgrade` from `0010_cve_intelligence_priority` is **refused**. It would destroy normalized NVD/EPSS/KEV intelligence and AssetFinding operational priority explanations.
 
 ### Fresh install
 
@@ -181,6 +183,29 @@ Development opt-out only: `AGENT_TLS_VERIFY=0` or `TLS_VERIFY=0`.
 WAN Subnet rows are copied to `authorized_wan_targets`. LAN `subnet_ids` become `scan_network_targets`. Site is taken only from the Agent/Site relationship. Invalid legacy LAN scans are preserved, disabled, and marked `needs_review`.
 
 Workers execute the snapshot. Agent dispatch uses the common authorized pool, Any Available or Preferred + Failover, atomic claim, and `waiting_for_agent` / `missed`. `scan_missed_unavailable_agent` is a DomainEvent only; no alert routing.
+
+## Phase 2B vulnerability intelligence and operational priority
+
+`0010_cve_intelligence_priority` adds scanner-independent CVE enrichment and a transparent P1–P4 operational priority on each Asset Finding.
+
+Sources (central backend only; no tenant, Asset, IP, hostname, or tag data is sent):
+
+- **NVD CVE API 2.0** — CVSS, CWE, status, references. Optional `NVD_API_KEY` in environment/secrets. The Admin UI shows only whether a key is configured.
+- **FIRST EPSS** daily CSV (`https://epss.empiricalsecurity.com/epss_scores-current.csv.gz`) — exploit probability and percentile, not severity.
+- **CISA KEV** JSON catalog — official known-exploited membership only. KEV is never inferred from Nuclei tags, CVSS, or EPSS.
+
+Refresh is scheduled from the existing single-process APScheduler (the Compose `api` service is one replica). Sources self-gate: EPSS daily, NVD/KEV every six hours. PostgreSQL advisory locks prevent overlapping refresh of the same source. A source outage records `last_error` and preserves last known-good intelligence. Failed refreshes do not change finding identity or lifecycle.
+
+Admin endpoints:
+
+- `GET /api/admin/vulnerability-intelligence/status`
+- `POST /api/admin/vulnerability-intelligence/refresh`
+
+Viewer is read-only and cannot refresh or change intelligence settings.
+
+P1–P4 is **Nuclei Dashboard operational priority** (model `2b.1`), not an NVD, FIRST, or CISA risk rating. The finding detail surface shows the scored factors. Two Assets with the same CVE can have different priorities. NULL priority means not yet calculated; unknown risk is never silently labeled P4.
+
+This product uses the NVD API but is not endorsed or certified by the NVD.
 
 ## Viewer / Auditor
 

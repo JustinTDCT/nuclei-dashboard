@@ -620,6 +620,9 @@ def partition_asset_finding_for_mapping(
                 f"partition-opened:{keeper.id}:{mapping.detector_type}:{mapping.detector_key}"
             ),
         )
+    from app.intel.priority import recalculate_asset_finding_priorities
+
+    recalculate_asset_finding_priorities(db, [keeper, donor])
     return keeper
 
 
@@ -919,6 +922,10 @@ def ingest_findings(
         )
         if created:
             added += 1
+        if asset_finding is not None:
+            from app.intel.priority import recalculate_asset_finding_priorities
+
+            recalculate_asset_finding_priorities(db, [asset_finding])
     db.flush()
     return added
 
@@ -1507,6 +1514,9 @@ def _merge_duplicate_asset_findings(
     db.flush()
     db.delete(donor)
     db.flush()
+    from app.intel.priority import recalculate_asset_finding_priorities
+
+    recalculate_asset_finding_priorities(db, [keeper])
 
 
 __all__ = [

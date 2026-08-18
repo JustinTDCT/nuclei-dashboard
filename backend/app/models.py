@@ -1,13 +1,15 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Table,
     Text,
@@ -135,6 +137,21 @@ PHASE2A_EVENT_TYPES = frozenset(
 )
 
 DEFAULT_FINDING_RESOLUTION_CLEAN_SCANS = 2
+
+PRIORITY_P1 = "p1"
+PRIORITY_P2 = "p2"
+PRIORITY_P3 = "p3"
+PRIORITY_P4 = "p4"
+PRIORITIES = frozenset({PRIORITY_P1, PRIORITY_P2, PRIORITY_P3, PRIORITY_P4})
+PRIORITY_MODEL_VERSION = "2b.1"
+
+INTEL_SOURCE_NVD = "nvd"
+INTEL_SOURCE_EPSS = "epss"
+INTEL_SOURCE_CISA_KEV = "cisa_kev"
+INTEL_SOURCES = frozenset({INTEL_SOURCE_NVD, INTEL_SOURCE_EPSS, INTEL_SOURCE_CISA_KEV})
+
+CWE_PLACEHOLDERS = frozenset({"NVD-CWE-NOINFO", "NVD-CWE-OTHER"})
+CUI_TAG_NORMALIZED = "cui"
 
 COVERAGE_KIND_URL = "url"
 COVERAGE_KIND_IP = "ip"
@@ -998,6 +1015,15 @@ class Vulnerability(Base):
         back_populates="vulnerability", cascade="all, delete-orphan"
     )
     asset_findings: Mapped[list["AssetFinding"]] = relationship(back_populates="vulnerability")
+    intelligence: Mapped["VulnerabilityIntelligence | None"] = relationship(
+        back_populates="vulnerability", cascade="all, delete-orphan", uselist=False
+    )
+    cwes: Mapped[list["VulnerabilityCwe"]] = relationship(
+        back_populates="vulnerability", cascade="all, delete-orphan"
+    )
+    references: Mapped[list["VulnerabilityReference"]] = relationship(
+        back_populates="vulnerability", cascade="all, delete-orphan"
+    )
 
 
 class VulnerabilityDetectorMapping(Base):
@@ -1030,7 +1056,12 @@ class AssetFinding(Base):
             "treatment_state IN ('unaddressed', 'mitigated', 'accepted_risk', 'false_positive')",
             name="ck_asset_findings_treatment_state",
         ),
+        CheckConstraint(
+            "priority IS NULL OR priority IN ('p1', 'p2', 'p3', 'p4')",
+            name="ck_asset_findings_priority",
+        ),
         Index("ix_asset_findings_tenant_id_technical_state", "tenant_id", "technical_state"),
+        Index("ix_asset_findings_tenant_id_technical_state_priority", "tenant_id", "technical_state", "priority"),
         Index("ix_asset_findings_asset_id_technical_state", "asset_id", "technical_state"),
         Index("ix_asset_findings_vulnerability_id", "vulnerability_id"),
         Index("ix_asset_findings_last_seen", "last_seen"),
@@ -1047,6 +1078,11 @@ class AssetFinding(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     consecutive_clean_scans: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     reopened_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    priority: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    priority_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    priority_model_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    priority_explanation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    priority_calculated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -1143,3 +1179,105 @@ class AssetFindingRunEvaluation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     asset_finding: Mapped["AssetFinding"] = relationship(back_populates="evaluations")
+
+
+class VulnerabilityIntelligence(Base):
+    __tablename__ = "vulnerability_intelligence"
+    __table_args__ = (
+        CheckConstraint(
+            "epss_score IS NULL OR (epss_score >= 0 AND epss_score <= 1)",
+            name="ck_vulnerability_intelligence_epss_score",
+        ),
+        CheckConstraint(
+            "epss_percentile IS NULL OR (epss_percentile >= 0 AND epss_percentile <= 1)",
+            name="ck_vulnerability_intelligence_epss_percentile",
+        ),
+        CheckConstraint(
+            "cvss_base_score IS NULL OR (cvss_base_score >= 0 AND cvss_base_score <= 10)",
+            name="ck_vulnerability_intelligence_cvss_base_score",
+        ),
+    )
+
+    vulnerability_id: Mapped[int] = mapped_column(
+        ForeignKey("vulnerabilities.id", ondelete="CASCADE"), primary_key=True
+    )
+    nvd_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    nvd_published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    nvd_last_modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cvss_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    cvss_base_score: Mapped[float | None] = mapped_column(Numeric(4, 1), nullable=True)
+    cvss_base_severity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    cvss_vector: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cvss_source: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    epss_score: Mapped[float | None] = mapped_column(Numeric(12, 11), nullable=True)
+    epss_percentile: Mapped[float | None] = mapped_column(Numeric(12, 11), nullable=True)
+    epss_score_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    epss_model_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    kev: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    kev_date_added: Mapped[date | None] = mapped_column(Date, nullable=True)
+    kev_due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    kev_required_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kev_known_ransomware_campaign_use: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    kev_vendor_project: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    kev_product: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    nvd_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    epss_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    kev_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    vulnerability: Mapped["Vulnerability"] = relationship(back_populates="intelligence")
+
+
+class VulnerabilityCwe(Base):
+    __tablename__ = "vulnerability_cwes"
+    __table_args__ = (
+        UniqueConstraint("vulnerability_id", "cwe_id", "source", name="uq_vulnerability_cwes_vuln_cwe_source"),
+        Index("ix_vulnerability_cwes_vulnerability_id", "vulnerability_id"),
+        Index("ix_vulnerability_cwes_cwe_id", "cwe_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vulnerability_id: Mapped[int] = mapped_column(ForeignKey("vulnerabilities.id", ondelete="CASCADE"), index=True)
+    cwe_id: Mapped[str] = mapped_column(String(40))
+    source: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    vulnerability: Mapped["Vulnerability"] = relationship(back_populates="cwes")
+
+
+class VulnerabilityReference(Base):
+    __tablename__ = "vulnerability_references"
+    __table_args__ = (
+        UniqueConstraint("vulnerability_id", "url", "source", name="uq_vulnerability_references_vuln_url_source"),
+        Index("ix_vulnerability_references_vulnerability_id", "vulnerability_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vulnerability_id: Mapped[int] = mapped_column(ForeignKey("vulnerabilities.id", ondelete="CASCADE"), index=True)
+    url: Mapped[str] = mapped_column(String(2000))
+    source: Mapped[str] = mapped_column(String(120), default="")
+    tags: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    vulnerability: Mapped["Vulnerability"] = relationship(back_populates="references")
+
+
+class VulnerabilityIntelligenceSync(Base):
+    __tablename__ = "vulnerability_intelligence_sync"
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('nvd', 'epss', 'cisa_kev')",
+            name="ck_vulnerability_intelligence_sync_source",
+        ),
+    )
+
+    source: Mapped[str] = mapped_column(String(40), primary_key=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    records_seen: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    records_updated: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -81,6 +81,10 @@ POST_BASELINE_TABLES = frozenset(
         "asset_finding_history",
         "asset_finding_run_evaluations",
         "scan_run_detector_coverage",
+        "vulnerability_intelligence",
+        "vulnerability_cwes",
+        "vulnerability_references",
+        "vulnerability_intelligence_sync",
     }
 )
 PHASE1A_MARKER_COLUMNS = {

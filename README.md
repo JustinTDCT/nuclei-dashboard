@@ -41,6 +41,8 @@ Agent TLS verification is **on** by default. Publicly trusted certificates need 
 8. Create a scan (manual or interval) and run it
 9. Review devices (new / known / stale), findings, and alerts
 
+CVE findings can be enriched from NVD, FIRST EPSS, and CISA KEV by the central API. Set optional `NVD_API_KEY` in the environment; never commit a real key. No tenant or Asset data is sent to those sources. P1–P4 is Nuclei Dashboard operational priority, not an NVD/CISA/FIRST rating.
+
 New devices and impersonation attempts create in-app alerts and email staff when SMTP is configured under Admin → Settings.
 
 ## Site agent

@@ -11,6 +11,13 @@ from app.finding_lifecycle import (
     load_asset_finding_display,
     nuclei_mapping_for,
 )
+from app.intel.priority import (
+    apply_kev_filter,
+    apply_priority_filter,
+    load_finding_intelligence,
+    priority_sort_sql,
+    real_cwe_ids,
+)
 from app.models import (
     Asset,
     AssetFinding,
@@ -20,10 +27,18 @@ from app.models import (
     Tenant,
     User,
     Vulnerability,
+    VulnerabilityIntelligence,
+    VulnerabilityReference,
 )
 from app.routers.assets import _current_hostname
 from app.routers.devices import _finding_out
-from app.schemas import AssetFindingDetail, AssetFindingHistoryOut, AssetFindingOut, FindingOut
+from app.schemas import (
+    AssetFindingDetail,
+    AssetFindingHistoryOut,
+    AssetFindingOut,
+    FindingOut,
+    VulnerabilityIntelligenceOut,
+)
 
 router = APIRouter(tags=["findings"])
 
@@ -35,17 +50,25 @@ def _require_tenant(db: Session, tenant_id: int) -> Tenant:
     return tenant
 
 
+def _num(value):
+    return float(value) if value is not None else None
+
+
 def _serialize_asset_finding(
     db: Session,
     row: AssetFinding,
     *,
     display: dict | None = None,
+    intel_map: dict | None = None,
 ) -> AssetFindingOut:
     vulnerability = row.vulnerability
     info = (display or {}).get(row.id) if display is not None else None
     mapping = info["mapping"] if info else nuclei_mapping_for(db, vulnerability.id)
     severity = info["severity"] if info else display_severity(db, row)
     evidence_count = info["evidence_count"] if info else (len(row.evidence) if row.evidence is not None else 0)
+    packed = (intel_map or {}).get(row.id) or {}
+    intel = packed.get("intel")
+    cwe_ids = packed.get("cwe_ids") or []
     asset = row.asset
     return AssetFindingOut(
         id=row.id,
@@ -67,6 +90,18 @@ def _serialize_asset_finding(
         consecutive_clean_scans=row.consecutive_clean_scans,
         reopened_count=row.reopened_count,
         evidence_count=evidence_count,
+        priority=row.priority,
+        priority_score=row.priority_score,
+        priority_model_version=row.priority_model_version,
+        cvss_version=intel.cvss_version if intel else None,
+        cvss_base_score=_num(intel.cvss_base_score) if intel else None,
+        cvss_base_severity=intel.cvss_base_severity if intel else None,
+        epss_score=_num(intel.epss_score) if intel else None,
+        epss_percentile=_num(intel.epss_percentile) if intel else None,
+        epss_score_date=intel.epss_score_date if intel else None,
+        kev=intel.kev if intel else None,
+        kev_date_added=intel.kev_date_added if intel else None,
+        cwe_ids=cwe_ids,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -77,7 +112,7 @@ def _get_tenant_asset_finding(db: Session, tenant_id: int, asset_finding_id: int
     row = (
         db.query(AssetFinding)
         .options(
-            selectinload(AssetFinding.vulnerability),
+            selectinload(AssetFinding.vulnerability).selectinload(Vulnerability.intelligence),
             selectinload(AssetFinding.asset).selectinload(Asset.identifiers),
             selectinload(AssetFinding.evidence),
             selectinload(AssetFinding.history),
@@ -163,6 +198,8 @@ def list_asset_findings(
     vulnerability_id: int | None = None,
     canonical_key: str | None = None,
     cve_id: str | None = None,
+    priority: str | None = None,
+    kev: bool | None = None,
     _: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -170,7 +207,7 @@ def list_asset_findings(
     query = (
         db.query(AssetFinding)
         .options(
-            selectinload(AssetFinding.vulnerability),
+            selectinload(AssetFinding.vulnerability).selectinload(Vulnerability.intelligence),
             selectinload(AssetFinding.asset).selectinload(Asset.identifiers),
         )
         .filter(AssetFinding.tenant_id == tenant_id)
@@ -187,10 +224,17 @@ def list_asset_findings(
             query = query.filter(Vulnerability.canonical_key == canonical_key)
         if cve_id:
             query = query.filter(Vulnerability.cve_id == cve_id.upper())
+    query = apply_priority_filter(query, priority)
+    query = apply_kev_filter(query, kev)
     query = apply_severity_filter(query, db, severity)
-    rows = query.order_by(AssetFinding.last_seen.desc(), AssetFinding.id.desc()).limit(2000).all()
+    rows = (
+        query.order_by(priority_sort_sql(), AssetFinding.last_seen.desc(), AssetFinding.id.desc())
+        .limit(2000)
+        .all()
+    )
     display = load_asset_finding_display(db, rows)
-    return [_serialize_asset_finding(db, row, display=display) for row in rows]
+    intel_map = load_finding_intelligence(db, rows)
+    return [_serialize_asset_finding(db, row, display=display, intel_map=intel_map) for row in rows]
 
 
 @router.get("/tenants/{tenant_id}/asset-findings/{asset_finding_id}", response_model=AssetFindingDetail)
@@ -278,7 +322,7 @@ def _load_asset_finding(db: Session, asset_finding_id: int) -> AssetFinding:
     row = (
         db.query(AssetFinding)
         .options(
-            selectinload(AssetFinding.vulnerability),
+            selectinload(AssetFinding.vulnerability).selectinload(Vulnerability.intelligence),
             selectinload(AssetFinding.asset).selectinload(Asset.identifiers),
             selectinload(AssetFinding.evidence),
             selectinload(AssetFinding.history),
@@ -293,7 +337,9 @@ def _load_asset_finding(db: Session, asset_finding_id: int) -> AssetFinding:
 
 def _asset_finding_detail(db: Session, row: AssetFinding) -> AssetFindingDetail:
     mapping = nuclei_mapping_for(db, row.vulnerability_id)
-    base = _serialize_asset_finding(db, row)
+    intel_map = load_finding_intelligence(db, [row])
+    base = _serialize_asset_finding(db, row, intel_map=intel_map)
+    intel = (intel_map.get(row.id) or {}).get("intel")
     history = sorted(row.history, key=lambda item: (item.occurred_at, item.id))
     evidence = sorted(row.evidence, key=lambda item: (item.found_at, item.id), reverse=True)
     return AssetFindingDetail(
@@ -301,9 +347,99 @@ def _asset_finding_detail(db: Session, row: AssetFinding) -> AssetFindingDetail:
         description=row.vulnerability.description or "",
         detector_type=mapping.detector_type if mapping else "",
         detector_key=mapping.detector_key if mapping else "",
+        cvss_vector=intel.cvss_vector if intel else None,
+        cvss_source=intel.cvss_source if intel else None,
+        epss_model_version=intel.epss_model_version if intel else None,
+        kev_due_date=intel.kev_due_date if intel else None,
+        kev_required_action=intel.kev_required_action if intel else None,
+        kev_known_ransomware_campaign_use=intel.kev_known_ransomware_campaign_use if intel else None,
+        nvd_status=intel.nvd_status if intel else None,
+        nvd_fetched_at=intel.nvd_fetched_at if intel else None,
+        epss_fetched_at=intel.epss_fetched_at if intel else None,
+        kev_fetched_at=intel.kev_fetched_at if intel else None,
+        priority_explanation=row.priority_explanation,
         history=[AssetFindingHistoryOut.model_validate(item) for item in history],
         evidence=[_finding_out(item) for item in evidence],
     )
+
+
+NVD_ATTRIBUTION = (
+    "This product uses the NVD API but is not endorsed or certified by the NVD."
+)
+EPSS_ATTRIBUTION = (
+    "EPSS scores are published by FIRST and measure exploit likelihood, not severity."
+)
+KEV_ATTRIBUTION = "KEV membership is taken only from CISA's Known Exploited Vulnerabilities catalog."
+
+
+def _serialize_vulnerability(db: Session, vulnerability: Vulnerability) -> VulnerabilityIntelligenceOut:
+    intel = vulnerability.intelligence or db.get(VulnerabilityIntelligence, vulnerability.id)
+    refs = (
+        db.query(VulnerabilityReference)
+        .filter(VulnerabilityReference.vulnerability_id == vulnerability.id)
+        .order_by(VulnerabilityReference.id.asc())
+        .all()
+    )
+    cwes = real_cwe_ids(db, [vulnerability.id]).get(vulnerability.id, [])
+    return VulnerabilityIntelligenceOut(
+        vulnerability_id=vulnerability.id,
+        canonical_key=vulnerability.canonical_key,
+        cve_id=vulnerability.cve_id,
+        title=vulnerability.title,
+        description=vulnerability.description,
+        nvd_status=intel.nvd_status if intel else None,
+        nvd_published_at=intel.nvd_published_at if intel else None,
+        nvd_last_modified_at=intel.nvd_last_modified_at if intel else None,
+        cvss_version=intel.cvss_version if intel else None,
+        cvss_base_score=_num(intel.cvss_base_score) if intel else None,
+        cvss_base_severity=intel.cvss_base_severity if intel else None,
+        cvss_vector=intel.cvss_vector if intel else None,
+        cvss_source=intel.cvss_source if intel else None,
+        epss_score=_num(intel.epss_score) if intel else None,
+        epss_percentile=_num(intel.epss_percentile) if intel else None,
+        epss_score_date=intel.epss_score_date if intel else None,
+        epss_model_version=intel.epss_model_version if intel else None,
+        kev=intel.kev if intel else None,
+        kev_date_added=intel.kev_date_added if intel else None,
+        kev_due_date=intel.kev_due_date if intel else None,
+        kev_required_action=intel.kev_required_action if intel else None,
+        kev_known_ransomware_campaign_use=intel.kev_known_ransomware_campaign_use if intel else None,
+        kev_vendor_project=intel.kev_vendor_project if intel else None,
+        kev_product=intel.kev_product if intel else None,
+        cwe_ids=cwes,
+        references=[{"url": item.url, "source": item.source, "tags": item.tags or []} for item in refs],
+        nvd_fetched_at=intel.nvd_fetched_at if intel else None,
+        epss_fetched_at=intel.epss_fetched_at if intel else None,
+        kev_fetched_at=intel.kev_fetched_at if intel else None,
+        attribution={
+            "nvd": NVD_ATTRIBUTION,
+            "epss": EPSS_ATTRIBUTION,
+            "kev": KEV_ATTRIBUTION,
+            "priority": "P1–P4 is Nuclei Dashboard operational priority, not an NVD, FIRST, or CISA risk rating.",
+        },
+    )
+
+
+@router.get("/vulnerabilities/{vulnerability_id}", response_model=VulnerabilityIntelligenceOut)
+def get_vulnerability(
+    vulnerability_id: int,
+    tenant_id: int | None = Query(default=None),
+    _: User = Depends(require_any),
+    db: Session = Depends(get_db),
+):
+    vulnerability = db.get(Vulnerability, vulnerability_id)
+    if vulnerability is None:
+        raise HTTPException(status_code=404, detail="Vulnerability not found")
+    if tenant_id is not None:
+        _require_tenant(db, tenant_id)
+        linked = (
+            db.query(AssetFinding.id)
+            .filter(AssetFinding.vulnerability_id == vulnerability.id, AssetFinding.tenant_id == tenant_id)
+            .first()
+        )
+        if linked is None:
+            raise HTTPException(status_code=404, detail="Vulnerability not found")
+    return _serialize_vulnerability(db, vulnerability)
 
 
 def _csv(value: str) -> str:

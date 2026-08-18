@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { TimezoneField } from "./SitesPanel";
-import type { Settings } from "../types";
+import type { IntelligenceStatus, Settings } from "../types";
 
 const empty: Settings = {
   central_host: "",
@@ -32,15 +32,24 @@ const empty: Settings = {
   scan_cap_nuclei_timeout: 30,
   scan_cap_nuclei_retries: 5,
   finding_resolution_clean_scans: 2,
+  vulnerability_intelligence_enabled: true,
 };
 
 export function AdminSettings() {
   const [form, setForm] = useState<Settings>(empty);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
+  const [intel, setIntel] = useState<IntelligenceStatus | null>(null);
+  const [intelMessage, setIntelMessage] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+
+  function loadIntel() {
+    api<IntelligenceStatus>("/api/admin/vulnerability-intelligence/status").then(setIntel);
+  }
 
   useEffect(() => {
     api<Settings>("/api/admin/settings").then(setForm);
+    loadIntel();
   }, []);
 
   async function onSubmit(e: FormEvent) {
@@ -126,6 +135,67 @@ export function AdminSettings() {
           value={String(form.finding_resolution_clean_scans ?? 2)}
           onChange={(v) => setForm({ ...form, finding_resolution_clean_scans: Number(v) || 0 })}
         />
+        <label className="flex items-center gap-2 text-sm text-slate-300 mt-6">
+          <input
+            type="checkbox"
+            checked={form.vulnerability_intelligence_enabled !== false}
+            onChange={(e) => setForm({ ...form, vulnerability_intelligence_enabled: e.target.checked })}
+          />
+          Enable vulnerability intelligence refresh
+        </label>
+      </section>
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div>
+          <h2 className="font-medium">Vulnerability intelligence</h2>
+          <p className="text-sm text-slate-400">
+            NVD, FIRST EPSS, and CISA KEV enrich the Vulnerability catalog. No tenant, asset, IP, or hostname data is
+            sent to those sources. The optional NVD API key stays in server environment configuration and is never shown.
+          </p>
+        </div>
+        <div className="text-sm text-slate-300">NVD API key configured: {intel?.nvd_api_key_configured ? "Yes" : "No"}</div>
+        {(["nvd", "epss", "cisa_kev"] as const).map((source) => {
+          const row = intel?.sources?.[source];
+          const title = source === "nvd" ? "NVD" : source === "epss" ? "FIRST EPSS" : "CISA KEV";
+          return (
+            <div key={source} className="border border-slate-800 rounded-lg p-3 text-sm space-y-1">
+              <div className="font-medium">{title}</div>
+              <div>Last successful update: {row?.last_success_at || "—"}</div>
+              {source === "epss" && (
+                <>
+                  <div>Score date: {typeof row?.metadata?.score_date === "string" ? row.metadata.score_date : "—"}</div>
+                  <div>Model/version: {typeof row?.metadata?.model_version === "string" ? row.metadata.model_version : "—"}</div>
+                </>
+              )}
+              {source === "cisa_kev" && (
+                <div>Catalog/source update: {row?.source_updated_at || "—"}</div>
+              )}
+              <div className="text-rose-300">Last error: {row?.last_error || "—"}</div>
+            </div>
+          );
+        })}
+        <div className="flex gap-3 items-center">
+          <button
+            type="button"
+            className="bg-slate-800 text-slate-100 rounded-md px-3 py-2 text-sm"
+            disabled={refreshing}
+            onClick={async () => {
+              setRefreshing(true);
+              setIntelMessage("");
+              try {
+                await api("/api/admin/vulnerability-intelligence/refresh", { method: "POST" });
+                await loadIntel();
+                setIntelMessage("Refresh completed through the intelligence service.");
+              } catch (err) {
+                setIntelMessage(err instanceof Error ? err.message : "Refresh failed");
+              } finally {
+                setRefreshing(false);
+              }
+            }}
+          >
+            {refreshing ? "Refreshing…" : "Refresh intelligence"}
+          </button>
+          {intelMessage && <div className="text-sm text-slate-400">{intelMessage}</div>}
+        </div>
       </section>
       <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-2 gap-3">
         <div className="md:col-span-2 text-sm text-slate-400">

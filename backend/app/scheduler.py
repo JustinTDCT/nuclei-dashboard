@@ -96,6 +96,34 @@ def expire_stuck_jobs() -> None:
         db.close()
 
 
+def refresh_vulnerability_intelligence() -> None:
+    """Single API process owns APScheduler; PostgreSQL advisory locks still gate overlap."""
+    db: Session = SessionLocal()
+    try:
+        from app.intel.sync import refresh_due_sources
+
+        refresh_due_sources(db)
+    except Exception:
+        log.exception("Vulnerability intelligence refresh failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
+def recalculate_finding_age_priority() -> None:
+    db: Session = SessionLocal()
+    try:
+        from app.intel.priority import recalculate_age_bucket_changes
+
+        recalculate_age_bucket_changes(db)
+        db.commit()
+    except Exception:
+        log.exception("Finding age priority pass failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def start_scheduler() -> None:
     if scheduler.running:
         return
@@ -103,4 +131,18 @@ def start_scheduler() -> None:
     scheduler.add_job(mark_stale_devices, "interval", minutes=30, id="stale", replace_existing=True)
     scheduler.add_job(mark_inactive_assets, "interval", minutes=30, id="asset-inactive", replace_existing=True)
     scheduler.add_job(expire_stuck_jobs, "interval", minutes=5, id="stuck-jobs", replace_existing=True)
+    scheduler.add_job(
+        refresh_vulnerability_intelligence,
+        "interval",
+        minutes=15,
+        id="vuln-intel",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        recalculate_finding_age_priority,
+        "interval",
+        hours=12,
+        id="finding-age-priority",
+        replace_existing=True,
+    )
     scheduler.start()

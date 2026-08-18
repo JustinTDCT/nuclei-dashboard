@@ -29,6 +29,7 @@ services:
       AGENT_GIT_CONTEXT: ${AGENT_GIT_CONTEXT:-https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime}
       AGENT_TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118}
+      NVD_API_KEY: ${NVD_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

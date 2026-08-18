@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     )
     agent_tls_verify: str = "1"
     cors_origins: str = "http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118"
+    nvd_api_key: str = ""
 
 
 settings = Settings()

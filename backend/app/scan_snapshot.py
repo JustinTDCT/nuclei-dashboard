@@ -30,6 +30,7 @@ SECRET_KEYS = frozenset(
         "smtp_password",
         "private_key",
         "api_key",
+        "nvd_api_key",
     }
 )
 
