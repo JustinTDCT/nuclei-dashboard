@@ -33,7 +33,7 @@ Do not delete the PostgreSQL volume as a normal operation.
 
 ### Existing install (complete pre-Alembic schema)
 
-A recognized legacy database has all Phase 0 tables (`users`, `tenants`, `subnets`, `agents`, `scans`, `scan_jobs`, `devices`, `findings`, `alerts`, `settings`) and no `alembic_version`.
+A recognized legacy database has all Phase 0 tables (`users`, `tenants`, `subnets`, `agents`, `scans`, `scan_jobs`, `devices`, `findings`, `alerts`, `settings`), no `alembic_version`, and **none** of the Phase 1A tables (`sites`, `networks`, `network_agents`, `audit_logs`) or marker columns (`agents.site_id`, `subnets.site_id`, `subnets.network_id`).
 
 1. Deploy this version **without** removing the `postgres-data` volume.
 2. Restart the API.
@@ -50,7 +50,12 @@ alembic upgrade head
 
 ### Partial or unknown schema
 
-If some application tables exist but the complete Phase 0 set does not, startup **fails closed** and refuses to stamp or upgrade. Do not guess. Inspect the database and repair or restore it before retrying.
+Startup **fails closed** and refuses to stamp or upgrade when:
+
+- some Phase 0 tables exist but the complete Phase 0 set does not, or
+- any Phase 1A table or marker column is present and `alembic_version` is missing (including a database that only has `sites`/`networks`).
+
+Do not guess. Inspect the database and repair or restore it before retrying.
 
 ### Tests
 
@@ -58,6 +63,15 @@ If some application tables exist but the complete Phase 0 set does not, startup 
 cd backend
 pip install -r requirements-dev.txt
 pytest
+```
+
+Frontend typecheck and production build:
+
+```bash
+cd frontend
+npm ci
+npx tsc --noEmit
+npm run build
 ```
 
 Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or use `TEST_DATABASE_URL` if you set it.

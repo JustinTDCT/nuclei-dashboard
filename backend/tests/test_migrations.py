@@ -313,3 +313,52 @@ def test_legacy_compatibility_restores_missing_columns_without_dropping_rows(res
     finally:
         db.close()
     ensure_columns()
+
+
+@requires_postgres
+def test_unversioned_phase1a_tables_fail_closed(reset_db):
+    from app.database import engine
+    from app.migrate import UnrecognizedSchemaError, apply_schema
+
+    apply_schema()
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+    assert "sites" in _tables(engine)
+    assert "alembic_version" not in _tables(engine)
+    with pytest.raises(UnrecognizedSchemaError, match="Unrecognized/partial"):
+        apply_schema()
+    assert "alembic_version" not in _tables(engine)
+
+
+@requires_postgres
+def test_unversioned_phase1a_marker_columns_fail_closed(reset_db):
+    from alembic import command
+
+    from app.database import engine
+    from app.migrate import UnrecognizedSchemaError, alembic_config, apply_schema
+
+    command.upgrade(alembic_config(), "0001_baseline")
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE agents ADD COLUMN site_id INTEGER"))
+        conn.execute(text("ALTER TABLE subnets ADD COLUMN network_id INTEGER"))
+        conn.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+    with pytest.raises(UnrecognizedSchemaError, match="Unrecognized/partial"):
+        apply_schema()
+    assert "alembic_version" not in _tables(engine)
+    assert "sites" not in _tables(engine)
+
+
+@requires_postgres
+def test_unversioned_sites_networks_only_is_not_fresh(reset_db):
+    from app.database import engine
+    from app.migrate import UnrecognizedSchemaError, apply_schema
+
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE sites (id SERIAL PRIMARY KEY, name VARCHAR(200) NOT NULL)"))
+        conn.execute(text("CREATE TABLE networks (id SERIAL PRIMARY KEY, name VARCHAR(200) NOT NULL)"))
+    with pytest.raises(UnrecognizedSchemaError, match="Unrecognized/partial"):
+        apply_schema()
+    assert "alembic_version" not in _tables(engine)
+    assert "users" not in _tables(engine)

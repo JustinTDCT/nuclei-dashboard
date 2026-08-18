@@ -9,7 +9,8 @@ from app.auth import create_agent_token, decode_token
 from app.crypto_util import new_nonce, verify_ed25519
 from app.database import get_db
 from app.inventory import store_findings, upsert_devices
-from app.jobs import job_payload
+from app.jobs import fail_job, job_payload
+from app.locality import LanScanInvalidError, assert_scan_executable
 from app.models import Agent, Device, Scan, ScanJob
 from app.schemas import AgentTokenIn, DeviceReport, EnrollIn, FindingReport
 
@@ -137,17 +138,30 @@ def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_d
         .limit(5)
         .all()
     )
-    return [job_payload(db, job) for job in jobs]
+    payloads = []
+    for job in jobs:
+        try:
+            assert_scan_executable(db, job.scan)
+            payloads.append(job_payload(db, job))
+        except LanScanInvalidError as exc:
+            fail_job(db, job, exc.detail)
+    return payloads
 
 
 @router.post("/jobs/{job_id}/start")
 def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = Depends(get_db)):
     job = _claim_lan_job(db, job_id, agent)
+    try:
+        assert_scan_executable(db, job.scan)
+        payload = job_payload(db, job)
+    except LanScanInvalidError as exc:
+        fail_job(db, job, exc.detail)
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     job.status = "running"
     job.claimed_by = agent.uuid
     job.started_at = _now()
     db.commit()
-    return job_payload(db, job)
+    return payload
 
 
 @router.post("/jobs/{job_id}/devices")

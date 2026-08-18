@@ -18,6 +18,14 @@ from app.models import (
 DISPATCH_MODES = frozenset({DISPATCH_ANY_AVAILABLE, DISPATCH_PREFERRED_FAILOVER})
 
 
+class LanScanInvalidError(ValueError):
+    """Stored LAN scan definition is no longer fully executable."""
+
+    def __init__(self, detail: str):
+        self.detail = detail
+        super().__init__(detail)
+
+
 def valid_cidr(cidr: str) -> str:
     try:
         return str(ip_network(cidr, strict=False))
@@ -209,23 +217,28 @@ def resolve_lan_networks(db: Session, tenant_id: int, subnet_ids: list[int]) -> 
 
 def validate_lan_scan(db: Session, tenant_id: int, agent_id: int | None, subnet_ids: list[int]) -> Agent:
     if not agent_id:
-        raise HTTPException(status_code=400, detail="LAN scans require an agent")
-    agent = get_agent(db, agent_id, tenant_id=tenant_id)
-    site = get_site(db, agent.site_id, tenant_id=tenant_id)
-    require_active_site(site)
+        raise LanScanInvalidError("LAN scans require an agent")
+    agent = db.query(Agent).filter(Agent.id == agent_id, Agent.tenant_id == tenant_id).first()
+    if not agent:
+        raise LanScanInvalidError("Agent not found for tenant")
+    site = db.query(Site).filter(Site.id == agent.site_id, Site.tenant_id == tenant_id).first()
+    if not site:
+        raise LanScanInvalidError("Agent site is missing or belongs to another tenant")
+    if site.archived_at is not None:
+        raise LanScanInvalidError("Site is archived")
     if subnet_ids:
-        networks = resolve_lan_networks(db, tenant_id, subnet_ids)
+        try:
+            networks = resolve_lan_networks(db, tenant_id, subnet_ids)
+        except HTTPException as exc:
+            raise LanScanInvalidError(str(exc.detail)) from exc
         sites = {n.site_id for n in networks}
         if sites != {agent.site_id}:
-            raise HTTPException(status_code=400, detail="Selected networks must belong to the agent's site")
+            raise LanScanInvalidError("Selected networks must belong to the agent's site")
         for network in networks:
             if network.archived_at is not None:
-                raise HTTPException(status_code=400, detail="Cannot use an archived network in a scan")
+                raise LanScanInvalidError("Cannot use an archived network in a scan")
             if not is_authorized(db, network.id, agent.id):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Agent is not authorized for network {network.name}",
-                )
+                raise LanScanInvalidError(f"Agent is not authorized for network {network.name}")
     else:
         authorized = (
             db.query(Network)
@@ -238,12 +251,29 @@ def validate_lan_scan(db: Session, tenant_id: int, agent_id: int | None, subnet_
             .first()
         )
         if authorized is None:
-            raise HTTPException(status_code=400, detail="Agent is not authorized for any networks at this site")
+            raise LanScanInvalidError("Agent is not authorized for any networks at this site")
     return agent
 
 
+def require_lan_scan(db: Session, tenant_id: int, agent_id: int | None, subnet_ids: list[int]) -> Agent:
+    try:
+        return validate_lan_scan(db, tenant_id, agent_id, subnet_ids)
+    except LanScanInvalidError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+
+
+def assert_scan_executable(db: Session, scan) -> None:
+    if scan.scope != "lan":
+        return
+    validate_lan_scan(db, scan.tenant_id, scan.agent_id, scan.subnet_ids or [])
+
+
 def lan_cidrs_for_scan(db: Session, tenant_id: int, agent: Agent, subnet_ids: list[int]) -> list[str]:
-    q = (
+    validate_lan_scan(db, tenant_id, agent.id, subnet_ids)
+    if subnet_ids:
+        networks = resolve_lan_networks(db, tenant_id, subnet_ids)
+        return [network.cidr for network in sorted(networks, key=lambda item: (item.name, item.id))]
+    networks = (
         db.query(Network)
         .join(NetworkAgent, NetworkAgent.network_id == Network.id)
         .filter(
@@ -252,12 +282,10 @@ def lan_cidrs_for_scan(db: Session, tenant_id: int, agent: Agent, subnet_ids: li
             Network.archived_at.is_(None),
             NetworkAgent.agent_id == agent.id,
         )
+        .order_by(Network.name, Network.id)
+        .all()
     )
-    if subnet_ids:
-        networks = resolve_lan_networks(db, tenant_id, subnet_ids)
-        allowed = {n.id for n in networks}
-        q = q.filter(Network.id.in_(allowed))
-    return [n.cidr for n in q.order_by(Network.name).all()]
+    return [network.cidr for network in networks]
 
 
 def drop_cross_site_authorizations(db: Session, agent: Agent) -> None:

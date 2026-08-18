@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.jobs import create_job, has_active_job
-from app.locality import get_agent, get_tenant, validate_lan_scan
+from app.locality import LanScanInvalidError, get_agent, get_tenant, require_lan_scan
 from app.models import Scan, ScanJob, Subnet, User
 from app.schemas import ScanIn, ScanJobOut, ScanOut
 
@@ -13,7 +13,7 @@ router = APIRouter(tags=["scans"])
 
 def _validate_scan(db: Session, tenant_id: int, body: ScanIn) -> None:
     if body.scope == "lan":
-        validate_lan_scan(db, tenant_id, body.agent_id, body.subnet_ids)
+        require_lan_scan(db, tenant_id, body.agent_id, body.subnet_ids)
         return
     if body.agent_id:
         get_agent(db, body.agent_id, tenant_id=tenant_id)
@@ -85,7 +85,10 @@ def run_scan(scan_id: int, _: User = Depends(require_user), db: Session = Depend
         raise HTTPException(status_code=404, detail="Scan not found")
     if has_active_job(db, scan.id):
         raise HTTPException(status_code=409, detail="A job is already queued or running")
-    return job_out(create_job(db, scan))
+    try:
+        return job_out(create_job(db, scan))
+    except LanScanInvalidError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
 
 
 @router.get("/tenants/{tenant_id}/jobs", response_model=list[ScanJobOut])

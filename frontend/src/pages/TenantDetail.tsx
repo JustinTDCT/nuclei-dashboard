@@ -469,7 +469,7 @@ function Devices({ tenantId }: { tenantId: number }) {
   const [status, setStatus] = useState("");
   const [q, setQ] = useState("");
   const [notes, setNotes] = useState<Record<number, string>>({});
-  const [selected, setSelected] = useState<DeviceDetail | None>(null);
+  const [selected, setSelected] = useState<DeviceDetail | null>(null);
 
   function openDevice(id: number) {
     api<DeviceDetail>(`/api/devices/${id}`).then(setSelected);

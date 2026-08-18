@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.jobs import create_job, due_scans
+from app.locality import LanScanInvalidError
 from app.models import Device, ScanJob
 from app.settings_store import get_settings
 
@@ -21,7 +22,12 @@ def tick_schedules() -> None:
     db: Session = SessionLocal()
     try:
         for scan in due_scans(db):
-            create_job(db, scan)
+            try:
+                create_job(db, scan)
+            except LanScanInvalidError as exc:
+                db.rollback()
+                log.warning("Skipping scheduled scan %s: %s", scan.id, exc.detail)
+                continue
             scan.last_scheduled_at = _now()
             db.commit()
             log.info("Queued scheduled job for scan %s", scan.id)

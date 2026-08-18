@@ -1,12 +1,14 @@
 """Alembic-backed schema apply with pre-Alembic adoption.
 
 Paths:
-- Fresh database (no application tables): alembic upgrade head.
-- Recognized complete pre-Alembic schema (all Phase 0 tables, no
-  alembic_version): run the retained compatibility helper, validate,
-  stamp 0001_baseline, then upgrade head.
+- Fresh database (no managed application tables or Phase 1A markers):
+  alembic upgrade head.
+- Recognized complete pre-Alembic Phase 0 schema (all Phase 0 tables,
+  no post-baseline tables/columns, no alembic_version): run the
+  retained compatibility helper, validate, stamp 0001_baseline, then
+  upgrade head.
 - Already-migrated database: alembic upgrade head.
-- Partial or unknown application tables: fail closed.
+- Partial, unknown, or unversioned post-baseline schema: fail closed.
 
 Do not add future ALTER TABLE statements here. New schema changes are
 Alembic revisions. ensure_columns() remains a Phase 0 safety net only.
@@ -32,7 +34,8 @@ BACKEND_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_INI = BACKEND_ROOT / "alembic.ini"
 BASELINE_REVISION = "0001_baseline"
 
-# Complete Phase 0 table set. A recognized legacy install has all of these.
+# Complete Phase 0 table set. A recognized legacy install has all of these
+# and none of the post-baseline markers.
 APPLICATION_TABLES = frozenset(
     {
         "users",
@@ -47,6 +50,23 @@ APPLICATION_TABLES = frozenset(
         "settings",
     }
 )
+PHASE0_TABLES = APPLICATION_TABLES
+
+# Managed after 0001. Presence without alembic_version is not a fresh DB
+# and is not a pre-Alembic Phase 0 install.
+POST_BASELINE_TABLES = frozenset(
+    {
+        "sites",
+        "networks",
+        "network_agents",
+        "audit_logs",
+    }
+)
+PHASE1A_MARKER_COLUMNS = {
+    "agents": frozenset({"site_id"}),
+    "subnets": frozenset({"site_id", "network_id"}),
+}
+MANAGED_TABLES = PHASE0_TABLES | POST_BASELINE_TABLES
 
 
 class UnrecognizedSchemaError(RuntimeError):
@@ -75,17 +95,37 @@ def head_revision() -> str:
     return head
 
 
+def _column_names(inspector, table: str) -> set[str]:
+    return {c["name"] for c in inspector.get_columns(table)}
+
+
+def _post_baseline_markers(inspector, tables: set[str]) -> set[str]:
+    markers = set(tables & POST_BASELINE_TABLES)
+    for table, columns in PHASE1A_MARKER_COLUMNS.items():
+        if table not in tables:
+            continue
+        present = _column_names(inspector, table) & columns
+        markers.update(f"{table}.{name}" for name in present)
+    return markers
+
+
 def _validate_adopted_schema() -> None:
     inspector = inspect(engine)
     present = set(inspector.get_table_names())
-    missing = APPLICATION_TABLES - present
+    missing = PHASE0_TABLES - present
     if missing:
         raise UnrecognizedSchemaError(
             "Unrecognized/partial pre-Alembic schema: missing tables "
             + ", ".join(sorted(missing))
         )
-    device_cols = {c["name"] for c in inspector.get_columns("devices")}
-    finding_cols = {c["name"] for c in inspector.get_columns("findings")}
+    markers = _post_baseline_markers(inspector, present)
+    if markers:
+        raise UnrecognizedSchemaError(
+            "Unrecognized/partial schema: post-baseline markers present without "
+            "alembic_version: " + ", ".join(sorted(markers))
+        )
+    device_cols = _column_names(inspector, "devices")
+    finding_cols = _column_names(inspector, "findings")
     missing_cols: list[str] = []
     if "hostname" not in device_cols:
         missing_cols.append("devices.hostname")
@@ -103,8 +143,11 @@ def _validate_adopted_schema() -> None:
 def apply_schema() -> str | None:
     """Bring the connected database to Alembic head. Returns the revision."""
     cfg = alembic_config()
-    tables = set(inspect(engine).get_table_names())
-    app_tables = tables & APPLICATION_TABLES
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    app_tables = tables & PHASE0_TABLES
+    managed = tables & MANAGED_TABLES
+    markers = _post_baseline_markers(inspector, tables)
 
     if "alembic_version" in tables:
         log.info("Alembic: upgrading existing versioned database to head")
@@ -112,13 +155,13 @@ def apply_schema() -> str | None:
         engine.dispose()
         return current_revision()
 
-    if not app_tables:
+    if not managed and not markers:
         log.info("Alembic: fresh database, upgrading to head")
         command.upgrade(cfg, "head")
         engine.dispose()
         return current_revision()
 
-    if APPLICATION_TABLES.issubset(tables):
+    if PHASE0_TABLES.issubset(tables) and not markers:
         from app.database import ensure_columns
 
         log.info(
@@ -132,10 +175,9 @@ def apply_schema() -> str | None:
         engine.dispose()
         return current_revision()
 
+    found = ", ".join(sorted(managed | markers)) or ", ".join(sorted(app_tables))
     raise UnrecognizedSchemaError(
         "Unrecognized/partial pre-Alembic schema: found "
-        + ", ".join(sorted(app_tables))
-        + "; expected the complete Phase 0 set "
-        + ", ".join(sorted(APPLICATION_TABLES))
+        + found
         + ". Refusing to stamp or upgrade."
     )

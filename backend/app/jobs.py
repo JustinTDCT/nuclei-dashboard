@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.locality import lan_cidrs_for_scan
+from app.locality import LanScanInvalidError, assert_scan_executable, lan_cidrs_for_scan
 from app.models import Scan, ScanJob, Subnet
 
 
@@ -11,8 +11,18 @@ def _now() -> datetime:
 
 
 def create_job(db: Session, scan: Scan) -> ScanJob:
+    assert_scan_executable(db, scan)
     job = ScanJob(scan_id=scan.id, tenant_id=scan.tenant_id, status="queued")
     db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def fail_job(db: Session, job: ScanJob, detail: str) -> ScanJob:
+    job.status = "failed"
+    job.error = detail
+    job.finished_at = _now()
     db.commit()
     db.refresh(job)
     return job
@@ -22,7 +32,9 @@ def job_payload(db: Session, job: ScanJob) -> dict:
     scan = job.scan
     subnet_ids = scan.subnet_ids or []
     if scan.scope == "lan":
-        cidrs = lan_cidrs_for_scan(db, scan.tenant_id, scan.agent, subnet_ids) if scan.agent else []
+        if not scan.agent:
+            raise LanScanInvalidError("LAN scans require an agent")
+        cidrs = lan_cidrs_for_scan(db, scan.tenant_id, scan.agent, subnet_ids)
     else:
         q = db.query(Subnet).filter(Subnet.tenant_id == scan.tenant_id, Subnet.scope == "wan")
         if subnet_ids:
