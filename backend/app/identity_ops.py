@@ -527,7 +527,11 @@ def move_asset_site(
     )
     from app.policy import apply_asset_handling
 
-    apply_asset_handling(db, asset)
+    apply_asset_handling(
+        db,
+        asset,
+        observation_override={"site_id": site.id, "network_id": None},
+    )
     return asset
 
 

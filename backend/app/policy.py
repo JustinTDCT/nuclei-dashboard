@@ -715,6 +715,7 @@ def _latest_observation_map(db: Session, asset_ids: list[int]) -> dict[int, Asse
         return {}
     rows = (
         db.query(AssetObservation)
+        .distinct(AssetObservation.asset_id)
         .filter(AssetObservation.asset_id.in_(asset_ids))
         .order_by(
             AssetObservation.asset_id.asc(),
@@ -723,11 +724,7 @@ def _latest_observation_map(db: Session, asset_ids: list[int]) -> dict[int, Asse
         )
         .all()
     )
-    latest: dict[int, AssetObservation] = {}
-    for row in rows:
-        if row.asset_id not in latest:
-            latest[row.asset_id] = row
-    return latest
+    return {row.asset_id: row for row in rows}
 
 
 def _tag_map(db: Session, asset_ids: list[int]) -> dict[int, list[Tag]]:
@@ -805,8 +802,21 @@ def contexts_for_assets(
     for asset in assets:
         override = overrides.get(asset.id, {})
         observation = observations.get(asset.id)
-        site_id = override.get("site_id", observation.site_id if observation is not None else asset.site_id)
-        network_id = override.get("network_id", observation.network_id if observation is not None else None)
+        observation_matches_site = (
+            observation is not None and observation.site_id == asset.site_id
+        )
+        if "site_id" in override:
+            site_id = override["site_id"]
+        elif observation_matches_site:
+            site_id = observation.site_id
+        else:
+            site_id = asset.site_id
+        if "network_id" in override:
+            network_id = override["network_id"]
+        elif observation_matches_site:
+            network_id = observation.network_id
+        else:
+            network_id = None
         hostname = override.get("hostname", hostnames.get(asset.id, ""))
         observed_ports = override.get("observed_ports", ports.get(asset.id, frozenset()))
         tag_rows = tags.get(asset.id, [])
@@ -848,13 +858,14 @@ def context_for_findings(
     finding_ids = [row.id for row in findings]
     evidence_rows = (
         db.query(Finding)
+        .distinct(Finding.asset_finding_id)
         .filter(Finding.asset_finding_id.in_(finding_ids))
         .order_by(Finding.asset_finding_id.asc(), Finding.found_at.desc(), Finding.id.desc())
         .all()
     )
     latest_severity: dict[int, str] = {}
     for row in evidence_rows:
-        if row.asset_finding_id not in latest_severity and row.severity:
+        if row.severity:
             latest_severity[row.asset_finding_id] = row.severity.lower()
     vuln_ids = list({row.vulnerability_id for row in findings})
     vulns = {
@@ -1164,10 +1175,9 @@ def create_policy(db: Session, *, actor: User, payload: dict[str, Any]) -> Polic
 
 
 def update_policy(db: Session, *, actor: User, row: PolicyRule, changes: dict[str, Any]) -> PolicyRule:
-    _require_write(actor, row)
+    _require_write(actor, row.scope_type)
     if row.archived_at is not None:
         raise PolicyError("Archived policies cannot be updated")
-    before = _policy_snapshot(row)
     payload = {
         "name": changes.get("name", row.name),
         "description": changes.get("description", row.description),
@@ -1180,7 +1190,10 @@ def update_policy(db: Session, *, actor: User, row: PolicyRule, changes: dict[st
         "conditions": changes.get("conditions", row.conditions),
         "actions": changes.get("actions", row.actions),
     }
+    _require_write(actor, payload["scope_type"])
     cleaned = normalize_rule_payload(db, **payload)
+    _require_write(actor, cleaned["scope_type"])
+    before = _policy_snapshot(row)
     for key, value in cleaned.items():
         setattr(row, key, value)
     if "enabled" in changes and changes["enabled"] is not None:
@@ -1194,7 +1207,7 @@ def update_policy(db: Session, *, actor: User, row: PolicyRule, changes: dict[st
 
 
 def set_policy_enabled(db: Session, *, actor: User, row: PolicyRule, enabled: bool) -> PolicyRule:
-    _require_write(actor, row)
+    _require_write(actor, row.scope_type)
     if row.archived_at is not None:
         raise PolicyError("Archived policies cannot be enabled or disabled")
     if row.enabled is enabled:
@@ -1216,7 +1229,7 @@ def set_policy_enabled(db: Session, *, actor: User, row: PolicyRule, enabled: bo
 
 
 def archive_policy(db: Session, *, actor: User, row: PolicyRule, reason: str = "") -> PolicyRule:
-    _require_write(actor, row)
+    _require_write(actor, row.scope_type)
     if row.archived_at is not None:
         return row
     before = _policy_snapshot(row)
@@ -1232,10 +1245,10 @@ def archive_policy(db: Session, *, actor: User, row: PolicyRule, reason: str = "
     return row
 
 
-def _require_write(actor: User, row: PolicyRule) -> None:
+def _require_write(actor: User, scope_type: str) -> None:
     if actor.role == "viewer":
         raise PolicyError("Viewer cannot change policies", status_code=403)
-    if row.scope_type == POLICY_SCOPE_GLOBAL and actor.role != "admin":
+    if scope_type == POLICY_SCOPE_GLOBAL and actor.role != "admin":
         raise PolicyError("Only an Admin may change a Global policy", status_code=403)
 
 

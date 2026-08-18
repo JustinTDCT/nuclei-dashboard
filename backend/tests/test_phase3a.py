@@ -817,3 +817,312 @@ def test_manual_inheritance_scenario_and_performance(reset_db):
         assert len(policy_loads) < 20
         assert len(policy_loads) < len(loaded) / 10
         mark_inactive_assets()
+
+
+def _escalate(client, token, policy_id: int):
+    return client.patch(
+        f"/api/policies/{policy_id}",
+        headers=_headers(token),
+        json={"scope_type": "global", "tenant_id": None, "site_id": None, "network_id": None},
+    )
+
+
+@requires_postgres
+def test_user_cannot_escalate_scoped_policy_to_global(reset_db):
+    from app.database import SessionLocal
+    from app.models import AuditLog, PolicyRule
+
+    with _client() as client:
+        admin = _login(client)
+        user = _create_staff(client, admin, "escalate-user", "user")
+        world = _world(client, admin)
+        tenant_rule = _policy(
+            client,
+            user,
+            name="Tenant stay tenant",
+            scope_type="tenant",
+            tenant_id=world["tenant"]["id"],
+            actions={"classification": "Desktop"},
+        )
+        site_rule = _policy(
+            client,
+            user,
+            name="Site stay site",
+            scope_type="site",
+            tenant_id=world["tenant"]["id"],
+            site_id=world["site"]["id"],
+            actions={"classification": "Laptop"},
+        )
+        network_rule = _policy(
+            client,
+            user,
+            name="Network stay network",
+            scope_type="network",
+            tenant_id=world["tenant"]["id"],
+            site_id=world["site"]["id"],
+            network_id=world["net1"]["id"],
+            actions={"disposition": "approved"},
+        )
+        assert tenant_rule.status_code == site_rule.status_code == network_rule.status_code == 200
+        originals = {
+            row.json()["id"]: row.json()
+            for row in (tenant_rule, site_rule, network_rule)
+        }
+        db = SessionLocal()
+        try:
+            audits_before = db.query(AuditLog).filter(AuditLog.action == "policy.changed").count()
+        finally:
+            db.close()
+        for policy_id, original in originals.items():
+            response = _escalate(client, user, policy_id)
+            assert response.status_code == 403, response.text
+            current = client.get(f"/api/policies/{policy_id}", headers=_headers(user))
+            assert current.status_code == 200
+            body = current.json()
+            assert body["scope_type"] == original["scope_type"]
+            assert body["tenant_id"] == original["tenant_id"]
+            assert body["site_id"] == original["site_id"]
+            assert body["network_id"] == original["network_id"]
+            assert body["revision"] == original["revision"]
+        db = SessionLocal()
+        try:
+            assert db.query(AuditLog).filter(AuditLog.action == "policy.changed").count() == audits_before
+            for policy_id, original in originals.items():
+                row = db.get(PolicyRule, policy_id)
+                assert row.scope_type == original["scope_type"]
+                assert row.tenant_id == original["tenant_id"]
+        finally:
+            db.close()
+        promoted = _escalate(client, admin, tenant_rule.json()["id"])
+        assert promoted.status_code == 200, promoted.text
+        assert promoted.json()["scope_type"] == "global"
+        assert promoted.json()["tenant_id"] is None
+        assert promoted.json()["revision"] == tenant_rule.json()["revision"] + 1
+
+
+@requires_postgres
+def test_site_move_evaluates_new_site_not_historical_network(reset_db):
+    from app.database import SessionLocal
+    from app.models import Asset, AssetObservation, AuditLog
+    from app.policy import apply_asset_handling
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        site_b = client.post(
+            f"/api/tenants/{world['tenant']['id']}/sites",
+            headers=_headers(admin),
+            json={"name": "Hartford"},
+        ).json()
+        site_a_rule = _policy(
+            client,
+            admin,
+            name="Site A Server",
+            scope_type="site",
+            tenant_id=world["tenant"]["id"],
+            site_id=world["site"]["id"],
+            actions={"classification": "Server"},
+        )
+        site_b_rule = _policy(
+            client,
+            admin,
+            name="Site B Laptop",
+            scope_type="site",
+            tenant_id=world["tenant"]["id"],
+            site_id=site_b["id"],
+            actions={"classification": "Laptop"},
+        )
+        assert site_a_rule.status_code == site_b_rule.status_code == 200
+        now = datetime.now(timezone.utc)
+        db = SessionLocal()
+        try:
+            asset = Asset(
+                tenant_id=world["tenant"]["id"],
+                site_id=world["site"]["id"],
+                display_name="moved-host",
+                classification="Unknown",
+                disposition="unreviewed",
+                criticality="normal",
+                is_expected=False,
+            )
+            db.add(asset)
+            db.flush()
+            observation = AssetObservation(
+                asset_id=asset.id,
+                tenant_id=asset.tenant_id,
+                site_id=world["site"]["id"],
+                network_id=world["net1"]["id"],
+                observed_at=now,
+                hostname="moved-host",
+                ip="10.1.0.88",
+                snapshot={"hostname": "moved-host", "ports": []},
+                observation_key="moved-host-a",
+            )
+            db.add(observation)
+            db.flush()
+            apply_asset_handling(db, asset)
+            assert asset.classification == "Server"
+            asset_id = asset.id
+            observation_id = observation.id
+            db.commit()
+        finally:
+            db.close()
+        moved = client.post(
+            f"/api/assets/{asset_id}/move-site",
+            headers=_headers(admin),
+            json={"site_id": site_b["id"], "reason": "relocate"},
+        )
+        assert moved.status_code == 200, moved.text
+        assert moved.json()["site_id"] == site_b["id"]
+        assert moved.json()["classification"] == "Laptop"
+        evaluation = client.get(
+            f"/api/tenants/{world['tenant']['id']}/assets/{asset_id}/policy-evaluation",
+            headers=_headers(admin),
+        )
+        assert evaluation.status_code == 200
+        body = evaluation.json()
+        assert body["site_id"] == site_b["id"]
+        assert body["network_id"] is None
+        assert body["actions"]["classification"]["rule_name"] == "Site B Laptop"
+        assert body["actions"]["classification"]["site_id"] == site_b["id"]
+        db = SessionLocal()
+        try:
+            kept = db.get(AssetObservation, observation_id)
+            assert kept.site_id == world["site"]["id"]
+            assert kept.network_id == world["net1"]["id"]
+            audits = (
+                db.query(AuditLog)
+                .filter(
+                    AuditLog.object_id == asset_id,
+                    AuditLog.action == "asset.policy_classification_changed",
+                )
+                .order_by(AuditLog.id.desc())
+                .all()
+            )
+            assert audits
+            latest = audits[0]
+            assert latest.details["new"] == "Laptop"
+            assert latest.details["policy_rule_id"] == site_b_rule.json()["id"]
+            assert latest.details["policy_name"] == "Site B Laptop"
+            assert latest.details["site_id"] == site_b["id"]
+            assert latest.details["network_id"] is None
+            assert db.get(Asset, asset_id).classification == "Laptop"
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_latest_observation_and_evidence_queries_are_row_bounded(reset_db):
+    from app.database import SessionLocal, engine
+    from app.models import Asset, AssetFinding, AssetObservation, Finding, Vulnerability
+    from app.policy import _latest_observation_map, context_for_findings
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        now = datetime.now(timezone.utc)
+        db = SessionLocal()
+        try:
+            assets = []
+            for index in range(3):
+                asset = Asset(
+                    tenant_id=world["tenant"]["id"],
+                    site_id=world["site"]["id"],
+                    display_name=f"hist-{index}",
+                    classification="Unknown",
+                    disposition="unreviewed",
+                    criticality="normal",
+                    first_seen=now - timedelta(days=40),
+                    last_seen=now,
+                )
+                db.add(asset)
+                db.flush()
+                assets.append(asset)
+                for obs in range(40):
+                    db.add(
+                        AssetObservation(
+                            asset_id=asset.id,
+                            tenant_id=asset.tenant_id,
+                            site_id=world["site"]["id"],
+                            network_id=world["net1"]["id"],
+                            observed_at=now - timedelta(hours=40 - obs),
+                            hostname=f"hist-{index}",
+                            ip=f"10.1.0.{10 + index}",
+                            snapshot={"hostname": f"hist-{index}", "ports": []},
+                            observation_key=f"hist-{index}-{obs}",
+                        )
+                    )
+            vuln = Vulnerability(canonical_key="cve:CVE-2024-9999", cve_id="CVE-2024-9999", title="Hist")
+            db.add(vuln)
+            db.flush()
+            findings = []
+            for asset in assets:
+                finding = AssetFinding(
+                    tenant_id=asset.tenant_id,
+                    asset_id=asset.id,
+                    vulnerability_id=vuln.id,
+                    technical_state="open",
+                    treatment_state="unaddressed",
+                    first_seen=now - timedelta(days=10),
+                    last_seen=now,
+                    priority="p2",
+                )
+                db.add(finding)
+                db.flush()
+                findings.append(finding)
+                for ev in range(40):
+                    db.add(
+                        Finding(
+                            tenant_id=asset.tenant_id,
+                            asset_id=asset.id,
+                            asset_finding_id=finding.id,
+                            template_id="hist-tpl",
+                            name="Hist",
+                            severity="high" if ev < 39 else "critical",
+                            hostname=asset.display_name,
+                            host=f"https://10.1.0.{10 + asset.id}",
+                            found_at=now - timedelta(hours=40 - ev),
+                            evidence_key=f"hist-ev-{asset.id}-{ev}",
+                            raw_json={},
+                        )
+                    )
+            db.commit()
+            asset_ids = [asset.id for asset in assets]
+            finding_ids = [finding.id for finding in findings]
+        finally:
+            db.close()
+
+        observation_sql: list[str] = []
+        evidence_sql: list[str] = []
+        observation_rows: list[int] = []
+        evidence_rows: list[int] = []
+
+        def after_cursor(conn, cursor, statement, parameters, context, executemany):  # noqa: ARG001
+            sql = statement.lower()
+            if "from asset_observations" in sql:
+                observation_sql.append(statement)
+                observation_rows.append(cursor.rowcount)
+            if "from findings" in sql and "asset_finding_id" in sql:
+                evidence_sql.append(statement)
+                evidence_rows.append(cursor.rowcount)
+
+        listen_on = engine.sync_engine if hasattr(engine, "sync_engine") else engine
+        db = SessionLocal()
+        event.listen(listen_on, "after_cursor_execute", after_cursor)
+        try:
+            latest = _latest_observation_map(db, asset_ids)
+            assert set(latest) == set(asset_ids)
+            assert all(row.observation_key.endswith("-39") for row in latest.values())
+            loaded = db.query(Asset).filter(Asset.id.in_(asset_ids)).all()
+            af_rows = db.query(AssetFinding).filter(AssetFinding.id.in_(finding_ids)).all()
+            contexts = context_for_findings(db, af_rows, assets=loaded)
+            assert {ctx.severity for ctx in contexts.values()} == {"critical"}
+        finally:
+            event.remove(listen_on, "after_cursor_execute", after_cursor)
+            db.close()
+        assert observation_sql
+        assert any("distinct on" in sql.lower() for sql in observation_sql)
+        assert max(observation_rows) <= len(asset_ids)
+        assert evidence_sql
+        assert any("distinct on" in sql.lower() for sql in evidence_sql)
+        assert max(evidence_rows) <= len(finding_ids)
