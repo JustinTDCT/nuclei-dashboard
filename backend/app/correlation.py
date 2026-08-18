@@ -414,11 +414,7 @@ def score_candidate(asset: Asset, signals: CorrelationSignals, *, unique_hostnam
 
 
 def qualifies_for_auto_match(candidate: ScoredCandidate) -> bool:
-    """Automatic match requires a strong ID or independent corroboration.
-
-    Unique hostname can raise confidence but cannot, by itself, satisfy
-    automatic correlation or reactivation.
-    """
+    """Structural eligibility only. Score threshold is applied in decide()."""
     if candidate.blocked:
         return False
     if candidate.matched_strong:
@@ -426,32 +422,40 @@ def qualifies_for_auto_match(candidate: ScoredCandidate) -> bool:
     return candidate.matched_name and candidate.matched_corroboration
 
 
+def _competitor_blocks_auto(best: ScoredCandidate, competitor: ScoredCandidate) -> bool:
+    if (best.score - competitor.score) >= AMBIGUOUS_GAP:
+        return False
+    return (
+        competitor.score >= REVIEW_THRESHOLD
+        or (best.matched_name and competitor.matched_name)
+        or (best.matched_strong and competitor.matched_strong)
+    )
+
+
+def _ambiguous(best: ScoredCandidate, scored: list[ScoredCandidate]) -> CorrelationResult:
+    return CorrelationResult(
+        decision=DECISION_AMBIGUOUS,
+        confidence=confidence_for_score(best.score),
+        score=best.score,
+        selected_asset_id=None,
+        evidence=best.evidence,
+        candidates=scored,
+    )
+
+
 def decide(scored: list[ScoredCandidate]) -> CorrelationResult:
     viable = [row for row in scored if not row.blocked]
     viable.sort(key=lambda row: (-row.score, row.asset_id))
-    auto = [row for row in viable if qualifies_for_auto_match(row)]
-    if not auto:
+    eligible_auto = [
+        row
+        for row in viable
+        if qualifies_for_auto_match(row) and row.score >= AUTO_MATCH_THRESHOLD
+    ]
+    if not eligible_auto:
         best = viable[0] if viable else None
         second = viable[1] if len(viable) > 1 else None
-        similar = bool(
-            best
-            and second
-            and (best.score - second.score) < AMBIGUOUS_GAP
-            and (
-                second.score >= REVIEW_THRESHOLD
-                or (best.matched_name and second.matched_name)
-                or (best.matched_strong and second.matched_strong)
-            )
-        )
-        if similar:
-            return CorrelationResult(
-                decision=DECISION_AMBIGUOUS,
-                confidence=confidence_for_score(best.score),
-                score=best.score,
-                selected_asset_id=None,
-                evidence=best.evidence,
-                candidates=scored,
-            )
+        if best and second and _competitor_blocks_auto(best, second):
+            return _ambiguous(best, scored)
         return CorrelationResult(
             decision=DECISION_CREATED_NEW,
             confidence=confidence_for_score(best.score) if best else CONFIDENCE_LOW,
@@ -460,13 +464,15 @@ def decide(scored: list[ScoredCandidate]) -> CorrelationResult:
             evidence=best.evidence if best else [],
             candidates=scored,
         )
-    auto.sort(key=lambda row: (-row.score, row.asset_id))
-    best = auto[0]
-    second = auto[1] if len(auto) > 1 else None
-    if second and second.score >= REVIEW_THRESHOLD and (best.score - second.score) < AMBIGUOUS_GAP:
+    best = eligible_auto[0]
+    competitor = next((row for row in viable if row.asset_id != best.asset_id), None)
+    if competitor is not None and _competitor_blocks_auto(best, competitor):
+        return _ambiguous(best, scored)
+    confidence = confidence_for_score(best.score)
+    if best.score < AUTO_MATCH_THRESHOLD or confidence == CONFIDENCE_LOW:
         return CorrelationResult(
-            decision=DECISION_AMBIGUOUS,
-            confidence=confidence_for_score(best.score),
+            decision=DECISION_CREATED_NEW,
+            confidence=confidence,
             score=best.score,
             selected_asset_id=None,
             evidence=best.evidence,
@@ -474,7 +480,7 @@ def decide(scored: list[ScoredCandidate]) -> CorrelationResult:
         )
     return CorrelationResult(
         decision=DECISION_LINKED_EXISTING,
-        confidence=confidence_for_score(best.score),
+        confidence=confidence,
         score=best.score,
         selected_asset_id=best.asset_id,
         evidence=best.evidence,

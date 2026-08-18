@@ -367,6 +367,17 @@ def test_identity_history_and_no_automatic_correlation(reset_db):
         assert len({row.asset_id for row in same_ip}) == 2
 
         first = db.get(Asset, devices[0].asset_id)
+        before = db.query(AssetObservation).filter(AssetObservation.asset_id == first.id).count()
+        job_repeat = _job()
+        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.10", scope="wan", hostname="alpha")])
+        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.10", scope="wan", hostname="alpha")])
+        after = db.query(AssetObservation).filter(AssetObservation.asset_id == first.id).all()
+        assert len(after) == before + 1
+        db.refresh(first)
+        assert first.disposition == "unreviewed"
+        same_device = db.query(Device).filter(Device.id == devices[0].id).one()
+        assert same_device.asset_id == first.id
+
         before_change = db.query(Asset).filter(Asset.tenant_id == tenant.id).count()
         upsert_devices(db, tenant.id, _job(), [DeviceReport(ip="10.1.1.11", scope="wan", hostname="alpha")])
         db.refresh(first)
@@ -416,17 +427,6 @@ def test_identity_history_and_no_automatic_correlation(reset_db):
         )
         assert len(names) == 2
         assert {row.asset_id for row in names} == {first.id, devices[1].asset_id}
-
-        before = db.query(AssetObservation).filter(AssetObservation.asset_id == first.id).count()
-        job_repeat = _job()
-        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.10", scope="wan", hostname="alpha")])
-        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.10", scope="wan", hostname="alpha")])
-        after = db.query(AssetObservation).filter(AssetObservation.asset_id == first.id).all()
-        assert len(after) == before + 1
-        db.refresh(first)
-        assert first.disposition == "unreviewed"
-        same_device = db.query(Device).filter(Device.id == devices[0].id).one()
-        assert same_device.asset_id == first.id
 
         indexes = inspect(db.bind).get_indexes("devices")
         unique = inspect(db.bind).get_unique_constraints("devices")

@@ -471,6 +471,25 @@ def correct_identifier(
     return identifier
 
 
+def _reconcile_lan_devices_for_site(db: Session, asset: Asset, target_site_id: int) -> None:
+    """Collapse LAN Device rows that would collide after a Site move."""
+    lan_devices = [row for row in list(asset.devices) if row.scope == "lan"]
+    groups: dict[tuple[int, str, str], list[Device]] = {}
+    for device in lan_devices:
+        key = (device.tenant_id, device.hostname, device.scope)
+        groups.setdefault(key, []).append(device)
+    for devices in groups.values():
+        keeper = next((row for row in devices if row.site_id == target_site_id), None)
+        if keeper is None:
+            keeper = min(devices, key=lambda row: row.id)
+        for donor in devices:
+            if donor.id == keeper.id:
+                continue
+            _consolidate_devices(db, keeper, donor)
+        keeper.site_id = target_site_id
+    db.expire(asset, ["devices"])
+
+
 def move_asset_site(
     db: Session,
     *,
@@ -485,11 +504,12 @@ def move_asset_site(
     if site.tenant_id != asset.tenant_id:
         raise IdentityError("Site does not belong to this tenant")
     before = asset.site_id
+    db.expire(asset, ["site", "devices"])
+    _reconcile_lan_devices_for_site(db, asset, site.id)
     asset.site_id = site.id
+    asset.site = site
     asset.updated_at = utcnow()
-    for device in asset.devices:
-        if device.scope == "lan":
-            device.site_id = site.id
+    db.flush()
     record_audit(
         db,
         actor=actor,

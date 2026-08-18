@@ -693,6 +693,9 @@ def test_correlation_safety_cases(reset_db):
         assert full_scans == []
         assert any("asset_identifiers" in sql.lower() or "asset_addresses" in sql.lower() for sql in queries)
         assert len(queries) < 20
+        for row in db.query(AssetCorrelationDecision).filter(AssetCorrelationDecision.decision == "linked_existing"):
+            assert row.score >= 50
+            assert row.confidence != "low"
     finally:
         db.close()
 
@@ -1105,6 +1108,159 @@ def test_phase1c_corrective_regressions(reset_db):
             .count()
             == 0
         )
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_low_confidence_and_cross_site_move(reset_db):
+    from app.auth import hash_password
+    from app.database import SessionLocal
+    from app.identity_ops import merge_assets, move_asset_site
+    from app.inventory import upsert_devices
+    from app.migrate import apply_schema
+    from app.models import (
+        Asset,
+        AssetCorrelationDecision,
+        AssetObservation,
+        Device,
+        Finding,
+        Tenant,
+        User,
+    )
+    from app.schemas import DeviceReport
+
+    apply_schema()
+    db: Session = SessionLocal()
+    try:
+        tenant = Tenant(name="Threshold Tenant", notes="")
+        db.add(tenant)
+        db.flush()
+        actor = User(
+            username="threshold-admin",
+            email="threshold-admin@example.com",
+            password_hash=hash_password("threshold-admin-pass"),
+            role="admin",
+            is_active=True,
+        )
+        db.add(actor)
+        db.flush()
+
+        _, created_a = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="wan"),
+            [
+                DeviceReport(
+                    ip="10.50.0.1",
+                    scope="wan",
+                    hostname="sharedhost",
+                    tech="nginx",
+                    ports=[{"port": 443, "product": "nginx"}],
+                )
+            ],
+        )
+        _, created_b = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="wan"),
+            [DeviceReport(ip="10.50.0.2", scope="wan", hostname="sharedhost")],
+        )
+        assert created_a[0].asset_id != created_b[0].asset_id
+        probe_job = _job(db, tenant.id, scope="wan")
+        upsert_devices(
+            db,
+            tenant.id,
+            probe_job,
+            [
+                DeviceReport(
+                    ip="10.50.0.9",
+                    scope="wan",
+                    hostname="sharedhost",
+                    tech="nginx",
+                    ports=[{"port": 80, "product": "nginx"}],
+                )
+            ],
+        )
+        decision = (
+            db.query(AssetCorrelationDecision)
+            .filter(AssetCorrelationDecision.scan_job_id == probe_job)
+            .order_by(AssetCorrelationDecision.id.desc())
+            .first()
+        )
+        assert decision is not None
+        assert decision.decision != "linked_existing"
+        assert decision.decision in {"ambiguous", "created_new"}
+        for row in db.query(AssetCorrelationDecision).filter(AssetCorrelationDecision.decision == "linked_existing"):
+            assert row.score >= 50
+            assert row.confidence != "low"
+
+        boston, boston_agent = _lan_world(db, tenant, "Boston")
+        hartford, hartford_agent = _lan_world(db, tenant, "Hartford")
+        _, boston_devs = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="lan", agent=boston_agent),
+            [DeviceReport(ip="192.168.10.10", scope="lan", hostname="server01")],
+        )
+        _, hartford_devs = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="lan", agent=hartford_agent),
+            [DeviceReport(ip="192.168.20.10", scope="lan", hostname="server01")],
+        )
+        asset_a = db.get(Asset, boston_devs[0].asset_id)
+        asset_b = db.get(Asset, hartford_devs[0].asset_id)
+        assert asset_a.site_id == boston.id
+        assert asset_b.site_id == hartford.id
+        boston_obs = db.query(AssetObservation).filter(AssetObservation.asset_id == asset_a.id).one()
+        hartford_obs = db.query(AssetObservation).filter(AssetObservation.asset_id == asset_b.id).one()
+        finding_a = Finding(
+            tenant_id=tenant.id,
+            device_id=boston_devs[0].id,
+            template_id="keep-boston",
+            name="finding-boston",
+            severity="high",
+            hostname="server01",
+            host="192.168.10.10",
+        )
+        finding_b = Finding(
+            tenant_id=tenant.id,
+            device_id=hartford_devs[0].id,
+            template_id="keep-hartford",
+            name="finding-hartford",
+            severity="medium",
+            hostname="server01",
+            host="192.168.20.10",
+        )
+        db.add_all([finding_a, finding_b])
+        db.flush()
+        merge_assets(db, target=asset_a, source_ids=[asset_b.id], actor=actor, reason="same host")
+        db.refresh(asset_a)
+        move_asset_site(db, asset=asset_a, site_id=hartford.id, actor=actor, reason="correct location")
+        db.refresh(asset_a)
+        db.refresh(finding_a)
+        db.refresh(finding_b)
+        db.refresh(boston_obs)
+        db.refresh(hartford_obs)
+        assert asset_a.site_id == hartford.id
+        devices = (
+            db.query(Device)
+            .filter(
+                Device.asset_id == asset_a.id,
+                Device.hostname == "server01",
+                Device.scope == "lan",
+            )
+            .all()
+        )
+        assert len(devices) == 1
+        assert devices[0].site_id == hartford.id
+        assert finding_a.device_id == devices[0].id
+        assert finding_b.device_id == devices[0].id
+        assert db.get(Device, finding_a.device_id) is not None
+        assert db.get(Device, finding_b.device_id) is not None
+        assert boston_obs.site_id == boston.id
+        assert hartford_obs.site_id == hartford.id
     finally:
         db.close()
 
