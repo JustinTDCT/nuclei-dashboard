@@ -11,8 +11,23 @@ class ApiError(RuntimeError):
     pass
 
 
-def _tls_verify() -> bool:
-    return os.environ.get("TLS_VERIFY", "1") != "0"
+def _tls_verify() -> bool | str:
+    """TLS verification is on by default.
+
+    TLS_VERIFY=0 disables verification (development opt-out only).
+    TLS_VERIFY=1 (default) uses the system trust store.
+    Any other non-empty value is treated as a CA bundle path for an
+    internal/private CA. TLS_CA_FILE is an equivalent explicit alias.
+    """
+    ca_file = os.environ.get("TLS_CA_FILE", "").strip()
+    if ca_file:
+        return ca_file
+    value = os.environ.get("TLS_VERIFY", "1").strip()
+    if value in {"0", "false", "False", "no", "off"}:
+        return False
+    if value in {"", "1", "true", "True", "yes", "on"}:
+        return True
+    return value
 
 
 class CentralClient:

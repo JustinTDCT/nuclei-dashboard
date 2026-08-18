@@ -37,12 +37,12 @@ volumes:
 """
 
 
-def agent_env(agent: Agent, central_url: str) -> str:
+def agent_env(agent: Agent, central_url: str, include_secret: bool = True) -> str:
     lines = [
         f"CENTRAL_URL={central_url}",
         f"AGENT_UUID={agent.uuid}",
     ]
-    if agent.enrollment_secret:
+    if include_secret and agent.enrollment_secret:
         lines.append(f"ENROLLMENT_SECRET={agent.enrollment_secret}")
     lines.append(f"TLS_VERIFY={settings.agent_tls_verify}")
     return "\n".join(lines) + "\n"

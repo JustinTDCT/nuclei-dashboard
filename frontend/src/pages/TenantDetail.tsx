@@ -225,12 +225,16 @@ function Agents({ tenantId }: { tenantId: number }) {
           a.hostname || "—",
           a.last_heartbeat ? new Date(a.last_heartbeat).toLocaleString() : "—",
           <div className="flex flex-col items-end gap-1 text-sm">
-            <button className="text-cyan-400" onClick={() => download(`/api/agents/${a.id}/compose`, `agent-${a.uuid}.yml`)}>
-              Compose
-            </button>
-            <button className="text-cyan-400" onClick={() => download(`/api/agents/${a.id}/env`, `agent-${a.uuid}.env`)}>
-              Env
-            </button>
+            {write && (
+              <>
+                <button className="text-cyan-400" onClick={() => download(`/api/agents/${a.id}/compose`, `agent-${a.uuid}.yml`)}>
+                  Compose
+                </button>
+                <button className="text-cyan-400" onClick={() => download(`/api/agents/${a.id}/env`, `agent-${a.uuid}.env`)}>
+                  Env
+                </button>
+              </>
+            )}
             {write && a.status === "pending_approval" && (
               <button className="text-emerald-300" onClick={() => api(`/api/agents/${a.id}/approve`, { method: "POST" }).then(load)}>
                 Approve

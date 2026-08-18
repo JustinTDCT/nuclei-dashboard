@@ -4,6 +4,8 @@ Internal multi-tenant control plane for authorized client network discovery and 
 
 Staff log in (admins, users, viewers). **Tenants are clients you manage**, not self-service accounts. LAN scans run on approved site agents. WAN scans run from the central scanner.
 
+`MASTER_PLAN.md` is the canonical architecture source of truth. Contributor and upgrade notes (Alembic, TLS, Viewer limits) are in `docs/DEVELOPMENT.md`.
+
 ## Architecture
 
 - **Caddy** terminates HTTP/HTTPS and routes `/api` to FastAPI and everything else to the React UI
@@ -24,6 +26,8 @@ docker compose up -d --build
 The **central** stack is this repo (`backend/`, `frontend/`, `scan_runtime/`, `Caddyfile`, `certs/`). On first start use `--build`. Site agents do **not** need a copy of the whole tree — they build `scan_runtime` from GitHub.
 
 Open `https://localhost:8118` and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. The first visit will warn about Caddy's internal certificate — continue past it. Set `SITE_ADDRESS` and `PUBLIC_URL` to `https://your-hostname:8118` if the dashboard is reached by a name other than localhost.
+
+Agent TLS verification is **on** by default. For Caddy's internal certificate, either install a publicly trusted certificate, point the agent at Caddy's local CA (`TLS_CA_FILE`), or set `AGENT_TLS_VERIFY=0` for lab use only. See `docs/DEVELOPMENT.md`.
 
 ## Typical workflow
 
@@ -71,7 +75,7 @@ Set `SCAN_DRY_RUN=1` on the scanner (or agent) to emit sample results without to
 |--------|--------|
 | Admin  | System settings, users, everything a user can do |
 | User   | Tenants, subnets, agents, scans, classification, acknowledge alerts |
-| Viewer | Read-only inventory, findings, reports |
+| Viewer | Read-only inventory, findings, agent status. Cannot download enrollment secrets or agent compose/env |
 
 ## Local UI development
 

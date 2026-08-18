@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     agent_git_context: str = (
         "https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime"
     )
-    agent_tls_verify: str = "0"
+    agent_tls_verify: str = "1"
     cors_origins: str = "http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118"
 
 

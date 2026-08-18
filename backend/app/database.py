@@ -14,6 +14,11 @@ class Base(DeclarativeBase):
 
 
 def ensure_columns() -> None:
+    """Legacy compatibility for pre-Alembic databases.
+
+    Frozen for Phase 0. Future schema changes must be Alembic revisions,
+    not new statements in this function.
+    """
     inspector = inspect(engine)
     if "devices" not in inspector.get_table_names():
         return

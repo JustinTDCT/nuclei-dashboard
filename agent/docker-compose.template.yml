@@ -14,7 +14,7 @@ services:
       CENTRAL_URL: https://10.150.10.155:8118
       AGENT_UUID: 00000000-0000-0000-0000-000000000000
       ENROLLMENT_SECRET: replace-me
-      TLS_VERIFY: "0"
+      TLS_VERIFY: "1"
       SCAN_DRY_RUN: "0"
     volumes:
       - agent-keys:/data

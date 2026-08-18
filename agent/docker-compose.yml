@@ -19,7 +19,7 @@ services:
       CENTRAL_URL: ${CENTRAL_URL}
       AGENT_UUID: ${AGENT_UUID}
       ENROLLMENT_SECRET: ${ENROLLMENT_SECRET:-}
-      TLS_VERIFY: ${TLS_VERIFY:-0}
+      TLS_VERIFY: ${TLS_VERIFY:-1}  # default on; set 0 only for lab, or TLS_CA_FILE for an internal CA
       SCAN_DRY_RUN: "0"
     volumes:
       - agent-keys:/data

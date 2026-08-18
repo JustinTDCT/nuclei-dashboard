@@ -27,7 +27,7 @@ services:
       PUBLIC_URL: ${PUBLIC_URL:-https://10.150.10.155:8118}
       AGENT_IMAGE: ${AGENT_IMAGE:-nuclei-dashboard-agent:latest}
       AGENT_GIT_CONTEXT: ${AGENT_GIT_CONTEXT:-https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime}
-      AGENT_TLS_VERIFY: ${AGENT_TLS_VERIFY:-0}
+      AGENT_TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118}
     depends_on:
       postgres:
@@ -76,7 +76,7 @@ services:
       CENTRAL_URL: ${AGENT_CENTRAL_URL:-${PUBLIC_URL:-https://10.150.10.155:8118}}
       AGENT_UUID: ${AGENT_UUID:-}
       ENROLLMENT_SECRET: ${ENROLLMENT_SECRET:-}
-      TLS_VERIFY: ${AGENT_TLS_VERIFY:-0}
+      TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
       SCAN_DRY_RUN: "0"
     volumes:
       - agent-keys:/data

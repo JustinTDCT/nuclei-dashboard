@@ -108,7 +108,7 @@ def revoke_agent(agent_id: int, _: User = Depends(require_user), db: Session = D
 
 
 @router.get("/agents/{agent_id}/compose", response_class=PlainTextResponse)
-def download_compose(agent_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def download_compose(agent_id: int, _: User = Depends(require_user), db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -119,8 +119,11 @@ def download_compose(agent_id: int, _: User = Depends(require_any), db: Session 
 
 
 @router.get("/agents/{agent_id}/env", response_class=PlainTextResponse)
-def download_env(agent_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def download_env(agent_id: int, _: User = Depends(require_user), db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return PlainTextResponse(agent_env(agent, central_url(db)), media_type="text/plain")
+    include = agent.status in ("pending_enrollment", "pending_approval")
+    return PlainTextResponse(
+        agent_env(agent, central_url(db), include_secret=include), media_type="text/plain"
+    )

@@ -4,7 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import Base, SessionLocal, engine, ensure_columns
+from app.database import SessionLocal, ensure_columns
+from app.migrate import apply_schema
 from app.routers import (
     admin,
     agent_api,
@@ -26,7 +27,8 @@ from app.seed import seed
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
+    apply_schema()
+    # Retained until existing-install adoption is proven. Do not add new ALTER TABLE here.
     ensure_columns()
     db = SessionLocal()
     try:
