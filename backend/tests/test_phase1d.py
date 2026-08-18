@@ -1486,3 +1486,95 @@ def test_fingerprint_only_cidr_invokes_httpx():
         )
     assert any(row.get("ip") == "10.1.0.0/24" for row in captured.get("hosts") or [])
     assert result["devices"] == []
+
+
+@requires_postgres
+def test_wan_fqdn_dns_failure_fails_the_run_closed(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        fqdn = client.post(
+            f"/api/tenants/{world['tenant']['id']}/wan-targets",
+            headers=_headers(token),
+            json={"name": "Unresolved", "target_type": "fqdn", "value": "down.example.com"},
+        )
+        assert fqdn.status_code == 200, fqdn.text
+        scan = _wan_scan(client, token, world, name="FQDN DNS down", wan_target_ids=[fqdn.json()["id"]])
+        run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
+        assert run.status_code == 200, run.text
+        job_id = run.json()["id"]
+        with patch("app.scan_security.socket.getaddrinfo", side_effect=OSError("name resolution failed")):
+            poll = client.get("/api/internal/scanner/jobs", headers=_scanner_headers())
+            assert poll.status_code == 200, poll.text
+            assert poll.json() == []
+        from app.database import SessionLocal
+        from app.models import ScanJob
+
+        db = SessionLocal()
+        try:
+            job = db.get(ScanJob, job_id)
+            assert job.status == "failed"
+            assert "resolve" in (job.error or "").lower()
+        finally:
+            db.close()
+
+        scan2 = _wan_scan(client, token, world, name="FQDN DNS start", wan_target_ids=[fqdn.json()["id"]])
+        run2 = client.post(f"/api/scans/{scan2['id']}/run", headers=_headers(token))
+        assert run2.status_code == 200, run2.text
+        with patch("app.scan_security.socket.getaddrinfo", side_effect=OSError("name resolution failed")):
+            started = client.post(
+                f"/api/internal/scanner/jobs/{run2.json()['id']}/start",
+                headers=_scanner_headers(),
+            )
+        assert started.status_code == 409, started.text
+        assert "resolve" in started.json()["detail"].lower()
+        db = SessionLocal()
+        try:
+            job = db.get(ScanJob, run2.json()["id"])
+            assert job.status == "failed"
+            assert job.claimed_by is None
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_lan_observation_uses_snapshotted_cidr_after_network_edit(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan = _lan_scan(client, token, world, network_ids=[world["net1"]["id"]])
+        run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
+        assert run.status_code == 200, run.text
+        job_id = run.json()["id"]
+        history = client.get(f"/api/jobs/{job_id}", headers=_headers(token)).json()
+        snap_nets = history["execution_snapshot"]["targets"]["networks"]
+        assert any(row["id"] == world["net1"]["id"] and row["cidr"] == "10.1.0.0/24" for row in snap_nets)
+        _heartbeat(world["agent1"]["id"])
+        started = client.post(f"/api/agent/jobs/{job_id}/start", headers=_agent_headers(world["agent1"]))
+        assert started.status_code == 200, started.text
+        edited = client.patch(
+            f"/api/networks/{world['net1']['id']}",
+            headers=_headers(token),
+            json={"name": "Net One", "cidr": "10.2.0.0/24"},
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["cidr"] == "10.2.0.0/24"
+        posted = client.post(
+            f"/api/agent/jobs/{job_id}/devices",
+            headers=_agent_headers(world["agent1"]),
+            json=[{"ip": "10.1.0.20", "scope": "lan", "hostname": "snap-net-host", "ports": [22]}],
+        )
+        assert posted.status_code == 200, posted.text
+        from app.database import SessionLocal
+        from app.models import Asset, AssetObservation, Device
+
+        db = SessionLocal()
+        try:
+            device = db.query(Device).filter(Device.hostname == "snap-net-host").one()
+            asset = db.get(Asset, device.asset_id)
+            obs = db.query(AssetObservation).filter(AssetObservation.asset_id == asset.id).one()
+            assert obs.network_id == world["net1"]["id"]
+            assert obs.site_id == world["site"]["id"]
+            assert obs.agent_id == world["agent1"]["id"]
+        finally:
+            db.close()

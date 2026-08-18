@@ -164,7 +164,11 @@ def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_d
             agents = _agents_for_snapshot(db, job)
             if not agent_may_claim_now(agent, job.execution_snapshot, agents):
                 continue
-            payloads.append(job_payload(db, job))
+            try:
+                payloads.append(job_payload(db, job))
+            except LanScanInvalidError as exc:
+                fail_job(db, job, exc.detail)
+                continue
             if len(payloads) >= 5:
                 break
             continue

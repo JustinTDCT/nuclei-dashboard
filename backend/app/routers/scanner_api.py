@@ -7,6 +7,7 @@ from app.config import settings
 from app.database import get_db
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
+from app.locality import LanScanInvalidError
 from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
 from app.scan_dispatch import CENTRAL_WORKER
 from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
@@ -47,7 +48,7 @@ def poll_jobs(_: None = Depends(require_scanner), db: Session = Depends(get_db))
                 continue
             revalidate_wan_start(db, job)
             payloads.append(job_payload(db, job))
-        except ExecutionBlocked as exc:
+        except (ExecutionBlocked, LanScanInvalidError) as exc:
             fail_job(db, job, exc.detail)
     return payloads
 
@@ -77,7 +78,7 @@ def start_job(job_id: int, _: None = Depends(require_scanner), db: Session = Dep
             raise HTTPException(status_code=409, detail=LEGACY_PRE_1D_REQUEUE_ERROR)
         revalidate_wan_start(db, job)
         payload = job_payload(db, job)
-    except ExecutionBlocked as exc:
+    except (ExecutionBlocked, LanScanInvalidError) as exc:
         fail_job(db, job, exc.detail)
         raise HTTPException(status_code=409, detail=exc.detail) from exc
     job.status = "running"

@@ -221,10 +221,10 @@ def observation_context(db: Session, job_id: int, ip: str, report_scope: str) ->
         from app.scan_execution import execution_context, resolve_snapshot_network
 
         context = execution_context(db, job)
-        network = resolve_snapshot_network(db, job, ip)
+        network_id = resolve_snapshot_network(db, job, ip)
         return {
             "site_id": context["site_id"] if context["scope"] == "lan" else None,
-            "network_id": network.id if network else None,
+            "network_id": network_id,
             "agent_id": context["claimed_agent_id"] if context["scope"] == "lan" else None,
             "scope": context["scope"],
             "scan_job_id": job_id,

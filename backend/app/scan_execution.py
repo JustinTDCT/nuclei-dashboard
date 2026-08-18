@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import JOB_RUNNING, Agent, Network, ScanJob
+from app.models import JOB_RUNNING, Agent, ScanJob
 from app.scan_exclusions import effective_exclusions, exclusion_networks_from_rows, serialize_exclusions
 from app.scan_security import ExecutionBlocked, pin_fqdn_targets
 from app.scan_snapshot import job_payload_from_snapshot, worker_targets_from_snapshot
@@ -50,7 +50,7 @@ def execution_context(db: Session, job: ScanJob) -> dict[str, Any]:
     }
 
 
-def resolve_snapshot_network(db: Session, job: ScanJob, ip: str) -> Network | None:
+def resolve_snapshot_network(db: Session, job: ScanJob, ip: str) -> int | None:
     context = execution_context(db, job)
     if context["scope"] != "lan" or not context["network_ids"] or not (ip or "").strip():
         return None
@@ -59,11 +59,14 @@ def resolve_snapshot_network(db: Session, job: ScanJob, ip: str) -> Network | No
     except ValueError:
         return None
     matches = []
-    networks = db.query(Network).filter(Network.id.in_(context["network_ids"])).all()
-    for network in networks:
+    for row in (context["snapshot"].get("targets") or {}).get("networks") or []:
+        network_id = row.get("id")
+        cidr = row.get("cidr")
+        if network_id is None or not cidr:
+            continue
         try:
-            if parsed in ip_network(network.cidr, strict=False):
-                matches.append(network)
+            if parsed in ip_network(cidr, strict=False):
+                matches.append(network_id)
         except ValueError:
             continue
     if len(matches) == 1:
