@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Iterable
 
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import (
@@ -210,15 +210,23 @@ def calculate_asset_finding_priority(data: PriorityInput | dict[str, Any]) -> di
     score += epss
     factors.append(epss_factor)
 
-    kev = bool(payload.kev)
-    kev_points = 35 if kev else 0
+    kev = payload.kev
+    if kev is True:
+        kev_points = 35
+        kev_note = "CISA KEV — known exploited vulnerability"
+    elif kev is False:
+        kev_points = 0
+        kev_note = "Not listed in the official CISA KEV catalog."
+    else:
+        kev_points = 0
+        kev_note = "Unknown / not synchronized"
     factors.append(
         {
             "factor": "cisa_kev",
             "value": kev,
             "points": kev_points,
             "source": "cisa_kev",
-            "note": "CISA KEV — known exploited vulnerability" if kev else "Not listed in the official CISA KEV catalog.",
+            "note": kev_note,
         }
     )
     score += kev_points
@@ -254,7 +262,7 @@ def calculate_asset_finding_priority(data: PriorityInput | dict[str, Any]) -> di
         score = 100
 
     priority = _band(score)
-    if kev:
+    if kev is True:
         if priority != PRIORITY_P1:
             overrides.append(
                 {
@@ -275,23 +283,35 @@ def calculate_asset_finding_priority(data: PriorityInput | dict[str, Any]) -> di
 
     cvss = _as_float(payload.cvss_base_score)
     detector = (payload.detector_severity or "").strip().lower()
-    if (cvss is not None and cvss >= 9.0) or detector == "critical":
+    # Detector severity is a fallback only. When normalized CVSS exists it
+    # owns both the impact points and the severity floor.
+    if cvss is not None:
+        critical_floor = cvss >= 9.0
+        high_floor = cvss >= 7.0
+        floor_reason = "Critical CVSS severity floor" if critical_floor else "High CVSS severity floor"
+    else:
+        critical_floor = detector == "critical"
+        high_floor = detector == "high"
+        floor_reason = (
+            "Critical detector severity floor" if critical_floor else "High detector severity floor"
+        )
+    if critical_floor:
         if PRIORITY_ORDER[priority] > PRIORITY_ORDER[PRIORITY_P2]:
             overrides.append(
                 {
                     "type": "severity_floor",
                     "priority": PRIORITY_P2,
-                    "reason": "Critical CVSS/detector severity floor",
+                    "reason": floor_reason,
                 }
             )
         priority = _higher(priority, PRIORITY_P2)
-    elif (cvss is not None and cvss >= 7.0) or detector == "high":
+    elif high_floor:
         if PRIORITY_ORDER[priority] > PRIORITY_ORDER[PRIORITY_P3]:
             overrides.append(
                 {
                     "type": "severity_floor",
                     "priority": PRIORITY_P3,
-                    "reason": "High CVSS/detector severity floor",
+                    "reason": floor_reason,
                 }
             )
         priority = _higher(priority, PRIORITY_P3)
@@ -558,7 +578,7 @@ def apply_kev_filter(query, kev: bool | None):
     )
     if kev:
         return query.filter(VulnerabilityIntelligence.kev.is_(True))
-    return query.filter(or_(VulnerabilityIntelligence.kev.is_(False), VulnerabilityIntelligence.kev.is_(None)))
+    return query.filter(VulnerabilityIntelligence.kev.is_(False))
 
 
 def priority_sort_sql():

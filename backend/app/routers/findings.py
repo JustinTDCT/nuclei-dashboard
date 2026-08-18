@@ -423,22 +423,21 @@ def _serialize_vulnerability(db: Session, vulnerability: Vulnerability) -> Vulne
 @router.get("/vulnerabilities/{vulnerability_id}", response_model=VulnerabilityIntelligenceOut)
 def get_vulnerability(
     vulnerability_id: int,
-    tenant_id: int | None = Query(default=None),
+    tenant_id: int = Query(..., description="Tenant that has a linked Asset Finding for this vulnerability"),
     _: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
+    _require_tenant(db, tenant_id)
     vulnerability = db.get(Vulnerability, vulnerability_id)
     if vulnerability is None:
         raise HTTPException(status_code=404, detail="Vulnerability not found")
-    if tenant_id is not None:
-        _require_tenant(db, tenant_id)
-        linked = (
-            db.query(AssetFinding.id)
-            .filter(AssetFinding.vulnerability_id == vulnerability.id, AssetFinding.tenant_id == tenant_id)
-            .first()
-        )
-        if linked is None:
-            raise HTTPException(status_code=404, detail="Vulnerability not found")
+    linked = (
+        db.query(AssetFinding.id)
+        .filter(AssetFinding.vulnerability_id == vulnerability.id, AssetFinding.tenant_id == tenant_id)
+        .first()
+    )
+    if linked is None:
+        raise HTTPException(status_code=404, detail="Vulnerability not found")
     return _serialize_vulnerability(db, vulnerability)
 
 

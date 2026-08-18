@@ -45,6 +45,7 @@ class EpssDataset:
     score_date: date | None
     model_version: str | None
     source_updated_at: datetime | None
+    complete: bool = False
 
 
 def _parse_date(value: str | None) -> date | None:

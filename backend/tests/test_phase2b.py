@@ -16,40 +16,40 @@ PHASE2B_HEAD = "0010_cve_intelligence_priority"
 CVE = "CVE-2024-1234"
 
 
-def _nvd_body(cve=CVE, score=9.8, version="3.1"):
-    return json.dumps(
-        {
-            "vulnerabilities": [
+def _nvd_item(cve=CVE, score=9.8, version="3.1"):
+    metrics = {}
+    if score is not None:
+        metrics = {
+            "cvssMetricV31": [
                 {
-                    "cve": {
-                        "id": cve,
-                        "vulnStatus": "Analyzed",
-                        "published": "2024-01-01T00:00:00.000Z",
-                        "lastModified": "2024-02-01T00:00:00.000Z",
-                        "descriptions": [{"lang": "en", "value": "NVD description"}],
-                        "metrics": {
-                            "cvssMetricV31": [
-                                {
-                                    "source": "nvd@nist.gov",
-                                    "type": "Primary",
-                                    "cvssData": {
-                                        "version": version,
-                                        "baseScore": score,
-                                        "baseSeverity": "CRITICAL",
-                                        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-                                    },
-                                }
-                            ]
-                        },
-                        "weaknesses": [
-                            {"source": "nvd@nist.gov", "description": [{"lang": "en", "value": "CWE-79"}]}
-                        ],
-                        "references": [{"url": "https://example.test/nvd", "source": "nvd@nist.gov", "tags": ["Patch"]}],
-                    }
+                    "source": "nvd@nist.gov",
+                    "type": "Primary",
+                    "cvssData": {
+                        "version": version,
+                        "baseScore": score,
+                        "baseSeverity": "CRITICAL" if score >= 9 else "HIGH" if score >= 7 else "MEDIUM",
+                        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+                    },
                 }
             ]
         }
-    ).encode()
+    return {
+        "cve": {
+            "id": cve,
+            "vulnStatus": "Analyzed",
+            "published": "2024-01-01T00:00:00.000Z",
+            "lastModified": "2024-02-01T00:00:00.000Z",
+            "descriptions": [{"lang": "en", "value": "NVD description"}],
+            "metrics": metrics,
+            "weaknesses": [{"source": "nvd@nist.gov", "description": [{"lang": "en", "value": "CWE-79"}]}],
+            "references": [{"url": "https://example.test/nvd", "source": "nvd@nist.gov", "tags": ["Patch"]}],
+        }
+    }
+
+
+def _nvd_body(cve=CVE, score=9.8, version="3.1", cves=None):
+    items = [_nvd_item(item, score=score, version=version) for item in (cves or [cve])]
+    return json.dumps({"vulnerabilities": items}).encode()
 
 
 def _epss_csv(rows=None):
@@ -536,3 +536,366 @@ def test_viewer_can_read_but_not_refresh(reset_db):
         assert settings.status_code == 403
         missing = client.get("/api/tenants/999999/asset-findings", headers=_headers(viewer))
         assert missing.status_code == 404
+
+
+def _seed_cve_rows(tenant_id, asset_id, cves, *, cvss=1.0, priority="p4", kev=None):
+    from app.database import engine
+
+    now = datetime.now(timezone.utc)
+    ids = []
+    with engine.begin() as conn:
+        for cve in cves:
+            vuln_id = conn.execute(
+                text(
+                    "INSERT INTO vulnerabilities (canonical_key, cve_id, title, description) VALUES (:k, :c, :c, '') RETURNING id"
+                ),
+                {"k": f"cve:{cve}", "c": cve},
+            ).scalar_one()
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO vulnerability_intelligence (
+                        vulnerability_id, cvss_version, cvss_base_score, kev, created_at, updated_at
+                    )
+                    VALUES (:v, '3.1', :cvss, :kev, :n, :n)
+                    """
+                ),
+                {"v": vuln_id, "cvss": cvss, "kev": kev, "n": now},
+            )
+            af_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO asset_findings (
+                        tenant_id, asset_id, vulnerability_id, technical_state, treatment_state,
+                        first_seen, last_seen, consecutive_clean_scans, reopened_count, priority, priority_score
+                    )
+                    VALUES (:t, :a, :v, 'open', 'unaddressed', :n, :n, 0, 0, :p, 10)
+                    RETURNING id
+                    """
+                ),
+                {"t": tenant_id, "a": asset_id, "v": vuln_id, "p": priority, "n": now},
+            ).scalar_one()
+            ids.append((vuln_id, af_id, cve))
+    return ids
+
+
+@requires_postgres
+def test_nvd_second_batch_failure_rolls_back_all_batches(reset_db):
+    from urllib.parse import parse_qs, urlparse
+
+    from app.database import SessionLocal
+    from app.intel.http import HttpResponse, IntelligenceHttpError
+    from app.intel.sync import NVD_BATCH_SIZE, refresh_nvd
+    from app.models import AssetFinding, Vulnerability, VulnerabilityIntelligence
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _cve_finding(client, token, world)
+        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        asset_id = listed[0]["asset_id"]
+
+    cves = [f"CVE-2024-{20000 + index}" for index in range(NVD_BATCH_SIZE + NVD_BATCH_SIZE + 1)]
+    seeded = _seed_cve_rows(world["tenant"]["id"], asset_id, cves)
+    calls = {"n": 0}
+
+    def fail_after_first_batch(url, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            ids = [item for item in parse_qs(urlparse(url).query).get("cveIds", [""])[0].split(",") if item]
+            assert len(ids) == NVD_BATCH_SIZE
+            return HttpResponse(200, _nvd_body(cves=ids, score=9.8), {})
+        raise IntelligenceHttpError("batch 2 failed", permanent=True)
+
+    db = SessionLocal()
+    try:
+        result = refresh_nvd(db, fetch=fail_after_first_batch, sleep=lambda _: None, force=True)
+        assert "error" in result
+        db.commit()
+    finally:
+        db.close()
+
+    assert calls["n"] >= 2
+    db = SessionLocal()
+    try:
+        for vuln_id, af_id, _cve in seeded:
+            intel = db.get(VulnerabilityIntelligence, vuln_id)
+            af = db.get(AssetFinding, af_id)
+            assert float(intel.cvss_base_score) == 1.0
+            assert af.priority == "p4"
+            assert af.priority_score == 10
+        assert db.query(Vulnerability).filter(Vulnerability.cve_id.in_(cves)).count() == len(cves)
+        original = db.query(Vulnerability).filter(Vulnerability.cve_id == CVE).one()
+        assert db.get(VulnerabilityIntelligence, original.id) is None
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_nvd_successful_record_without_cvss_clears_old_score(reset_db):
+    from app.database import SessionLocal
+    from app.intel.priority import recalculate_priorities_for_vulnerabilities
+    from app.intel.sync import refresh_nvd
+    from app.models import AssetFinding, Vulnerability, VulnerabilityIntelligence
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _cve_finding(client, token, world, severity="high")
+        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        vuln_id = listed[0]["vulnerability_id"]
+        af_id = listed[0]["id"]
+
+    _set_intel(
+        vuln_id,
+        cvss_version="3.1",
+        cvss_base_score=Decimal("9.8"),
+        cvss_base_severity="CRITICAL",
+        cvss_vector="CVSS:3.1/AV:N",
+        cvss_source="nvd@nist.gov",
+    )
+    db = SessionLocal()
+    try:
+        recalculate_priorities_for_vulnerabilities(db, [vuln_id])
+        db.commit()
+        af = db.get(AssetFinding, af_id)
+        assert af.priority == "p2"
+        assert float(db.get(VulnerabilityIntelligence, vuln_id).cvss_base_score) == 9.8
+        result = refresh_nvd(
+            db,
+            fetch=ScriptedFetch({"cves/2.0": (200, _nvd_body(score=None))}),
+            sleep=lambda _: None,
+            force=True,
+        )
+        assert "error" not in result
+        db.commit()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        intel = db.get(VulnerabilityIntelligence, vuln_id)
+        af = db.get(AssetFinding, af_id)
+        assert intel.cvss_base_score is None
+        assert intel.cvss_version is None
+        assert intel.nvd_fetched_at is not None
+        assert db.get(Vulnerability, vuln_id).canonical_key == f"cve:{CVE}"
+        assert any(item.get("factor") == "detector_severity" for item in (af.priority_explanation or {}).get("factors", []))
+        assert not any(item.get("factor") == "cvss" for item in (af.priority_explanation or {}).get("factors", []))
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_well_formed_partial_epss_does_not_clear_missing_cves(reset_db):
+    from app.database import SessionLocal
+    from app.intel.sync import apply_epss_dataset, refresh_epss
+    from app.intel.epss import parse_epss_csv
+    from app.models import Vulnerability, VulnerabilityIntelligence
+
+    other = "CVE-2024-9999"
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _cve_finding(client, token, world)
+        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        _seed_cve_rows(world["tenant"]["id"], listed[0]["asset_id"], [other], cvss=None)
+
+    db = SessionLocal()
+    try:
+        tracked = db.query(Vulnerability).filter(Vulnerability.cve_id.in_([CVE, other])).order_by(Vulnerability.id).all()
+        apply_epss_dataset(
+            db,
+            parse_epss_csv(_epss_csv([(CVE, "0.420000000", "0.972000000"), (other, "0.110000000", "0.440000000")])),
+            tracked,
+        )
+        db.commit()
+        other_intel = (
+            db.query(VulnerabilityIntelligence)
+            .join(Vulnerability, Vulnerability.id == VulnerabilityIntelligence.vulnerability_id)
+            .filter(Vulnerability.cve_id == other)
+            .one()
+        )
+        assert float(other_intel.epss_percentile) == pytest.approx(0.44)
+        result = refresh_epss(
+            db,
+            fetch=ScriptedFetch({"epss_scores-current": (200, _epss_csv([(CVE, "0.500000000", "0.800000000")]))}),
+            sleep=lambda _: None,
+            force=True,
+        )
+        assert "error" not in result
+        db.commit()
+        db.expire_all()
+        intel_cve = (
+            db.query(VulnerabilityIntelligence)
+            .join(Vulnerability, Vulnerability.id == VulnerabilityIntelligence.vulnerability_id)
+            .filter(Vulnerability.cve_id == CVE)
+            .one()
+        )
+        intel_other = (
+            db.query(VulnerabilityIntelligence)
+            .join(Vulnerability, Vulnerability.id == VulnerabilityIntelligence.vulnerability_id)
+            .filter(Vulnerability.cve_id == other)
+            .one()
+        )
+        assert float(intel_cve.epss_percentile) == pytest.approx(0.80)
+        assert float(intel_other.epss_percentile) == pytest.approx(0.44)
+        assert float(intel_other.epss_score) == pytest.approx(0.11)
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_kev_null_excluded_from_false_filter(reset_db):
+    from app.database import SessionLocal
+    from app.intel.priority import recalculate_priorities_for_vulnerabilities
+    from app.intel.sync import _intel_row
+    from app.models import AssetFinding, Vulnerability
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _cve_finding(client, token, world)
+        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        unknown_id = listed[0]["id"]
+        confirmed_false = _seed_cve_rows(
+            world["tenant"]["id"], listed[0]["asset_id"], ["CVE-2024-2222"], kev=False
+        )[0]
+        confirmed_true = _seed_cve_rows(
+            world["tenant"]["id"], listed[0]["asset_id"], ["CVE-2024-3333"], kev=True
+        )[0]
+
+        db = SessionLocal()
+        try:
+            vuln = db.get(Vulnerability, listed[0]["vulnerability_id"])
+            row = _intel_row(db, vuln)
+            assert row.kev is None
+            recalculate_priorities_for_vulnerabilities(
+                db, [listed[0]["vulnerability_id"], confirmed_false[0], confirmed_true[0]]
+            )
+            db.commit()
+            unknown = db.get(AssetFinding, unknown_id)
+            factor = next(
+                item for item in (unknown.priority_explanation or {}).get("factors", []) if item.get("factor") == "cisa_kev"
+            )
+            assert factor["value"] is None
+            assert "unknown" in (factor.get("note") or "").lower()
+            assert "not synchronized" in (factor.get("note") or "").lower()
+        finally:
+            db.close()
+
+        false_rows = client.get(
+            f"/api/tenants/{world['tenant']['id']}/asset-findings?kev=false",
+            headers=_headers(token),
+        )
+        assert false_rows.status_code == 200
+        ids = {row["id"] for row in false_rows.json()}
+        assert confirmed_false[1] in ids
+        assert unknown_id not in ids
+        assert confirmed_true[1] not in ids
+        assert all(row.get("kev") is False for row in false_rows.json())
+
+
+@requires_postgres
+def test_vulnerability_detail_requires_tenant_linkage(reset_db):
+    from app.database import SessionLocal, engine
+    from app.models import Vulnerability
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        _cve_finding(client, admin, world)
+        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(admin)).json()
+        linked_id = listed[0]["vulnerability_id"]
+        other = client.post("/api/tenants", headers=_headers(admin), json={"name": "Other 2B", "notes": ""}).json()
+        with engine.begin() as conn:
+            orphan_id = conn.execute(
+                text(
+                    "INSERT INTO vulnerabilities (canonical_key, title, description) VALUES ('nuclei:orphan-2b', '', '') RETURNING id"
+                )
+            ).scalar_one()
+        viewer = _create_staff(client, admin, "viewer-link", "viewer")
+        user = _create_staff(client, admin, "user-link", "user")
+        for token in (viewer, user):
+            omitted = client.get(f"/api/vulnerabilities/{linked_id}", headers=_headers(token))
+            assert omitted.status_code in {400, 403, 404, 422}
+            foreign = client.get(
+                f"/api/vulnerabilities/{linked_id}?tenant_id={other['id']}",
+                headers=_headers(token),
+            )
+            assert foreign.status_code == 404
+            orphan = client.get(
+                f"/api/vulnerabilities/{orphan_id}?tenant_id={world['tenant']['id']}",
+                headers=_headers(token),
+            )
+            assert orphan.status_code == 404
+            ok = client.get(
+                f"/api/vulnerabilities/{linked_id}?tenant_id={world['tenant']['id']}",
+                headers=_headers(token),
+            )
+            assert ok.status_code == 200, ok.text
+            assert ok.json()["vulnerability_id"] == linked_id
+        db = SessionLocal()
+        try:
+            assert db.get(Vulnerability, orphan_id) is not None
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_failed_refresh_updates_last_attempt_and_keeps_success(reset_db):
+    from app.database import SessionLocal
+    from app.intel.http import IntelligenceHttpError
+    from app.intel.sync import refresh_epss, refresh_kev, refresh_nvd
+    from app.models import INTEL_SOURCE_CISA_KEV, INTEL_SOURCE_EPSS, INTEL_SOURCE_NVD, VulnerabilityIntelligenceSync
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _cve_finding(client, token, world)
+
+    db = SessionLocal()
+    try:
+        refresh_nvd(db, fetch=ScriptedFetch({"cves/2.0": (200, _nvd_body())}), sleep=lambda _: None, force=True)
+        refresh_epss(db, fetch=ScriptedFetch({"epss_scores-current": (200, _epss_csv())}), sleep=lambda _: None, force=True)
+        refresh_kev(
+            db,
+            fetch=ScriptedFetch({"known_exploited_vulnerabilities.json": (200, _kev_body())}),
+            sleep=lambda _: None,
+            force=True,
+        )
+        db.commit()
+        stale = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        successes = {}
+        for source in (INTEL_SOURCE_NVD, INTEL_SOURCE_EPSS, INTEL_SOURCE_CISA_KEV):
+            row = db.get(VulnerabilityIntelligenceSync, source)
+            assert row.last_success_at is not None
+            successes[source] = row.last_success_at
+            row.last_attempt_at = stale
+        db.commit()
+
+        refresh_nvd(db, fetch=ScriptedFetch({"cves/2.0": IntelligenceHttpError("nvd down")}), sleep=lambda _: None, force=True)
+        db.commit()
+        refresh_epss(
+            db,
+            fetch=ScriptedFetch({"epss_scores-current": IntelligenceHttpError("epss down")}),
+            sleep=lambda _: None,
+            force=True,
+        )
+        db.commit()
+        refresh_kev(
+            db,
+            fetch=ScriptedFetch({"known_exploited_vulnerabilities.json": IntelligenceHttpError("kev down")}),
+            sleep=lambda _: None,
+            force=True,
+        )
+        db.commit()
+        db.expire_all()
+        for source in (INTEL_SOURCE_NVD, INTEL_SOURCE_EPSS, INTEL_SOURCE_CISA_KEV):
+            row = db.get(VulnerabilityIntelligenceSync, source)
+            assert row.last_attempt_at is not None
+            assert row.last_attempt_at > stale
+            assert row.last_success_at == successes[source]
+            assert row.last_error
+    finally:
+        db.close()

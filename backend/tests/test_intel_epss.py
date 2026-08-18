@@ -32,6 +32,15 @@ def test_only_tracked_cves_are_relevant():
     dataset = parse_epss_csv(VALID_CSV)
     assert set(dataset.records) == {"CVE-2024-1234", "CVE-2023-0001"}
     assert "CVE-1999-9999" not in dataset.records
+    assert dataset.complete is False
+
+
+def test_well_formed_partial_csv_is_not_marked_complete():
+    dataset = parse_epss_csv(
+        "#model_version:v2025.03.14,score_date:2026-08-18\ncve,epss,percentile\nCVE-2024-1234,0.100000000,0.200000000\n"
+    )
+    assert list(dataset.records) == ["CVE-2024-1234"]
+    assert dataset.complete is False
 
 
 def test_truncated_or_bad_csv_rejected():

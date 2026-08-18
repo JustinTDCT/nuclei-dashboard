@@ -103,9 +103,10 @@ def _mark_success(
 
 def _mark_failure(db: Session, source: str, error: Exception | str) -> None:
     row = _get_or_create_sync(db, source)
-    row.last_attempt_at = row.last_attempt_at or utcnow()
+    now = utcnow()
+    row.last_attempt_at = now
     row.last_error = _redact(error)
-    row.updated_at = utcnow()
+    row.updated_at = now
     db.flush()
 
 
@@ -157,15 +158,21 @@ def apply_nvd_record(db: Session, vulnerability: Vulnerability, parsed: ParsedNv
     if row.nvd_last_modified_at != parsed.last_modified_at:
         row.nvd_last_modified_at = parsed.last_modified_at
         changed = True
-    if parsed.rejected:
-        if row.cvss_base_score is not None or row.cvss_version is not None:
+    if parsed.rejected or parsed.cvss is None:
+        if (
+            row.cvss_base_score is not None
+            or row.cvss_version is not None
+            or row.cvss_base_severity is not None
+            or row.cvss_vector is not None
+            or row.cvss_source is not None
+        ):
             row.cvss_version = None
             row.cvss_base_score = None
             row.cvss_base_severity = None
             row.cvss_vector = None
             row.cvss_source = None
             changed = True
-    elif parsed.cvss is not None:
+    else:
         score = parsed.cvss.base_score
         if (
             row.cvss_version != parsed.cvss.version
@@ -264,7 +271,6 @@ def refresh_nvd(
                         updated += 1
                     affected.add(vulnerability.id)
             db.flush()
-            db.commit()
         _mark_success(db, INTEL_SOURCE_NVD, records_seen=seen, records_updated=updated)
         if affected:
             recalculate_priorities_for_vulnerabilities(db, affected)
@@ -272,6 +278,7 @@ def refresh_nvd(
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         _mark_failure(db, INTEL_SOURCE_NVD, exc)
+        db.commit()
         log.warning("NVD refresh failed: %s", _redact(exc))
         return {"source": INTEL_SOURCE_NVD, "error": _redact(exc)}
 
@@ -285,26 +292,30 @@ def apply_epss_dataset(db: Session, dataset: EpssDataset, tracked: list[Vulnerab
         row = _intel_row(db, vulnerability)
         record = dataset.records.get(cve)
         if record is None:
-            if row.epss_score is not None or row.epss_percentile is not None:
+            # Absence is authoritative only when the daily file is proven complete.
+            # A well-formed partial CSV must not wipe last-known-good scores.
+            if dataset.complete and (row.epss_score is not None or row.epss_percentile is not None):
                 row.epss_score = None
                 row.epss_percentile = None
                 row.epss_score_date = None
                 row.epss_model_version = None
+                row.epss_fetched_at = now
+                row.updated_at = now
                 updated += 1
                 affected.add(vulnerability.id)
-        else:
-            if (
-                row.epss_score != record.score
-                or row.epss_percentile != record.percentile
-                or row.epss_score_date != dataset.score_date
-                or row.epss_model_version != dataset.model_version
-            ):
-                row.epss_score = record.score
-                row.epss_percentile = record.percentile
-                row.epss_score_date = dataset.score_date
-                row.epss_model_version = dataset.model_version
-                updated += 1
-                affected.add(vulnerability.id)
+            continue
+        if (
+            row.epss_score != record.score
+            or row.epss_percentile != record.percentile
+            or row.epss_score_date != dataset.score_date
+            or row.epss_model_version != dataset.model_version
+        ):
+            row.epss_score = record.score
+            row.epss_percentile = record.percentile
+            row.epss_score_date = dataset.score_date
+            row.epss_model_version = dataset.model_version
+            updated += 1
+            affected.add(vulnerability.id)
         row.epss_fetched_at = now
         row.updated_at = now
     db.flush()
@@ -345,6 +356,7 @@ def refresh_epss(
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         _mark_failure(db, INTEL_SOURCE_EPSS, exc)
+        db.commit()
         log.warning("EPSS refresh failed: %s", _redact(exc))
         return {"source": INTEL_SOURCE_EPSS, "error": _redact(exc)}
 
@@ -428,6 +440,7 @@ def refresh_kev(
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         _mark_failure(db, INTEL_SOURCE_CISA_KEV, exc)
+        db.commit()
         log.warning("KEV refresh failed: %s", _redact(exc))
         return {"source": INTEL_SOURCE_CISA_KEV, "error": _redact(exc)}
 

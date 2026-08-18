@@ -19,7 +19,7 @@ alembic revision -m "describe the change"
 
 Current head revision: `0010_cve_intelligence_priority` (after frozen `0001_baseline` through `0009_phase2a_detector_identity_partition`).
 
-`0001_baseline` through `0009_phase2a_detector_identity_partition` are immutable. Phase 2B CVE intelligence and operational priority lives in `0010_cve_intelligence_priority`.
+`0001_baseline` through `0010_cve_intelligence_priority` are immutable. Phase 2B CVE intelligence and operational priority lives in `0010_cve_intelligence_priority`; later correctness fixes belong in application code unless a new revision is truly required.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -194,7 +194,7 @@ Sources (central backend only; no tenant, Asset, IP, hostname, or tag data is se
 - **FIRST EPSS** daily CSV (`https://epss.empiricalsecurity.com/epss_scores-current.csv.gz`) — exploit probability and percentile, not severity.
 - **CISA KEV** JSON catalog — official known-exploited membership only. KEV is never inferred from Nuclei tags, CVSS, or EPSS.
 
-Refresh is scheduled from the existing single-process APScheduler (the Compose `api` service is one replica). Sources self-gate: EPSS daily, NVD/KEV every six hours. PostgreSQL advisory locks prevent overlapping refresh of the same source. A source outage records `last_error` and preserves last known-good intelligence. Failed refreshes do not change finding identity or lifecycle.
+Refresh is scheduled from the existing single-process APScheduler (the Compose `api` service is one replica). Sources self-gate: EPSS daily, NVD/KEV every six hours. PostgreSQL advisory locks prevent overlapping refresh of the same source. A source outage records `last_error`, updates `last_attempt_at`, and preserves `last_success_at` plus last known-good intelligence. NVD batch updates share one transaction; a later batch failure rolls back the entire refresh, including priority projections. EPSS applies rows present in a valid file and does not treat absence as authority to clear existing scores unless completeness is proven. KEV is three-state: confirmed member, confirmed absent after a complete catalog, or unknown/not synchronized. Failed refreshes do not change finding identity or lifecycle. Vulnerability detail requires a tenant and a linked Asset Finding.
 
 Admin endpoints:
 

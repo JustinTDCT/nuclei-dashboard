@@ -48,6 +48,25 @@ def test_kev_produces_p1_override():
     assert any("CISA KEV — known exploited vulnerability" in (item.get("reason") or "") for item in result["overrides"])
 
 
+def test_kev_null_is_unknown_not_absent():
+    result = _calc(detector_severity="low", kev=None)
+    factor = next(item for item in result["factors"] if item["factor"] == "cisa_kev")
+    assert factor["value"] is None
+    assert factor["points"] == 0
+    assert "unknown" in factor["note"].lower()
+    assert "not synchronized" in factor["note"].lower()
+    assert "not listed" not in factor["note"].lower()
+    assert not any(item.get("type") == "kev_minimum" for item in result["overrides"])
+
+
+def test_kev_false_is_confirmed_absent():
+    result = _calc(detector_severity="low", kev=False)
+    factor = next(item for item in result["factors"] if item["factor"] == "cisa_kev")
+    assert factor["value"] is False
+    assert "Not listed in the official CISA KEV catalog." == factor["note"]
+    assert not any(item.get("type") == "kev_minimum" for item in result["overrides"])
+
+
 def test_asset_criticality_weighting():
     assert _calc(asset_criticality="critical")["factors"][3]["points"] == 20
     assert _calc(asset_criticality="high")["factors"][3]["points"] == 12
@@ -110,6 +129,20 @@ def test_priority_boundaries():
 
 def test_critical_floor_at_least_p2():
     result = _calc(cvss_base_score=9.0, asset_criticality="low")
+    assert result["priority"] == PRIORITY_P2
+    assert any(item.get("type") == "severity_floor" for item in result["overrides"])
+
+
+def test_cvss_blocks_detector_severity_floor():
+    result = _calc(cvss_base_score=4.0, detector_severity="critical", asset_criticality="low")
+    assert next(item for item in result["factors"] if item["factor"] == "cvss")["points"] == 20
+    assert not any(item["factor"] == "detector_severity" for item in result["factors"])
+    assert result["priority"] == PRIORITY_P4
+    assert not any(item.get("type") == "severity_floor" for item in result["overrides"])
+
+
+def test_detector_critical_floor_when_cvss_absent():
+    result = _calc(detector_severity="critical", asset_criticality="low")
     assert result["priority"] == PRIORITY_P2
     assert any(item.get("type") == "severity_floor" for item in result["overrides"])
 
