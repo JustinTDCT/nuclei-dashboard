@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
-from sqlalchemy import inspect, text
+import pytest
+from sqlalchemy import Column, Integer, MetaData, Table, inspect, text
 from sqlalchemy.orm import Session
 
 from tests.conftest import requires_postgres
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_schema.py"
 
 
 def _tables(engine) -> set[str]:
@@ -147,6 +152,67 @@ def test_apply_schema_and_ensure_columns_are_idempotent(reset_db):
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
     assert [r[0] for r in rows] == [head_revision()]
+
+
+def test_baseline_revision_is_frozen_not_live_metadata():
+    source = BASELINE_PATH.read_text()
+    assert "from app.database import Base" not in source
+    assert "import app.models" not in source
+    assert "create_all" not in source
+    assert "drop_all" not in source
+    assert "op.create_table" in source
+    assert 'op.create_table(\n        "users"' in source
+    assert '"sites"' not in source
+    assert '"assets"' not in source
+
+
+@requires_postgres
+def test_partial_pre_alembic_schema_fails_closed(reset_db):
+    from app.database import engine
+    from app.migrate import UnrecognizedSchemaError, apply_schema
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE users (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(80) NOT NULL
+                );
+                CREATE TABLE tenants (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL
+                );
+                CREATE TABLE devices (
+                    id SERIAL PRIMARY KEY,
+                    tenant_id INTEGER NOT NULL
+                );
+                """
+            )
+        )
+    with pytest.raises(UnrecognizedSchemaError, match="Unrecognized/partial pre-Alembic schema"):
+        apply_schema()
+    assert "alembic_version" not in _tables(engine)
+    assert "subnets" not in _tables(engine)
+
+
+@requires_postgres
+def test_compare_metadata_detects_unmigrated_model_table(reset_db):
+    from alembic.autogenerate import compare_metadata
+    from alembic.runtime.migration import MigrationContext
+
+    from app.database import Base, engine
+    from app.migrate import apply_schema
+    import app.models  # noqa: F401
+
+    apply_schema()
+    copied = MetaData()
+    for table in Base.metadata.sorted_tables:
+        table.to_metadata(copied)
+    Table("sites", copied, Column("id", Integer, primary_key=True))
+    with engine.connect() as conn:
+        diffs = compare_metadata(MigrationContext.configure(conn), copied)
+    assert diffs, "compare_metadata must report a model table that has no migration"
 
 
 @requires_postgres

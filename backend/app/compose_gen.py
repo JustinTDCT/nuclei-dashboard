@@ -8,10 +8,17 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
         secret_line = f"      ENROLLMENT_SECRET: {agent.enrollment_secret}\n"
     return f"""# Site agent for {agent.name} ({agent.uuid})
 # On the LAN host (outbound HTTPS to GitHub and {central_url}):
-#   docker compose up -d --build
+#   docker compose --env-file agent.env up -d --build
 # Docker clones scan_runtime from the public repo and builds the image.
 # After we push agent changes: docker compose up -d --build
 # Linux sites should keep network_mode: host so LAN subnets are reachable.
+#
+# TLS verification is on by default (TLS_VERIFY=1).
+# Publicly trusted certificates: no extra files.
+# Internal CA: copy the CA PEM to ./certs/ca.pem next to this file, then set
+#   TLS_CA_FILE=/certs/ca.pem
+# in agent.env. The ./certs directory is mounted into the container at /certs.
+# Lab opt-out only: TLS_VERIFY=0
 
 services:
   nuclei-agent:
@@ -25,11 +32,13 @@ services:
     environment:
       CENTRAL_URL: {central_url}
       AGENT_UUID: {agent.uuid}
-{secret_line}      TLS_VERIFY: "{settings.agent_tls_verify}"
+{secret_line}      TLS_VERIFY: "${{TLS_VERIFY:-1}}"
+      TLS_CA_FILE: ${{TLS_CA_FILE:-}}
       SCAN_DRY_RUN: "0"
     volumes:
       - agent-keys:/data
       - nuclei-templates:/root/nuclei-templates
+      - ${{TLS_CA_HOST_DIR:-./certs}}:/certs:ro
 
 volumes:
   agent-keys:
@@ -45,4 +54,6 @@ def agent_env(agent: Agent, central_url: str, include_secret: bool = True) -> st
     if include_secret and agent.enrollment_secret:
         lines.append(f"ENROLLMENT_SECRET={agent.enrollment_secret}")
     lines.append(f"TLS_VERIFY={settings.agent_tls_verify}")
+    lines.append("# Optional internal CA. Copy the PEM to ./certs/ca.pem, then:")
+    lines.append("# TLS_CA_FILE=/certs/ca.pem")
     return "\n".join(lines) + "\n"

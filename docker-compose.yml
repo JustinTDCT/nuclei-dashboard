@@ -77,10 +77,12 @@ services:
       AGENT_UUID: ${AGENT_UUID:-}
       ENROLLMENT_SECRET: ${ENROLLMENT_SECRET:-}
       TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
+      TLS_CA_FILE: ${TLS_CA_FILE:-}
       SCAN_DRY_RUN: "0"
     volumes:
       - agent-keys:/data
       - nuclei-templates:/root/nuclei-templates
+      - ${TLS_CA_HOST_DIR:-./certs}:/certs:ro
 
   caddy:
     image: caddy:2-alpine

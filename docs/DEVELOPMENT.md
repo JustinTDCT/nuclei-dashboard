@@ -6,6 +6,8 @@
 
 Schema changes belong in versioned Alembic revisions under `backend/alembic/versions/`. Do not add new `ALTER TABLE` statements to application startup.
 
+`0001_baseline` is a **frozen** Phase 0 snapshot. It does not import live SQLAlchemy models. When models change, add a new revision; do not edit `0001`.
+
 From `backend/`, with `DATABASE_URL` set:
 
 ```bash
@@ -21,18 +23,20 @@ Current baseline revision: `0001_baseline`.
 
 ### Fresh install
 
-Start the stack. API startup runs `apply_schema()`, which is `alembic upgrade head` on an empty database, then seeds the first admin.
+No application tables. API startup runs `apply_schema()` → `alembic upgrade head`, then seeds the first admin.
 
 Do not delete the PostgreSQL volume as a normal operation.
 
-### Existing install (pre-Alembic)
+### Existing install (complete pre-Alembic schema)
+
+A recognized legacy database has all Phase 0 tables (`users`, `tenants`, `subnets`, `agents`, `scans`, `scan_jobs`, `devices`, `findings`, `alerts`, `settings`) and no `alembic_version`.
 
 1. Deploy this version **without** removing the `postgres-data` volume.
 2. Restart the API.
 
-Startup detects the current tables, runs the retained compatibility helper (`ensure_columns`) so leftover columns/constraints match today's models, stamps `0001_baseline`, then upgrades to head. Existing rows are not dropped.
+Startup runs `ensure_columns()`, validates the schema, stamps `0001_baseline`, then upgrades to head. Existing rows are not dropped.
 
-Manual adoption of a current-schema database (same non-destructive stamp, only if you are not using API startup):
+Manual adoption (only for a complete current-schema database):
 
 ```bash
 cd backend
@@ -40,7 +44,9 @@ alembic stamp 0001_baseline
 alembic upgrade head
 ```
 
-Stamp only a database that already matches the current application schema. Do not stamp a partial or unknown schema.
+### Partial or unknown schema
+
+If some application tables exist but the complete Phase 0 set does not, startup **fails closed** and refuses to stamp or upgrade. Do not guess. Inspect the database and repair or restore it before retrying.
 
 ### Tests
 
@@ -56,14 +62,21 @@ Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or
 
 Generated agent compose/env and production defaults verify central-server TLS (`TLS_VERIFY=1` / `AGENT_TLS_VERIFY=1`).
 
+Caddy terminates HTTPS using `./certs/cert.pem` and `./certs/key.pem` (see `Caddyfile`). It does not auto-issue a certificate.
+
 Publicly trusted certificates need no extra agent configuration.
 
-Internal CA (including Caddy's local CA): keep verification **on**. Give the agent the CA file:
+Internal CA: keep verification **on**. The CA file must be visible **inside the agent container**.
 
-- `TLS_CA_FILE=/path/to/ca.pem`, or
-- `TLS_VERIFY=/path/to/ca.pem`
+1. On the agent host, next to `docker-compose.yml`:
+   `mkdir -p certs && cp /path/on/host/your-ca.pem certs/ca.pem`
+2. In `agent.env` (or the environment):
+   `TLS_CA_FILE=/certs/ca.pem`
+3. The stock/generated compose bind-mounts `${TLS_CA_HOST_DIR:-./certs}` to `/certs`.
 
-Caddy's local root is typically `root.crt` under the `caddy-data` volume (`pki/authorities/local/`). Copy that file to the agent host and point `TLS_CA_FILE` at it. Do not embed environment-specific CA material in the repository.
+`TLS_CA_FILE` is a container path. A host path such as `/home/tech/ca.pem` is not visible unless that file is mounted into the container. `--env-file` only sets variables that the compose file passes through; the stock file passes `TLS_CA_FILE`.
+
+Do not embed environment-specific CA material in the repository.
 
 Development opt-out only: `AGENT_TLS_VERIFY=0` or `TLS_VERIFY=0`.
 

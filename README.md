@@ -25,9 +25,9 @@ docker compose up -d --build
 
 The **central** stack is this repo (`backend/`, `frontend/`, `scan_runtime/`, `Caddyfile`, `certs/`). On first start use `--build`. Site agents do **not** need a copy of the whole tree — they build `scan_runtime` from GitHub.
 
-Open `https://localhost:8118` and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. The first visit will warn about Caddy's internal certificate — continue past it. Set `SITE_ADDRESS` and `PUBLIC_URL` to `https://your-hostname:8118` if the dashboard is reached by a name other than localhost.
+Open `https://localhost:8118` and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. Caddy serves HTTPS with `./certs/cert.pem` and `./certs/key.pem`. Set `SITE_ADDRESS` and `PUBLIC_URL` to `https://your-hostname:8118` if the dashboard is reached by a name other than localhost.
 
-Agent TLS verification is **on** by default. For Caddy's internal certificate, either install a publicly trusted certificate, point the agent at Caddy's local CA (`TLS_CA_FILE`), or set `AGENT_TLS_VERIFY=0` for lab use only. See `docs/DEVELOPMENT.md`.
+Agent TLS verification is **on** by default. Publicly trusted certificates need no extra agent files. For a private/internal CA, copy the CA PEM to `./certs/ca.pem` on the agent host and set `TLS_CA_FILE=/certs/ca.pem` (that path is inside the container; `./certs` is bind-mounted). Lab opt-out only: `AGENT_TLS_VERIFY=0` / `TLS_VERIFY=0`. See `docs/DEVELOPMENT.md`.
 
 ## Typical workflow
 
