@@ -16,7 +16,8 @@ PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_INITIAL = "0007_vulnerability_finding_lifecycle"
-PHASE2A_HEAD = "0008_phase2a_finding_identity_repair"
+PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
+PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 FROZEN_MIGRATION_HASHES = {
     "0001_baseline_current_schema.py": "8daecbb5da9582ebdd2f6b13c157cadcb91368879532dd121a3804a49c99ed03",
     "0002_sites_networks.py": "e0988e97238ffd6d00f32cf1f1d3ea59cfb1f3acad17c3db6b3deaf586472278",
@@ -25,6 +26,7 @@ FROZEN_MIGRATION_HASHES = {
     "0005_asset_correlation_lifecycle.py": "b5fad3dca0dd6b75b2bee37522e183ef5df37fe074f575f5093706d398b4fb4c",
     "0006_scan_definition_execution.py": "3ba1cac248f9583871936c58f4f2e5203a30329cdc34c351d30580ae664eb16a",
     "0007_vulnerability_finding_lifecycle.py": "6d794580b722921ad7592e135151708d550f54c3d065ad8b8591930a2345014c",
+    "0008_phase2a_finding_identity_repair.py": "2fe859754f7bdeb8df6cebca282364d47e843c3f1d75ca9857b33ee8959ca517",
 }
 PHASE1B_TABLES = {
     "assets",
@@ -480,6 +482,10 @@ def test_phase1a_and_baseline_revisions_remain_frozen():
     assert "from app.database import Base" not in phase2a_repair
     assert "import app.models" not in phase2a_repair
     assert 'down_revision: str | None = "0007_vulnerability_finding_lifecycle"' in phase2a_repair
+    phase2a_partition = (BACKEND_ROOT / "alembic" / "versions" / "0009_phase2a_detector_identity_partition.py").read_text()
+    assert "from app.database import Base" not in phase2a_partition
+    assert "import app.models" not in phase2a_partition
+    assert 'down_revision: str | None = "0008_phase2a_finding_identity_repair"' in phase2a_partition
     import hashlib
 
     for name, digest in FROZEN_MIGRATION_HASHES.items():

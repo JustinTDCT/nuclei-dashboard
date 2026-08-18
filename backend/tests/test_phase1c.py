@@ -17,7 +17,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1D_HEAD = "0006_scan_definition_execution"
-PHASE2A_HEAD = "0008_phase2a_finding_identity_repair"
+PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE1C_TABLES = {"asset_correlation_decisions", "domain_events"}
 FROZEN = (
     "0001_baseline_current_schema.py",

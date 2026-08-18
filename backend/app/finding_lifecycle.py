@@ -405,10 +405,15 @@ def get_or_create_vulnerability(db: Session, identity: DetectorIdentity) -> Vuln
     return row
 
 
-def _known_cves_for_detector(db: Session, identity: DetectorIdentity) -> set[str]:
+def cve_union(raws: list[dict[str, Any]]) -> set[str]:
     cves: set[str] = set()
-    if identity.cve_id:
-        cves.add(identity.cve_id)
+    for raw in raws:
+        cves.update(explicit_cves(raw if isinstance(raw, dict) else {}))
+    return cves
+
+
+def _known_cves_for_detector(db: Session, identity: DetectorIdentity) -> set[str]:
+    raws = [identity.raw or {}]
     rows = (
         db.query(Finding.raw_json)
         .filter(
@@ -417,11 +422,8 @@ def _known_cves_for_detector(db: Session, identity: DetectorIdentity) -> set[str
         )
         .all()
     )
-    for (raw,) in rows:
-        extracted = extract_explicit_cve(raw if isinstance(raw, dict) else {})
-        if extracted:
-            cves.add(extracted)
-    return cves
+    raws.extend(raw if isinstance(raw, dict) else {} for (raw,) in rows)
+    return cve_union(raws)
 
 
 def desired_catalog_identity(db: Session, identity: DetectorIdentity) -> tuple[str, str | None]:
@@ -497,32 +499,58 @@ def upsert_detector_catalog(
     return vulnerability, existing
 
 
-def retarget_mapping(
+def _recompute_asset_finding_seen(db: Session, asset_finding: AssetFinding) -> None:
+    bounds = (
+        db.query(func.min(Finding.found_at), func.max(Finding.found_at))
+        .filter(Finding.asset_finding_id == asset_finding.id)
+        .one()
+    )
+    if bounds[0] is not None:
+        asset_finding.first_seen = bounds[0]
+        asset_finding.last_seen = bounds[1]
+        asset_finding.updated_at = utcnow()
+
+
+def _other_detector_evidence_exists(
     db: Session,
+    *,
+    asset_finding_id: int,
+    mapping: VulnerabilityDetectorMapping,
+) -> bool:
+    return (
+        db.query(Finding.id)
+        .filter(
+            Finding.asset_finding_id == asset_finding_id,
+            or_(
+                Finding.detector_type != mapping.detector_type,
+                Finding.detector_key != mapping.detector_key,
+            ),
+        )
+        .first()
+        is not None
+    )
+
+
+def partition_asset_finding_for_mapping(
+    db: Session,
+    *,
+    donor: AssetFinding,
     mapping: VulnerabilityDetectorMapping,
     vulnerability: Vulnerability,
-) -> None:
-    previous_id = mapping.vulnerability_id
-    mapping.vulnerability_id = vulnerability.id
-    db.flush()
-    donors = (
-        db.query(AssetFinding)
-        .filter(AssetFinding.vulnerability_id == previous_id)
+) -> AssetFinding:
+    now = utcnow()
+    supporting = (
+        db.query(Finding)
+        .filter(
+            Finding.asset_finding_id == donor.id,
+            Finding.detector_type == mapping.detector_type,
+            Finding.detector_key == mapping.detector_key,
+        )
         .all()
     )
-    for donor in donors:
-        has_support = (
-            db.query(Finding.id)
-            .filter(
-                Finding.asset_finding_id == donor.id,
-                Finding.detector_type == mapping.detector_type,
-                Finding.detector_key == mapping.detector_key,
-            )
-            .first()
-            is not None
-        )
-        if not has_support:
-            continue
+    if not supporting:
+        return donor
+    if not _other_detector_evidence_exists(db, asset_finding_id=donor.id, mapping=mapping):
         keeper = (
             db.query(AssetFinding)
             .filter(
@@ -534,9 +562,102 @@ def retarget_mapping(
         )
         if keeper is None:
             donor.vulnerability_id = vulnerability.id
-            donor.updated_at = utcnow()
-        else:
-            _merge_duplicate_asset_findings(db, keeper=keeper, donor=donor, now=utcnow())
+            donor.updated_at = now
+            return donor
+        _merge_duplicate_asset_findings(db, keeper=keeper, donor=donor, now=now)
+        return keeper
+    keeper = (
+        db.query(AssetFinding)
+        .filter(
+            AssetFinding.asset_id == donor.asset_id,
+            AssetFinding.vulnerability_id == vulnerability.id,
+        )
+        .first()
+    )
+    created = False
+    if keeper is None:
+        first_seen = min(row.found_at for row in supporting if row.found_at is not None)
+        last_seen = max(row.found_at for row in supporting if row.found_at is not None)
+        keeper = AssetFinding(
+            tenant_id=donor.tenant_id,
+            asset_id=donor.asset_id,
+            vulnerability_id=vulnerability.id,
+            technical_state=TECHNICAL_OPEN,
+            treatment_state=TREATMENT_UNADDRESSED,
+            first_seen=first_seen,
+            last_seen=last_seen,
+            resolved_at=None,
+            consecutive_clean_scans=0,
+            reopened_count=0,
+            updated_at=now,
+        )
+        db.add(keeper)
+        db.flush()
+        created = True
+    for row in supporting:
+        row.asset_finding_id = keeper.id
+        row.asset_id = keeper.asset_id
+        row.tenant_id = keeper.tenant_id
+    db.flush()
+    _recompute_asset_finding_seen(db, keeper)
+    _recompute_asset_finding_seen(db, donor)
+    if created:
+        _append_history(
+            db,
+            asset_finding=keeper,
+            transition_type=HISTORY_OPENED,
+            previous=None,
+            new_state=TECHNICAL_OPEN,
+            scan_job_id=None,
+            occurred_at=keeper.first_seen,
+            details={
+                "reason": "detector_identity_partition",
+                "source_asset_finding_id": donor.id,
+                "detector_type": mapping.detector_type,
+                "detector_key": mapping.detector_key,
+            },
+            idempotence_key=(
+                f"partition-opened:{keeper.id}:{mapping.detector_type}:{mapping.detector_key}"
+            ),
+        )
+    return keeper
+
+
+def retarget_mapping(
+    db: Session,
+    mapping: VulnerabilityDetectorMapping,
+    vulnerability: Vulnerability,
+) -> None:
+    if mapping.vulnerability_id == vulnerability.id:
+        return
+    previous_id = mapping.vulnerability_id
+    mapping.vulnerability_id = vulnerability.id
+    db.flush()
+    donor_ids = {
+        row[0]
+        for row in db.query(Finding.asset_finding_id)
+        .filter(
+            Finding.detector_type == mapping.detector_type,
+            Finding.detector_key == mapping.detector_key,
+            Finding.asset_finding_id.isnot(None),
+        )
+        .all()
+        if row[0] is not None
+    }
+    donors = (
+        db.query(AssetFinding)
+        .filter(AssetFinding.id.in_(donor_ids), AssetFinding.vulnerability_id == previous_id)
+        .all()
+        if donor_ids
+        else []
+    )
+    for donor in donors:
+        partition_asset_finding_for_mapping(
+            db,
+            donor=donor,
+            mapping=mapping,
+            vulnerability=vulnerability,
+        )
     db.flush()
 
 
@@ -1396,6 +1517,7 @@ __all__ = [
     "asset_observed_in_run",
     "catalog_identity",
     "complete_scan_run",
+    "cve_union",
     "display_severity",
     "evidence_identity_key",
     "explicit_cves",
@@ -1407,6 +1529,7 @@ __all__ = [
     "load_asset_finding_display",
     "merge_asset_findings",
     "parse_detector_identity",
+    "partition_asset_finding_for_mapping",
     "resolution_threshold",
     "resolve_current_run_asset",
     "resolve_trusted_asset",

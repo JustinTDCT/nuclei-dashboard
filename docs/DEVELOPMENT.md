@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0008_phase2a_finding_identity_repair` (after frozen `0001_baseline` through `0007_vulnerability_finding_lifecycle`).
+Current head revision: `0009_phase2a_detector_identity_partition` (after frozen `0001_baseline` through `0008_phase2a_finding_identity_repair`).
 
-`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, `0004_asset_observation_integrity`, `0005_asset_correlation_lifecycle`, `0006_scan_definition_execution`, and `0007_vulnerability_finding_lifecycle` are immutable. Phase 2A corrective schema lives in `0008_phase2a_finding_identity_repair`.
+`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, `0004_asset_observation_integrity`, `0005_asset_correlation_lifecycle`, `0006_scan_definition_execution`, `0007_vulnerability_finding_lifecycle`, and `0008_phase2a_finding_identity_repair` are immutable. Phase 2A identity-partition repair lives in `0009_phase2a_detector_identity_partition`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -36,6 +36,8 @@ Current head revision: `0008_phase2a_finding_identity_repair` (after frozen `000
 `alembic downgrade` from `0007_vulnerability_finding_lifecycle` is **refused**. It would destroy vulnerability catalog identity, Asset Finding lifecycle history, and Detection Evidence linkage.
 
 `alembic downgrade` from `0008_phase2a_finding_identity_repair` is **refused**. It would destroy Run detector-coverage evidence and reintroduce inconsistent catalog/mapping identity.
+
+`alembic downgrade` from `0009_phase2a_detector_identity_partition` is **refused**. It would rejoin partitioned detector evidence onto the wrong Vulnerability and restore incorrect CVE identity from mixed multi-CVE history.
 
 ### Fresh install
 

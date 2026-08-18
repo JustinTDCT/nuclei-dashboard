@@ -24,7 +24,8 @@ from tests.test_phase1d import (
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_INITIAL = "0007_vulnerability_finding_lifecycle"
-PHASE2A_HEAD = "0008_phase2a_finding_identity_repair"
+PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
+PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 FROZEN = (
     "0001_baseline_current_schema.py",
     "0002_sites_networks.py",
@@ -33,6 +34,7 @@ FROZEN = (
     "0005_asset_correlation_lifecycle.py",
     "0006_scan_definition_execution.py",
     "0007_vulnerability_finding_lifecycle.py",
+    "0008_phase2a_finding_identity_repair.py",
 )
 VULN_STAGES = {
     "discovery": True,
@@ -160,7 +162,7 @@ def test_fresh_db_reaches_phase2a_head(reset_db):
     }.issubset(tables)
 
 
-def test_0001_through_0007_remain_frozen():
+def test_0001_through_0008_remain_frozen():
     import hashlib
 
     from tests.test_migrations import FROZEN_MIGRATION_HASHES
@@ -196,13 +198,29 @@ def test_downgrade_from_0008_is_refused(reset_db):
 
     from app.migrate import alembic_config, apply_schema
 
-    apply_schema()
+    command.upgrade(alembic_config(), PHASE2A_COVERAGE)
     try:
         command.downgrade(alembic_config(), PHASE2A_INITIAL)
     except (CommandError, RuntimeError) as exc:
         assert "Refusing to downgrade 0008_phase2a_finding_identity_repair" in str(exc)
         return
     raise AssertionError("0008 downgrade must refuse")
+
+
+@requires_postgres
+def test_downgrade_from_0009_is_refused(reset_db):
+    from alembic import command
+    from alembic.util import CommandError
+
+    from app.migrate import alembic_config, apply_schema
+
+    apply_schema()
+    try:
+        command.downgrade(alembic_config(), PHASE2A_COVERAGE)
+    except (CommandError, RuntimeError) as exc:
+        assert "Refusing to downgrade 0009_phase2a_detector_identity_partition" in str(exc)
+        return
+    raise AssertionError("0009 downgrade must refuse")
 
 
 @requires_postgres
@@ -323,6 +341,14 @@ def test_catalog_identity_is_not_fuzzy():
     assert extract_explicit_cve({"info": {"classification": {"cve-id": ["CVE-2021-44228"]}}}) == "CVE-2021-44228"
     assert extract_explicit_cve({"info": {"classification": {"cve-id": ["CVE-2020-0001", "CVE-2020-0002"]}}}) is None
     assert extract_explicit_cve({"info": {"name": "Looks like CVE-2021-44228"}}) is None
+    from app.finding_lifecycle import cve_union
+
+    assert cve_union(
+        [
+            {"info": {"classification": {"cve-id": ["CVE-2024-1111"]}}},
+            {"info": {"classification": {"cve-id": ["CVE-2024-1111", "CVE-2024-2222"]}}},
+        ]
+    ) == {"CVE-2024-1111", "CVE-2024-2222"}
     assert catalog_identity("nuclei", "exposed-panel", None) == "nuclei:exposed-panel"
     assert catalog_identity("nuclei", "log4j", "CVE-2021-44228") == "cve:CVE-2021-44228"
     one = parse_detector_identity(FindingReport(template_id="panel-a", name="Admin panel A", severity="high"))
@@ -1177,3 +1203,358 @@ def test_list_and_dashboard_queries_are_bounded_and_severity_filters_before_limi
         assert dashboard.json()["findings"]["high"] == 2051
         assert summary.json()["findings"]["critical"] == 50
         assert count["n"] < 60
+
+
+def _cve_info(cves, tags="cve"):
+    return {"info": {"classification": {"cve-id": list(cves)}, "tags": [tags]}}
+
+
+def _assert_mapping(db, detector_key: str, canonical: str):
+    from app.models import Vulnerability, VulnerabilityDetectorMapping
+
+    mapping = (
+        db.query(VulnerabilityDetectorMapping)
+        .filter(
+            VulnerabilityDetectorMapping.detector_type == "nuclei",
+            VulnerabilityDetectorMapping.detector_key == detector_key,
+        )
+        .one()
+    )
+    vuln = db.get(Vulnerability, mapping.vulnerability_id)
+    assert vuln.canonical_key == canonical
+    return mapping, vuln
+
+
+@requires_postgres
+def test_runtime_mixed_and_conflicting_cve_history_fails_closed(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="mixed-host",
+            ip="10.1.0.30",
+            findings=[
+                _finding_payload(
+                    template="mixed-template",
+                    name="Mixed",
+                    host="https://10.1.0.30",
+                    extra_raw=_cve_info(["CVE-2024-1111"]),
+                )
+            ],
+        )
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="mixed-host",
+            ip="10.1.0.30",
+            findings=[
+                _finding_payload(
+                    template="mixed-template",
+                    name="Mixed later",
+                    host="https://10.1.0.30",
+                    extra_raw=_cve_info(["CVE-2024-1111", "CVE-2024-2222"]),
+                )
+            ],
+        )
+        from app.database import SessionLocal
+        from app.models import AssetFinding, Finding
+
+        db = SessionLocal()
+        try:
+            _assert_mapping(db, "mixed-template", "nuclei:mixed-template")
+            assert db.query(AssetFinding).count() == 1
+            af = db.query(AssetFinding).one()
+            assert af.vulnerability.canonical_key == "nuclei:mixed-template"
+            assert db.query(Finding).filter(Finding.asset_finding_id == af.id).count() == 2
+        finally:
+            db.close()
+
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="rev-host",
+            ip="10.1.0.31",
+            findings=[
+                _finding_payload(
+                    template="reverse-template",
+                    name="Reverse",
+                    host="https://10.1.0.31",
+                    extra_raw=_cve_info(["CVE-2024-1111", "CVE-2024-2222"]),
+                )
+            ],
+        )
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="rev-host",
+            ip="10.1.0.31",
+            findings=[
+                _finding_payload(
+                    template="reverse-template",
+                    name="Reverse later",
+                    host="https://10.1.0.31",
+                    extra_raw=_cve_info(["CVE-2024-1111"]),
+                )
+            ],
+        )
+        db = SessionLocal()
+        try:
+            _assert_mapping(db, "reverse-template", "nuclei:reverse-template")
+        finally:
+            db.close()
+
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="two-host",
+            ip="10.1.0.32",
+            findings=[
+                _finding_payload(
+                    template="two-cve-template",
+                    name="Two A",
+                    host="https://10.1.0.32",
+                    extra_raw=_cve_info(["CVE-2024-0001"]),
+                )
+            ],
+        )
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="two-host",
+            ip="10.1.0.32",
+            findings=[
+                _finding_payload(
+                    template="two-cve-template",
+                    name="Two B",
+                    host="https://10.1.0.32",
+                    extra_raw=_cve_info(["CVE-2024-0002"]),
+                )
+            ],
+        )
+        db = SessionLocal()
+        try:
+            _assert_mapping(db, "two-cve-template", "nuclei:two-cve-template")
+            assert db.query(AssetFinding).filter(AssetFinding.vulnerability.has(canonical_key="nuclei:two-cve-template")).count() == 1
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_runtime_partitions_shared_cve_finding_when_one_template_diverges(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="shared-host",
+            ip="10.1.0.40",
+            findings=[
+                _finding_payload(
+                    template="template-a",
+                    name="Shared A",
+                    tags="cve",
+                    host="https://10.1.0.40",
+                    extra_raw=_cve_info(["CVE-2024-9999"]),
+                ),
+                _finding_payload(
+                    template="template-b",
+                    name="Shared B",
+                    tags="cve",
+                    host="https://10.1.0.40",
+                    extra_raw=_cve_info(["CVE-2024-9999"]),
+                ),
+            ],
+        )
+        from app.database import SessionLocal
+        from app.models import AssetFinding, AssetFindingHistory, Finding
+
+        db = SessionLocal()
+        try:
+            assert db.query(AssetFinding).count() == 1
+            shared = db.query(AssetFinding).one()
+            shared_id = shared.id
+            assert shared.vulnerability.canonical_key == "cve:CVE-2024-9999"
+            assert db.query(Finding).filter(Finding.asset_finding_id == shared_id).count() == 2
+            original_history = db.query(AssetFindingHistory).filter(AssetFindingHistory.asset_finding_id == shared_id).count()
+        finally:
+            db.close()
+
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="shared-host",
+            ip="10.1.0.40",
+            findings=[
+                _finding_payload(
+                    template="template-a",
+                    name="Diverged A",
+                    tags="cve",
+                    host="https://10.1.0.40",
+                    extra_raw=_cve_info(["CVE-2024-9999", "CVE-2024-8888"]),
+                )
+            ],
+        )
+        db = SessionLocal()
+        try:
+            mapping_a, vuln_a = _assert_mapping(db, "template-a", "nuclei:template-a")
+            mapping_b, vuln_b = _assert_mapping(db, "template-b", "cve:CVE-2024-9999")
+            assert vuln_a.id != vuln_b.id
+            afs = db.query(AssetFinding).order_by(AssetFinding.id).all()
+            assert len(afs) == 2
+            cve_af = next(row for row in afs if row.vulnerability_id == vuln_b.id)
+            fallback_af = next(row for row in afs if row.vulnerability_id == vuln_a.id)
+            assert cve_af.id == shared_id
+            assert {row.detector_key for row in cve_af.evidence} == {"template-b"}
+            assert {row.detector_key for row in fallback_af.evidence} == {"template-a"}
+            assert db.query(Finding).filter(Finding.detector_key == "template-a").count() == 2
+            assert all(row.asset_finding_id == fallback_af.id for row in db.query(Finding).filter(Finding.detector_key == "template-a"))
+            assert db.query(AssetFindingHistory).filter(AssetFindingHistory.asset_finding_id == shared_id).count() == original_history
+            opened = (
+                db.query(AssetFindingHistory)
+                .filter(
+                    AssetFindingHistory.asset_finding_id == fallback_af.id,
+                    AssetFindingHistory.transition_type == "opened",
+                )
+                .one()
+            )
+            assert opened.details["reason"] == "detector_identity_partition"
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_0008_to_0009_repairs_mixed_cve_union_and_partitions_shared_findings(reset_db):
+    from alembic import command
+
+    from app.database import SessionLocal, engine
+    from app.migrate import alembic_config
+    from app.models import AssetFinding, Finding, Vulnerability, VulnerabilityDetectorMapping
+
+    command.upgrade(alembic_config(), PHASE1D_HEAD)
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        tenant_id = conn.execute(text("INSERT INTO tenants (name, notes) VALUES ('Partition 2A', '') RETURNING id")).scalar_one()
+        site_id = conn.execute(
+            text("INSERT INTO sites (tenant_id, name, created_at) VALUES (:t, 'HQ', :n) RETURNING id"),
+            {"t": tenant_id, "n": now},
+        ).scalar_one()
+        asset_id = conn.execute(
+            text(
+                """
+                INSERT INTO assets (tenant_id, site_id, display_name, classification, description, lifecycle_state, disposition, criticality, is_expected, created_at, updated_at)
+                VALUES (:t, :s, 'srv', 'Server', '', 'active', 'unreviewed', 'normal', false, :n, :n)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id, "s": site_id, "n": now},
+        ).scalar_one()
+        device_id = conn.execute(
+            text(
+                """
+                INSERT INTO devices (tenant_id, site_id, ip, hostname, scope, status, classification, description, auto_label, title, tech, ports, asset_id)
+                VALUES (:t, :s, '10.1.0.9', 'legacy-host', 'lan', 'known', 'Server', '', '', '', '', '[]'::jsonb, :a)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id, "s": site_id, "a": asset_id},
+        ).scalar_one()
+        scan_id = conn.execute(
+            text(
+                """
+                INSERT INTO scans (tenant_id, name, scope, profile, nuclei_severities, nuclei_tags, subnet_ids, is_enabled)
+                VALUES (:t, 'Old', 'lan', 'discovery_nuclei', 'high', '', '[]'::jsonb, true)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id},
+        ).scalar_one()
+        job_id = conn.execute(
+            text("INSERT INTO scan_jobs (scan_id, tenant_id, status, hosts_found, findings_count) VALUES (:s, :t, 'done', 1, 8) RETURNING id"),
+            {"s": scan_id, "t": tenant_id},
+        ).scalar_one()
+
+        def _insert(template, raw, found):
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO findings (tenant_id, scan_job_id, device_id, template_id, name, severity, hostname, host, matched_at, tags, found_at, raw_json)
+                    VALUES (:t, :j, :d, :tmpl, :name, 'high', 'legacy-host', '10.1.0.9', '', '', :f, CAST(:raw AS jsonb))
+                    """
+                ),
+                {
+                    "t": tenant_id,
+                    "j": job_id,
+                    "d": device_id,
+                    "tmpl": template,
+                    "name": template,
+                    "f": found,
+                    "raw": json.dumps(raw),
+                },
+            )
+
+        _insert("mixed-first-single", _cve_info(["CVE-2024-1111"]), now - timedelta(days=4))
+        _insert("mixed-first-single", _cve_info(["CVE-2024-1111", "CVE-2024-2222"]), now - timedelta(days=3))
+        _insert("mixed-first-multi", _cve_info(["CVE-2024-1111", "CVE-2024-2222"]), now - timedelta(days=4))
+        _insert("mixed-first-multi", _cve_info(["CVE-2024-1111"]), now - timedelta(days=3))
+        _insert("two-singles", _cve_info(["CVE-2024-0001"]), now - timedelta(days=2))
+        _insert("two-singles", _cve_info(["CVE-2024-0002"]), now - timedelta(days=1))
+        _insert("template-a", _cve_info(["CVE-2024-9999"]), now - timedelta(days=2))
+        _insert("template-b", _cve_info(["CVE-2024-9999"]), now - timedelta(days=2))
+        _insert("template-a", _cve_info(["CVE-2024-9999", "CVE-2024-8888"]), now - timedelta(days=1))
+
+    command.upgrade(alembic_config(), PHASE2A_COVERAGE)
+    db = SessionLocal()
+    try:
+        mixed = (
+            db.query(VulnerabilityDetectorMapping)
+            .filter(VulnerabilityDetectorMapping.detector_key == "mixed-first-single")
+            .one()
+        )
+        assert db.get(Vulnerability, mixed.vulnerability_id).canonical_key == "cve:CVE-2024-1111"
+        shared = (
+            db.query(AssetFinding)
+            .join(Finding, Finding.asset_finding_id == AssetFinding.id)
+            .filter(Finding.detector_key.in_(["template-a", "template-b"]))
+            .distinct()
+            .all()
+        )
+        assert len(shared) == 1
+    finally:
+        db.close()
+
+    command.upgrade(alembic_config(), "head")
+    db = SessionLocal()
+    try:
+        _assert_mapping(db, "mixed-first-single", "nuclei:mixed-first-single")
+        _assert_mapping(db, "mixed-first-multi", "nuclei:mixed-first-multi")
+        _assert_mapping(db, "two-singles", "nuclei:two-singles")
+        mapping_a, vuln_a = _assert_mapping(db, "template-a", "nuclei:template-a")
+        mapping_b, vuln_b = _assert_mapping(db, "template-b", "cve:CVE-2024-9999")
+        assert vuln_a.id != vuln_b.id
+        cve_af = (
+            db.query(AssetFinding)
+            .filter(AssetFinding.asset_id == asset_id, AssetFinding.vulnerability_id == vuln_b.id)
+            .one()
+        )
+        fallback_af = (
+            db.query(AssetFinding)
+            .filter(AssetFinding.asset_id == asset_id, AssetFinding.vulnerability_id == vuln_a.id)
+            .one()
+        )
+        assert {row.detector_key for row in cve_af.evidence} == {"template-b"}
+        assert {row.detector_key for row in fallback_af.evidence} == {"template-a"}
+        assert db.query(Finding).filter(Finding.detector_key == "template-a", Finding.asset_finding_id == fallback_af.id).count() == 2
+        assert db.query(Finding).filter(Finding.detector_key == "template-b", Finding.asset_finding_id == cve_af.id).count() == 1
+    finally:
+        db.close()
