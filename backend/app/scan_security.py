@@ -28,6 +28,8 @@ class ExecutionBlocked(ValueError):
 
 def revalidate_lan_claim(db: Session, job: ScanJob, agent: Agent) -> None:
     snapshot = job.execution_snapshot or {}
+    if snapshot.get("scope") != "lan":
+        raise ExecutionBlocked("Run snapshot is not a LAN execution")
     site_info = snapshot.get("site") or {}
     site_id = site_info.get("id")
     site = db.get(Site, site_id) if site_id else None
@@ -57,6 +59,8 @@ def revalidate_lan_claim(db: Session, job: ScanJob, agent: Agent) -> None:
 
 def revalidate_wan_start(db: Session, job: ScanJob) -> None:
     snapshot = job.execution_snapshot or {}
+    if snapshot.get("scope") != "wan":
+        raise ExecutionBlocked("Run snapshot is not a WAN execution")
     for row in (snapshot.get("targets") or {}).get("wan_targets") or []:
         target = db.get(AuthorizedWanTarget, row["id"])
         if target is None or target.tenant_id != job.tenant_id or target.archived_at is not None:
@@ -120,6 +124,27 @@ def _revalidate_caps_and_exclusions(
             if any(t.overlaps(exc) for t in targets for exc in extra_nets):
                 raise ExecutionBlocked("Newly added exclusions make this run unsafe")
             _ = original_nets
+    current_nets = exclusion_networks_from_rows(current)
+    if current_nets:
+        for row in (snapshot.get("targets") or {}).get("wan_targets") or []:
+            if row.get("type") == WAN_TARGET_FQDN:
+                _assert_fqdn_safe_against(row.get("normalized") or row.get("value") or "", current_nets)
+
+
+def pin_fqdn_targets(targets: list[dict[str, str]], exclusion_nets: list) -> list[dict[str, str]]:
+    pinned: list[dict[str, str]] = []
+    for row in targets:
+        if row.get("type") != WAN_TARGET_FQDN:
+            pinned.append(row)
+            continue
+        addresses = resolve_fqdn_addresses(row["value"])
+        if any(address in network for address in addresses for network in exclusion_nets):
+            continue
+        for address in addresses:
+            pinned.append({"type": "ip", "value": str(address), "source_fqdn": row["value"]})
+    if targets and not pinned:
+        raise ExecutionBlocked("Exclusions remove all WAN targets")
+    return pinned
 
 
 def resolve_fqdn_addresses(fqdn: str) -> list[ipaddress._BaseAddress]:

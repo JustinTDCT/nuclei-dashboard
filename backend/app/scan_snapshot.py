@@ -156,7 +156,7 @@ def job_payload_from_snapshot(job: ScanJob) -> dict[str, Any]:
         "job_id": job.id,
         "scan_id": job.scan_id,
         "tenant_id": job.tenant_id,
-        "scope": snapshot.get("scope") or (job.scan.scope if job.scan else ""),
+        "scope": snapshot.get("scope") or "",
         "snapshot_version": snapshot.get("snapshot_version") or job.snapshot_version,
         "definition_revision": job.definition_revision,
         "targets": targets,

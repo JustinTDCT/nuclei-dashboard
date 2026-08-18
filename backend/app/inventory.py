@@ -208,13 +208,14 @@ def _project_device(
     hostname = identity_name(report.hostname, report.ip)
     ip = (report.ip or "").strip()
     context = observation_context(db, job_id, ip, report.scope)
-    site_id = asset.site_id if report.scope == "lan" else None
-    if report.scope == "lan" and context.get("site_id"):
+    scope = context.get("scope") or report.scope
+    site_id = asset.site_id if scope == "lan" else None
+    if scope == "lan" and context.get("site_id"):
         site_id = context.get("site_id")
     device = _find_device(
         db,
         tenant_id,
-        report.scope,
+        scope,
         hostname,
         ip,
         site_id=site_id,
@@ -227,7 +228,7 @@ def _project_device(
             site_id=site_id,
             ip=ip,
             hostname=hostname,
-            scope=report.scope,
+            scope=scope,
             status="new",
             classification=asset.classification or "Unknown",
             description=asset.description or "",
@@ -247,7 +248,7 @@ def _project_device(
     elif not retry:
         previous_job = device.last_scan_job_id
         if not is_placeholder_name(hostname, ip):
-            device = _promote_hostname(db, device, hostname, tenant_id, report.scope, site_id=site_id)
+            device = _promote_hostname(db, device, hostname, tenant_id, scope, site_id=site_id)
         if ip:
             device.ip = ip
         device.site_id = site_id
@@ -336,10 +337,11 @@ def store_findings(
         ip = host_to_ip(report.host or report.matched_at) or ""
         hostname = identity_name(parsed, ip)
         context = observation_context(db, job_id, ip, scope)
-        site_id = context.get("site_id") if scope == "lan" else None
-        device = _find_device(db, tenant_id, scope, hostname, ip, site_id=site_id)
+        run_scope = context.get("scope") or scope
+        site_id = context.get("site_id") if run_scope == "lan" else None
+        device = _find_device(db, tenant_id, run_scope, hostname, ip, site_id=site_id)
         if device and parsed and not is_ip(parsed):
-            device = _promote_hostname(db, device, parsed, tenant_id, scope, site_id=site_id)
+            device = _promote_hostname(db, device, parsed, tenant_id, run_scope, site_id=site_id)
         if device and ip:
             device.ip = ip
         raw = report.raw or {}

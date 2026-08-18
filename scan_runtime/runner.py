@@ -124,7 +124,9 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
         )
     http_info: list[dict[str, Any]] = []
     if stages.get("fingerprint", True):
-        probe_hosts = hosts or [{"ip": row["value"]} for row in targets if row["type"] in {"ip", "fqdn"}]
+        probe_hosts = hosts or [
+            {"ip": row["value"]} for row in targets if row["type"] in {"ip", "fqdn", "cidr"}
+        ]
         http_info = run_httpx(probe_hosts, intensity=intensity, log=log)
     devices = merge_devices(hosts, http_info, scope)
     attach_hostnames(devices, log=log)
@@ -171,9 +173,8 @@ def resolve_execution_targets(job: dict[str, Any], log: LogFn | None = None) -> 
         kind = row.get("type") or "cidr"
         value = row.get("value") or ""
         if kind == "fqdn":
-            kept = _keep_fqdn(value, exclusions, log=log)
-            if kept:
-                resolved.append({"type": "fqdn", "value": value})
+            for ip in _pin_fqdn_ips(value, exclusions, log=log):
+                resolved.append({"type": "ip", "value": ip, "source_fqdn": value})
             continue
         try:
             network = ipaddress.ip_network(value, strict=False)
@@ -201,20 +202,33 @@ def resolve_execution_targets(job: dict[str, Any], log: LogFn | None = None) -> 
 
 
 def _keep_fqdn(fqdn: str, exclusions: list, log: LogFn | None = None) -> bool:
+    return bool(_pin_fqdn_ips(fqdn, exclusions, log=log))
+
+
+def _pin_fqdn_ips(fqdn: str, exclusions: list, log: LogFn | None = None) -> list[str]:
     try:
         infos = socket.getaddrinfo(fqdn, None)
     except socket.gaierror:
         _log(f"FQDN {fqdn} did not resolve; excluding fail-closed", log)
-        return False
-    ips = {item[4][0] for item in infos if item[4]}
+        return []
     import ipaddress
 
-    for ip in ips:
-        addr = ipaddress.ip_address(ip)
+    addresses = []
+    for item in infos:
+        if not item[4]:
+            continue
+        try:
+            addresses.append(ipaddress.ip_address(str(item[4][0]).split("%", 1)[0]))
+        except ValueError:
+            continue
+    if not addresses:
+        _log(f"FQDN {fqdn} did not resolve; excluding fail-closed", log)
+        return []
+    for addr in addresses:
         if any(addr in network for network in exclusions):
-            _log(f"FQDN {fqdn} resolved to excluded address {ip}; excluding fail-closed", log)
-            return False
-    return True
+            _log(f"FQDN {fqdn} resolved to excluded address {addr}; excluding fail-closed", log)
+            return []
+    return [str(addr) for addr in addresses]
 
 
 def _exclusion_hosts(job: dict[str, Any]) -> list[str]:

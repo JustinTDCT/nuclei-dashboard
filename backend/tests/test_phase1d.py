@@ -831,6 +831,8 @@ def test_exclusion_subtraction_and_mocked_fqdn():
     with patch("runner.socket.getaddrinfo", return_value=[(None, None, None, None, ("10.0.0.9", 0))]):
         kept = runtime_runner._keep_fqdn("ok.example", [ipaddress.ip_network("10.0.0.1/32")])
         assert kept is True
+        pinned = runtime_runner._pin_fqdn_ips("ok.example", [ipaddress.ip_network("10.0.0.1/32")])
+        assert pinned == ["10.0.0.9"]
 
 
 @requires_postgres
@@ -1135,3 +1137,352 @@ def test_wan_subnet_rename_and_cidr_change_archives_old_authorization(reset_db):
         assert by_value["198.51.100.0/24"]["archived_at"] is not None
         assert "192.0.2.0/24" in by_value
         assert by_value["192.0.2.0/24"]["archived_at"] is None
+
+
+def _scanner_headers() -> dict[str, str]:
+    from app.config import settings
+
+    return {"X-Scanner-Token": settings.scanner_token}
+
+
+def _wan_scan(client: TestClient, token: str, world: dict, **extra) -> dict:
+    body = {
+        "name": extra.pop("name", "WAN Scan"),
+        "scope": "wan",
+        "wan_target_ids": extra.pop("wan_target_ids", [world["wan"]["id"]]),
+        "is_enabled": True,
+        "stage_config": extra.pop("stage_config", {"discovery": True, "port_mode": "common", "fingerprint": True, "vulnerability": False}),
+        "intensity_config": extra.pop("intensity_config", {"preset": "normal"}),
+        "schedule_config": extra.pop("schedule_config", {"type": "manual"}),
+    }
+    body.update(extra)
+    response = client.post(f"/api/tenants/{world['tenant']['id']}/scans", headers=_headers(token), json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@requires_postgres
+def test_queued_lan_run_stays_agent_only_after_definition_edited_to_wan(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan = _lan_scan(client, token, world)
+        run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
+        assert run.status_code == 200, run.text
+        job_id = run.json()["id"]
+        edited = client.patch(
+            f"/api/scans/{scan['id']}",
+            headers=_headers(token),
+            json={
+                "name": "Now WAN",
+                "scope": "wan",
+                "wan_target_ids": [world["wan"]["id"]],
+                "is_enabled": True,
+            },
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["scope"] == "wan"
+        history = client.get(f"/api/jobs/{job_id}", headers=_headers(token)).json()
+        assert history["scope"] == "lan"
+        assert history["execution_snapshot"]["scope"] == "lan"
+        _heartbeat(world["agent1"]["id"])
+        agent_poll = client.get("/api/agent/jobs", headers=_agent_headers(world["agent1"]))
+        assert agent_poll.status_code == 200, agent_poll.text
+        assert any(row["job_id"] == job_id for row in agent_poll.json())
+        scanner_poll = client.get("/api/internal/scanner/jobs", headers=_scanner_headers())
+        assert scanner_poll.status_code == 200, scanner_poll.text
+        assert scanner_poll.json() == []
+        scanner_start = client.post(f"/api/internal/scanner/jobs/{job_id}/start", headers=_scanner_headers())
+        assert scanner_start.status_code == 404
+        agent_start = client.post(f"/api/agent/jobs/{job_id}/start", headers=_agent_headers(world["agent1"]))
+        assert agent_start.status_code == 200, agent_start.text
+        assert agent_start.json()["scope"] == "lan"
+
+
+@requires_postgres
+def test_queued_wan_run_stays_central_only_after_definition_edited_to_lan(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan = _wan_scan(client, token, world)
+        run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
+        assert run.status_code == 200, run.text
+        job_id = run.json()["id"]
+        edited = client.patch(
+            f"/api/scans/{scan['id']}",
+            headers=_headers(token),
+            json={
+                "name": "Now LAN",
+                "scope": "lan",
+                "site_id": world["site"]["id"],
+                "network_ids": [world["net1"]["id"], world["net2"]["id"]],
+                "is_enabled": True,
+            },
+        )
+        assert edited.status_code == 200, edited.text
+        assert edited.json()["scope"] == "lan"
+        history = client.get(f"/api/jobs/{job_id}", headers=_headers(token)).json()
+        assert history["scope"] == "wan"
+        _heartbeat(world["agent1"]["id"])
+        agent_poll = client.get("/api/agent/jobs", headers=_agent_headers(world["agent1"]))
+        assert agent_poll.json() == []
+        agent_start = client.post(f"/api/agent/jobs/{job_id}/start", headers=_agent_headers(world["agent1"]))
+        assert agent_start.status_code == 404
+        scanner_poll = client.get("/api/internal/scanner/jobs", headers=_scanner_headers())
+        assert any(row["job_id"] == job_id for row in scanner_poll.json())
+        scanner_start = client.post(f"/api/internal/scanner/jobs/{job_id}/start", headers=_scanner_headers())
+        assert scanner_start.status_code == 200, scanner_start.text
+        assert scanner_start.json()["scope"] == "wan"
+
+
+@requires_postgres
+def test_phase1d_lan_device_lands_on_snapshot_site_network_and_claimed_agent(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan = _lan_scan(client, token, world, network_ids=[world["net1"]["id"]])
+        assert scan["agent_id"] is None
+        run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
+        assert run.status_code == 200, run.text
+        job_id = run.json()["id"]
+        _heartbeat(world["agent1"]["id"])
+        started = client.post(f"/api/agent/jobs/{job_id}/start", headers=_agent_headers(world["agent1"]))
+        assert started.status_code == 200, started.text
+        posted = client.post(
+            f"/api/agent/jobs/{job_id}/devices",
+            headers=_agent_headers(world["agent1"]),
+            json=[{"ip": "10.1.0.20", "scope": "lan", "hostname": "hq-srv01", "ports": [22]}],
+        )
+        assert posted.status_code == 200, posted.text
+        from app.database import SessionLocal
+        from app.models import Asset, AssetObservation, Device, ScanJob
+
+        db = SessionLocal()
+        try:
+            job = db.get(ScanJob, job_id)
+            assert job.claimed_agent_id == world["agent1"]["id"]
+            device = db.query(Device).filter(Device.hostname == "hq-srv01").one()
+            asset = db.get(Asset, device.asset_id)
+            assert device.scope == "lan"
+            assert device.site_id == world["site"]["id"]
+            assert asset.site_id == world["site"]["id"]
+            obs = db.query(AssetObservation).filter(AssetObservation.asset_id == asset.id).one()
+            assert obs.site_id == world["site"]["id"]
+            assert obs.network_id == world["net1"]["id"]
+            assert obs.agent_id == world["agent1"]["id"]
+            assert obs.scope == "lan"
+            assert obs.scan_job_id == job_id
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_findings_retain_run_scope_after_definition_scope_changes(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan = _lan_scan(client, token, world, network_ids=[world["net1"]["id"]])
+        run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
+        job_id = run.json()["id"]
+        _heartbeat(world["agent1"]["id"])
+        assert client.post(f"/api/agent/jobs/{job_id}/start", headers=_agent_headers(world["agent1"])).status_code == 200
+        assert client.post(
+            f"/api/agent/jobs/{job_id}/devices",
+            headers=_agent_headers(world["agent1"]),
+            json=[{"ip": "10.1.0.21", "scope": "wan", "hostname": "hq-panel"}],
+        ).status_code == 200
+        edited = client.patch(
+            f"/api/scans/{scan['id']}",
+            headers=_headers(token),
+            json={
+                "name": "Edited WAN",
+                "scope": "wan",
+                "wan_target_ids": [world["wan"]["id"]],
+                "is_enabled": True,
+            },
+        )
+        assert edited.status_code == 200, edited.text
+        findings = client.post(
+            f"/api/agent/jobs/{job_id}/findings",
+            headers=_agent_headers(world["agent1"]),
+            json=[
+                {
+                    "template_id": "exposed-panel",
+                    "name": "Panel",
+                    "severity": "high",
+                    "host": "https://10.1.0.21",
+                    "matched_at": "https://10.1.0.21/",
+                    "tags": "panel",
+                }
+            ],
+        )
+        assert findings.status_code == 200, findings.text
+        history = client.get(f"/api/jobs/{job_id}", headers=_headers(token)).json()
+        assert history["scope"] == "lan"
+        from app.database import SessionLocal
+        from app.models import Device, Finding
+
+        db = SessionLocal()
+        try:
+            device = db.query(Device).filter(Device.hostname == "hq-panel").one()
+            assert device.scope == "lan"
+            assert device.site_id == world["site"]["id"]
+            finding = db.query(Finding).filter(Finding.scan_job_id == job_id).one()
+            assert finding.device_id == device.id
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_already_running_legacy_pre_1d_job_cannot_unquarantine(reset_db):
+    from alembic import command
+
+    from app.database import SessionLocal, engine
+    from app.migrate import alembic_config, apply_schema
+    from app.models import LEGACY_PRE_1D_REQUEUE_ERROR, ScanJob
+
+    command.upgrade(alembic_config(), PHASE1C_HEAD)
+    with engine.begin() as conn:
+        tenant_id = conn.execute(text("INSERT INTO tenants (name, notes) VALUES ('Legacy running', '') RETURNING id")).scalar_one()
+        wan_id = conn.execute(
+            text("INSERT INTO subnets (tenant_id, name, cidr, scope) VALUES (:t, 'WAN', '198.51.100.0/24', 'wan') RETURNING id"),
+            {"t": tenant_id},
+        ).scalar_one()
+        scan_id = conn.execute(
+            text(
+                """
+                INSERT INTO scans (tenant_id, name, scope, profile, nuclei_severities, nuclei_tags, subnet_ids, is_enabled)
+                VALUES (:t, 'Old running WAN', 'wan', 'discovery', 'high', '', CAST(:ids AS jsonb), true)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id, "ids": f"[{wan_id}]"},
+        ).scalar_one()
+        running_id = conn.execute(
+            text(
+                """
+                INSERT INTO scan_jobs (scan_id, tenant_id, status, claimed_by, hosts_found, findings_count)
+                VALUES (:s, :t, 'running', 'central', 0, 0)
+                RETURNING id
+                """
+            ),
+            {"s": scan_id, "t": tenant_id},
+        ).scalar_one()
+    apply_schema()
+    db = SessionLocal()
+    try:
+        job = db.get(ScanJob, running_id)
+        assert job is not None
+        assert job.execution_snapshot is None
+        assert job.snapshot_version == "legacy_pre_1d"
+        assert job.status == "failed"
+        assert LEGACY_PRE_1D_REQUEUE_ERROR in (job.error or "")
+        assert job.claimed_by is None
+        assert job.claimed_agent_id is None
+    finally:
+        db.close()
+
+    with _client() as client:
+        devices = client.post(
+            f"/api/internal/scanner/jobs/{running_id}/devices",
+            headers=_scanner_headers(),
+            json=[{"ip": "198.51.100.8", "scope": "wan", "hostname": "legacy-box"}],
+        )
+        assert devices.status_code == 409
+        findings = client.post(
+            f"/api/internal/scanner/jobs/{running_id}/findings",
+            headers=_scanner_headers(),
+            json=[{"template_id": "x", "host": "198.51.100.8"}],
+        )
+        assert findings.status_code == 409
+        provenance = client.post(
+            f"/api/internal/scanner/jobs/{running_id}/provenance",
+            headers=_scanner_headers(),
+            json={"tool": "naabu"},
+        )
+        assert provenance.status_code == 409
+        complete = client.post(
+            f"/api/internal/scanner/jobs/{running_id}/complete",
+            headers=_scanner_headers(),
+            params={"ok": "true"},
+        )
+        assert complete.status_code == 409
+
+    db = SessionLocal()
+    try:
+        job = db.get(ScanJob, running_id)
+        assert job.status == "failed"
+        assert job.claimed_by is None
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_fqdn_is_pinned_at_start_and_runtime_fail_closes_on_later_exclusion(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        fqdn = client.post(
+            f"/api/tenants/{world['tenant']['id']}/wan-targets",
+            headers=_headers(token),
+            json={"name": "Edge host", "target_type": "fqdn", "value": "edge.example.com"},
+        )
+        assert fqdn.status_code == 200, fqdn.text
+        scan = _wan_scan(client, token, world, name="FQDN pin", wan_target_ids=[fqdn.json()["id"]])
+        run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
+        assert run.status_code == 200, run.text
+        with patch("app.scan_security.socket.getaddrinfo", return_value=[(None, None, None, None, ("203.0.113.51", 0))]):
+            started = client.post(
+                f"/api/internal/scanner/jobs/{run.json()['id']}/start",
+                headers=_scanner_headers(),
+            )
+        assert started.status_code == 200, started.text
+        payload = started.json()
+        assert payload["scope"] == "wan"
+        assert all(row["type"] != "fqdn" for row in payload["targets"])
+        assert any(row["type"] == "ip" and row["value"] == "203.0.113.51" for row in payload["targets"])
+
+        import runner as runtime_runner
+
+        with patch("runner.socket.getaddrinfo") as dns:
+            pinned = runtime_runner.resolve_execution_targets(payload)
+            dns.assert_not_called()
+        assert pinned == [{"type": "ip", "value": "203.0.113.51"}] or all(
+            row["type"] == "ip" and row["value"] == "203.0.113.51" for row in pinned
+        )
+
+        leftover = {
+            "targets": [{"type": "fqdn", "value": "edge.example.com"}],
+            "exclusions": [{"type": "ip", "value": "203.0.113.50"}],
+        }
+        with patch("runner.socket.getaddrinfo", return_value=[(None, None, None, None, ("203.0.113.50", 0))]):
+            with pytest.raises(RuntimeError, match="Exclusions remove all targets"):
+                runtime_runner.resolve_execution_targets(leftover)
+
+
+def test_fingerprint_only_cidr_invokes_httpx():
+    import runner as runtime_runner
+
+    captured = {}
+
+    def _fake_httpx(hosts, log=None, intensity=None):
+        captured["hosts"] = hosts
+        return []
+
+    with patch.object(runtime_runner, "run_httpx", side_effect=_fake_httpx):
+        result = runtime_runner.run_pipeline(
+            {
+                "scope": "lan",
+                "targets": [{"type": "cidr", "value": "10.1.0.0/24"}],
+                "stages": {
+                    "discovery": False,
+                    "port_mode": "none",
+                    "fingerprint": True,
+                    "vulnerability": False,
+                },
+                "intensity": {},
+                "exclusions": [],
+            }
+        )
+    assert any(row.get("ip") == "10.1.0.0/24" for row in captured.get("hosts") or [])
+    assert result["devices"] == []

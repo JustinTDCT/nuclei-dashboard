@@ -19,9 +19,9 @@ def main() -> None:
             for job in jobs:
                 job_id = job["job_id"]
                 print(f"Starting WAN job {job_id}", flush=True)
-                client.start(job_id)
+                started = client.start(job_id)
                 try:
-                    result = run_pipeline(job)
+                    result = run_pipeline(started)
                     if result.get("provenance"):
                         try:
                             client.provenance(job_id, result["provenance"])

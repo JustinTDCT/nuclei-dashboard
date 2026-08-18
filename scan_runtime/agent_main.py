@@ -30,9 +30,9 @@ def authenticate(client: CentralClient, uuid: str, secret: str, public_hex: str,
 def run_job(client: CentralClient, token: str, job: dict, refresh_token) -> None:
     job_id = job["job_id"]
     print(f"Starting job {job_id}", flush=True)
-    client.start(token, job_id)
+    started = client.start(token, job_id)
     try:
-        result = run_pipeline(job, log=lambda message: print(message, flush=True))
+        result = run_pipeline(started, log=lambda message: print(message, flush=True))
         token = refresh_token() or token
         if result.get("provenance"):
             try:

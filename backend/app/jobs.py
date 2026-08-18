@@ -49,13 +49,9 @@ def create_job(
 
 
 def fail_job(db: Session, job: ScanJob, detail: str) -> ScanJob:
-    already_running = job.status == JOB_RUNNING
     job.status = "failed"
     job.error = detail
     job.finished_at = _now()
-    if not already_running:
-        job.claimed_agent_id = None
-        job.claimed_by = None
     db.commit()
     db.refresh(job)
     return job
@@ -63,7 +59,13 @@ def fail_job(db: Session, job: ScanJob, detail: str) -> ScanJob:
 
 def job_payload(db: Session, job: ScanJob) -> dict:
     if job.execution_snapshot:
-        return job_payload_from_snapshot(job)
+        from app.scan_execution import worker_execution_payload
+        from app.scan_security import ExecutionBlocked
+
+        try:
+            return worker_execution_payload(db, job)
+        except ExecutionBlocked as exc:
+            raise LanScanInvalidError(exc.detail) from exc
     if job.status in RUNNABLE_LEGACY_STATUSES or job.finished_at is None:
         fail_pending_legacy_pre_1d_jobs(db, job_id=job.id)
         raise LanScanInvalidError(LEGACY_PRE_1D_REQUEUE_ERROR)
@@ -80,13 +82,11 @@ def fail_pending_legacy_pre_1d_jobs(db: Session, *, job_id: int | None = None) -
     rows = q.all()
     now = _now()
     for job in rows:
-        already_running = job.status == JOB_RUNNING
         job.status = "failed"
         job.error = LEGACY_PRE_1D_REQUEUE_ERROR
         job.finished_at = now
-        if not already_running:
-            job.claimed_agent_id = None
-            job.claimed_by = None
+        job.claimed_agent_id = None
+        job.claimed_by = None
     return len(rows)
 
 

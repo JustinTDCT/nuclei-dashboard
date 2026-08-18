@@ -45,7 +45,11 @@ def serialize_scan(db: Session, scan: Scan) -> ScanOut:
 def job_out(job: ScanJob, *, include_snapshot: bool = False) -> ScanJobOut:
     out = ScanJobOut.model_validate(job)
     out.scan_name = job.scan.name if job.scan else None
-    out.scope = job.scan.scope if job.scan else None
+    snapshot = job.execution_snapshot or {}
+    if snapshot:
+        out.scope = snapshot.get("scope")
+    else:
+        out.scope = job.scan.scope if job.scan else None
     if not include_snapshot:
         out.execution_snapshot = None
     return out

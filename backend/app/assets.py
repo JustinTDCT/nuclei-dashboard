@@ -217,6 +217,19 @@ def fallback_lan_site(db: Session, tenant_id: int) -> Site:
 
 def observation_context(db: Session, job_id: int, ip: str, report_scope: str) -> dict:
     job = db.get(ScanJob, job_id)
+    if job and job.execution_snapshot:
+        from app.scan_execution import execution_context, resolve_snapshot_network
+
+        context = execution_context(db, job)
+        network = resolve_snapshot_network(db, job, ip)
+        return {
+            "site_id": context["site_id"] if context["scope"] == "lan" else None,
+            "network_id": network.id if network else None,
+            "agent_id": context["claimed_agent_id"] if context["scope"] == "lan" else None,
+            "scope": context["scope"],
+            "scan_job_id": job_id,
+            "source": SOURCE_SCANNER,
+        }
     scan = job.scan if job else None
     agent = scan.agent if scan else None
     scope = (scan.scope if scan else report_scope) or report_scope

@@ -18,10 +18,10 @@ from app.models import (
     Agent,
     Device,
     Network,
-    Scan,
     ScanJob,
 )
 from app.scan_dispatch import agent_may_claim_now, atomic_claim_job, is_agent_healthy
+from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_lan_claim
 from app.scan_snapshot import merge_provenance
 from app.schemas import AgentTokenIn, DeviceReport, EnrollIn, FindingReport
@@ -140,10 +140,10 @@ def heartbeat(request: Request, agent: Agent = Depends(current_agent), db: Sessi
 def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_db)):
     jobs = (
         db.query(ScanJob)
-        .join(Scan, Scan.id == ScanJob.scan_id)
         .filter(
             ScanJob.status.in_((JOB_QUEUED, JOB_WAITING_FOR_AGENT)),
-            Scan.scope == "lan",
+            ScanJob.execution_snapshot.isnot(None),
+            snapshot_scope_clause("lan"),
         )
         .order_by(ScanJob.created_at.asc())
         .limit(25)
@@ -169,17 +169,17 @@ def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_d
                 break
             continue
         fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
-        continue
-        if len(payloads) >= 5:
-            break
     return payloads
 
 
 @router.post("/jobs/{job_id}/start")
 def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = Depends(get_db)):
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-    if not job or not job.scan or job.scan.scope != "lan":
-        raise HTTPException(status_code=404, detail="Job not available")
+    try:
+        if not job or run_scope(job) != "lan":
+            raise HTTPException(status_code=404, detail="Job not available")
+    except ExecutionBlocked:
+        raise HTTPException(status_code=404, detail="Job not available") from None
     if job.status not in {JOB_QUEUED, JOB_WAITING_FOR_AGENT}:
         raise HTTPException(status_code=404, detail="Job not available")
     if not _agent_in_job_pool(job, agent):
@@ -244,7 +244,7 @@ def post_findings(
     db: Session = Depends(get_db),
 ):
     job = _owned_job(db, job_id, agent.uuid)
-    added = store_findings(db, job.tenant_id, job.id, job.scan.scope, body)
+    added = store_findings(db, job.tenant_id, job.id, run_scope(job), body)
     job.findings_count = (job.findings_count or 0) + added
     db.commit()
     return {"ok": True, "added": added}
@@ -268,9 +268,10 @@ def complete_job(
 
 def _owned_job(db: Session, job_id: int, claimed_by: str) -> ScanJob:
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-    if not job or job.claimed_by != claimed_by:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    try:
+        return require_active_phase1d_run(job, claimed_by=claimed_by)
+    except ExecutionBlocked:
+        raise HTTPException(status_code=409, detail="Job is not an active Phase 1D run") from None
 
 
 @router.post("/jobs/{job_id}/provenance")

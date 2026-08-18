@@ -7,8 +7,9 @@ from app.config import settings
 from app.database import get_db
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
-from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, Scan, ScanJob
+from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
 from app.scan_dispatch import CENTRAL_WORKER
+from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_wan_start
 from app.scan_snapshot import merge_provenance
 from app.schemas import DeviceReport, FindingReport
@@ -29,8 +30,11 @@ def _now() -> datetime:
 def poll_jobs(_: None = Depends(require_scanner), db: Session = Depends(get_db)):
     jobs = (
         db.query(ScanJob)
-        .join(Scan, Scan.id == ScanJob.scan_id)
-        .filter(ScanJob.status == JOB_QUEUED, Scan.scope == "wan")
+        .filter(
+            ScanJob.status == JOB_QUEUED,
+            ScanJob.execution_snapshot.isnot(None),
+            snapshot_scope_clause("wan"),
+        )
         .order_by(ScanJob.created_at.asc())
         .limit(5)
         .all()
@@ -52,12 +56,21 @@ def poll_jobs(_: None = Depends(require_scanner), db: Session = Depends(get_db))
 def start_job(job_id: int, _: None = Depends(require_scanner), db: Session = Depends(get_db)):
     job = (
         db.query(ScanJob)
-        .join(Scan, Scan.id == ScanJob.scan_id)
-        .filter(ScanJob.id == job_id, ScanJob.status == JOB_QUEUED, Scan.scope == "wan")
+        .filter(
+            ScanJob.id == job_id,
+            ScanJob.status == JOB_QUEUED,
+            ScanJob.execution_snapshot.isnot(None),
+            snapshot_scope_clause("wan"),
+        )
         .first()
     )
     if not job:
         raise HTTPException(status_code=404, detail="Job not available")
+    try:
+        if run_scope(job) != "wan":
+            raise HTTPException(status_code=404, detail="Job not available")
+    except ExecutionBlocked:
+        raise HTTPException(status_code=404, detail="Job not available") from None
     try:
         if not job.execution_snapshot:
             fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
@@ -97,7 +110,7 @@ def post_findings(
     db: Session = Depends(get_db),
 ):
     job = _owned(db, job_id)
-    added = store_findings(db, job.tenant_id, job.id, job.scan.scope, body)
+    added = store_findings(db, job.tenant_id, job.id, run_scope(job), body)
     job.findings_count = (job.findings_count or 0) + added
     db.commit()
     return {"ok": True, "added": added}
@@ -134,6 +147,7 @@ def post_provenance(
 
 def _owned(db: Session, job_id: int) -> ScanJob:
     job = db.query(ScanJob).filter(ScanJob.id == job_id, ScanJob.claimed_by == "central").first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    try:
+        return require_active_phase1d_run(job, claimed_by="central")
+    except ExecutionBlocked:
+        raise HTTPException(status_code=409, detail="Job is not an active Phase 1D run") from None
