@@ -124,11 +124,13 @@ Expected Assets can be created manually (`is_expected`, `first_seen`/`last_seen`
 
 `0005_asset_correlation_lifecycle` makes Asset correlation authoritative. Incoming DeviceReports are normalized, scored against a bounded candidate set (indexed identifiers/addresses, never every Tenant Asset), then either linked, left ambiguous, or used to create a new Asset. Device rows are a compatibility projection written after that decision. The legacy Tenant+hostname+scope Device unique constraint now includes `site_id` and `asset_id` so two LAN systems with the same hostname at different Sites stay distinct.
 
-Hard rules: Tenant mismatch is impossible; LAN auto-match is Site-local; IP alone cannot auto-match; placeholder hostnames contribute no hostname evidence; identifiers marked `incorrect` are ignored; WAN↔LAN joins require a strong unique identifier.
+Hard rules: Tenant mismatch is impossible; LAN auto-match is Site-local; IP alone cannot auto-match; a hostname/uniqueness bonus cannot auto-match by itself; automatic correlation requires a strong stable identifier (MAC/serial/device ID) or independent corroboration (name plus address/service/TLS/DNS); placeholder hostnames contribute no hostname evidence; identifiers marked `incorrect` are ignored; WAN↔LAN joins require a strong unique identifier.
+
+`observation_key` is a SHA-256 of the complete evidence-bearing report (hostname, IP, scope, ports, MAC, serial, device identifier, FQDN, TLS name, DNS name, title, tech, classification, auto_label). Identical report replay dedupes; the same host/IP with different identity evidence is a new observation and correlation decision.
 
 Exact scanner retries reuse the stored `AssetCorrelationDecision` (`scan_job_id`, `observation_key`) and do not duplicate observations, decisions, or events.
 
-Manual operations (`asset.merge`, `asset.split`, `asset.identifier_correct`, `asset.move_site`, `asset.observation_reassociate`) are audited. Merged Assets are retained with `merged_into_asset_id`.
+Manual operations (`asset.merge`, `asset.split`, `asset.identifier_correct`, `asset.move_site`, `asset.observation_reassociate`) are audited. Merged Assets are retained with `merged_into_asset_id`. Split/reassign/merge rebuild scanner-derived identifier/address/service projections from remaining observation snapshots, including MAC/serial/FQDN/TLS/DNS. Duplicate Device compatibility rows are consolidated during an explicit merge. A discovered Asset with no remaining observations does not keep stale first/last-seen or active lifecycle.
 
 `asset_inactive_days` is a new Admin setting and is intentionally separate from Device `stale_days`. Expected / not-yet-observed Assets do not become inactive. Domain events persist `new_asset`, `asset_became_inactive`, and `previously_inactive_asset_returned` only. Alert email/webhook/Teams routing remains Phase 3B.
 

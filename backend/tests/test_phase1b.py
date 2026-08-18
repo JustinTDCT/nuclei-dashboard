@@ -367,10 +367,12 @@ def test_identity_history_and_no_automatic_correlation(reset_db):
         assert len({row.asset_id for row in same_ip}) == 2
 
         first = db.get(Asset, devices[0].asset_id)
+        before_change = db.query(Asset).filter(Asset.tenant_id == tenant.id).count()
         upsert_devices(db, tenant.id, _job(), [DeviceReport(ip="10.1.1.11", scope="wan", hostname="alpha")])
         db.refresh(first)
         addrs = db.query(AssetAddress).filter(AssetAddress.asset_id == first.id).all()
-        assert {row.ip for row in addrs} == {"10.1.1.10", "10.1.1.11"}
+        assert {row.ip for row in addrs} == {"10.1.1.10"}
+        assert db.query(Asset).filter(Asset.tenant_id == tenant.id).count() == before_change + 1
 
         from app.models import Site
 
@@ -417,8 +419,8 @@ def test_identity_history_and_no_automatic_correlation(reset_db):
 
         before = db.query(AssetObservation).filter(AssetObservation.asset_id == first.id).count()
         job_repeat = _job()
-        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.11", scope="wan", hostname="alpha")])
-        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.11", scope="wan", hostname="alpha")])
+        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.10", scope="wan", hostname="alpha")])
+        upsert_devices(db, tenant.id, job_repeat, [DeviceReport(ip="10.1.1.10", scope="wan", hostname="alpha")])
         after = db.query(AssetObservation).filter(AssetObservation.asset_id == first.id).all()
         assert len(after) == before + 1
         db.refresh(first)
@@ -938,11 +940,20 @@ def test_observation_uses_report_facts_and_per_report_keys(reset_db):
     assert spec is not None and spec.loader is not None
     migrated = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migrated)
-    assert observation_fingerprint("srv01", "10.1.1.10", "wan", [443]) == migrated.observation_fingerprint(
+    assert migrated.observation_fingerprint("srv01", "10.1.1.10", "wan", [443]) == migrated.observation_fingerprint(
         "srv01", "10.1.1.10", "wan", [443]
     )
-    assert observation_fingerprint("10.1.1.20", "10.1.1.20", "wan", []) == migrated.observation_fingerprint(
+    assert migrated.observation_fingerprint("10.1.1.20", "10.1.1.20", "wan", []) == migrated.observation_fingerprint(
         "10.1.1.20", "10.1.1.20", "wan", []
+    )
+    assert observation_fingerprint("srv01", "10.1.1.10", "wan", [443]) != migrated.observation_fingerprint(
+        "srv01", "10.1.1.10", "wan", [443]
+    )
+    assert observation_fingerprint(
+        "srv01", "10.1.1.10", "wan", [443], tls_name="old.example.com"
+    ) != observation_fingerprint("srv01", "10.1.1.10", "wan", [443], tls_name="new.example.com")
+    assert observation_fingerprint("srv01", "10.1.1.10", "wan", [443]) == observation_fingerprint(
+        "srv01", "10.1.1.10", "wan", [443]
     )
 
     apply_schema()
@@ -964,7 +975,17 @@ def test_observation_uses_report_facts_and_per_report_keys(reset_db):
             db,
             tenant.id,
             job1.id,
-            [DeviceReport(ip="10.8.8.8", scope="wan", hostname="srv01", ports=[443], title="panel", tech="nginx")],
+            [
+                DeviceReport(
+                    ip="10.8.8.8",
+                    scope="wan",
+                    hostname="srv01",
+                    ports=[443],
+                    title="panel",
+                    tech="nginx",
+                    mac="aa:bb:cc:dd:ee:02",
+                )
+            ],
         )
         device = db.query(Device).filter(Device.hostname == "srv01").one()
         asset = db.get(Asset, device.asset_id)
@@ -980,7 +1001,17 @@ def test_observation_uses_report_facts_and_per_report_keys(reset_db):
             db,
             tenant.id,
             job2.id,
-            [DeviceReport(ip="10.8.8.8", scope="wan", hostname="srv01", ports=[], title="", tech="")],
+            [
+                DeviceReport(
+                    ip="10.8.8.8",
+                    scope="wan",
+                    hostname="srv01",
+                    ports=[],
+                    title="",
+                    tech="",
+                    mac="aa:bb:cc:dd:ee:02",
+                )
+            ],
         )
         db.refresh(service)
         assert service.port == 443
@@ -999,9 +1030,9 @@ def test_observation_uses_report_facts_and_per_report_keys(reset_db):
             tenant.id,
             job3.id,
             [
-                DeviceReport(ip="10.1.1.10", scope="wan", hostname="srv01", ports=[443]),
-                DeviceReport(ip="10.1.1.11", scope="wan", hostname="srv01", ports=[22]),
-                DeviceReport(ip="10.1.1.11", scope="wan", hostname="srv01", ports=[22]),
+                DeviceReport(ip="10.1.1.10", scope="wan", hostname="srv01", ports=[443], mac="aa:bb:cc:dd:ee:02"),
+                DeviceReport(ip="10.1.1.11", scope="wan", hostname="srv01", ports=[22], mac="aa:bb:cc:dd:ee:02"),
+                DeviceReport(ip="10.1.1.11", scope="wan", hostname="srv01", ports=[22], mac="aa:bb:cc:dd:ee:02"),
             ],
         )
         same_job = (

@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session, selectinload
 
-from app.assets import is_placeholder_hostname, normalize_identifier, observation_fingerprint
+from app.assets import is_placeholder_hostname, normalize_identifier, observation_key_from_snapshot, report_snapshot
 from app.classify import normalize_hostname
 from app.models import (
     CONFIDENCE_HIGH,
@@ -62,6 +62,18 @@ MAX_CANDIDATES_STORED = 8
 STRONG_IDENTIFIER_TYPES = frozenset({IDENTIFIER_MAC, IDENTIFIER_SERIAL, IDENTIFIER_DEVICE_ID})
 NAME_IDENTIFIER_TYPES = frozenset(
     {IDENTIFIER_HOSTNAME, IDENTIFIER_FQDN, IDENTIFIER_DNS_NAME, IDENTIFIER_TLS_NAME}
+)
+STRONG_EVIDENCE_LABELS = frozenset(
+    {"exact unique MAC", "exact serial", "exact device identifier"}
+)
+NAME_EVIDENCE_LABELS = frozenset({"exact normalized hostname", "exact normalized FQDN"})
+CORROBORATING_EVIDENCE_LABELS = frozenset(
+    {
+        "same recently observed address",
+        "compatible service fingerprint",
+        "TLS certificate name",
+        "DNS name",
+    }
 )
 
 
@@ -115,6 +127,9 @@ class ScoredCandidate:
     evidence: list[EvidenceItem]
     blocked: bool = False
     block_reason: str = ""
+    matched_strong: bool = False
+    matched_name: bool = False
+    matched_corroboration: bool = False
 
     def as_summary(self) -> dict[str, Any]:
         return {
@@ -315,6 +330,8 @@ def score_candidate(asset: Asset, signals: CorrelationSignals, *, unique_hostnam
     block_reason = ""
 
     matched_strong = False
+    matched_name = False
+    matched_corroboration = False
     for identifier_type, weight, label in (
         (IDENTIFIER_MAC, WEIGHT_MAC, "exact unique MAC"),
         (IDENTIFIER_SERIAL, WEIGHT_SERIAL, "exact serial"),
@@ -337,6 +354,7 @@ def score_candidate(asset: Asset, signals: CorrelationSignals, *, unique_hostnam
     if hostname:
         if hostname in asset_hostnames or hostname in asset_fqdns:
             evidence.append(EvidenceItem("exact normalized hostname", WEIGHT_HOSTNAME))
+            matched_name = True
             if unique_hostname:
                 evidence.append(EvidenceItem("unique hostname in locality", BONUS_UNIQUE_HOSTNAME))
         elif asset_hostnames and not matched_strong:
@@ -346,14 +364,17 @@ def score_candidate(asset: Asset, signals: CorrelationSignals, *, unique_hostnam
     if fqdn_values and fqdn_values & (asset_fqdns | asset_hostnames):
         if not any(item.label == "exact normalized hostname" for item in evidence):
             evidence.append(EvidenceItem("exact normalized FQDN", WEIGHT_FQDN))
+        matched_name = True
 
     tls_values = signals.values_for(IDENTIFIER_TLS_NAME)
     if tls_values and tls_values & _active_values(asset, IDENTIFIER_TLS_NAME):
         evidence.append(EvidenceItem("TLS certificate name", WEIGHT_TLS_NAME))
+        matched_corroboration = True
 
     dns_values = signals.values_for(IDENTIFIER_DNS_NAME)
     if dns_values and dns_values & _active_values(asset, IDENTIFIER_DNS_NAME):
         evidence.append(EvidenceItem("DNS name", WEIGHT_DNS_NAME))
+        matched_corroboration = True
 
     if signals.scope == "lan" and signals.site_id is not None and asset.site_id == signals.site_id:
         evidence.append(EvidenceItem("same Site", WEIGHT_SAME_SITE))
@@ -371,10 +392,12 @@ def score_candidate(asset: Asset, signals: CorrelationSignals, *, unique_hostnam
         ]
         if matching_addresses:
             evidence.append(EvidenceItem("same recently observed address", WEIGHT_SAME_ADDRESS))
+            matched_corroboration = True
 
     observed_tokens = _service_tokens(signals.title, signals.tech, signals.ports)
     if observed_tokens and observed_tokens & _asset_service_tokens(asset):
         evidence.append(EvidenceItem("compatible service fingerprint", WEIGHT_SERVICE_FINGERPRINT))
+        matched_corroboration = True
 
     score = sum(item.contribution for item in evidence)
     return ScoredCandidate(
@@ -384,25 +407,43 @@ def score_candidate(asset: Asset, signals: CorrelationSignals, *, unique_hostnam
         evidence=evidence,
         blocked=blocked,
         block_reason=block_reason,
+        matched_strong=matched_strong,
+        matched_name=matched_name,
+        matched_corroboration=matched_corroboration,
     )
+
+
+def qualifies_for_auto_match(candidate: ScoredCandidate) -> bool:
+    """Automatic match requires a strong ID or independent corroboration.
+
+    Unique hostname can raise confidence but cannot, by itself, satisfy
+    automatic correlation or reactivation.
+    """
+    if candidate.blocked:
+        return False
+    if candidate.matched_strong:
+        return True
+    return candidate.matched_name and candidate.matched_corroboration
 
 
 def decide(scored: list[ScoredCandidate]) -> CorrelationResult:
     viable = [row for row in scored if not row.blocked]
     viable.sort(key=lambda row: (-row.score, row.asset_id))
-    if not viable:
-        return CorrelationResult(
-            decision=DECISION_CREATED_NEW,
-            confidence=CONFIDENCE_LOW,
-            score=0,
-            selected_asset_id=None,
-            evidence=[],
-            candidates=scored,
+    auto = [row for row in viable if qualifies_for_auto_match(row)]
+    if not auto:
+        best = viable[0] if viable else None
+        second = viable[1] if len(viable) > 1 else None
+        similar = bool(
+            best
+            and second
+            and (best.score - second.score) < AMBIGUOUS_GAP
+            and (
+                second.score >= REVIEW_THRESHOLD
+                or (best.matched_name and second.matched_name)
+                or (best.matched_strong and second.matched_strong)
+            )
         )
-    best = viable[0]
-    second = viable[1] if len(viable) > 1 else None
-    if best.score < AUTO_MATCH_THRESHOLD:
-        if second and second.score >= REVIEW_THRESHOLD and (best.score - second.score) < AMBIGUOUS_GAP:
+        if similar:
             return CorrelationResult(
                 decision=DECISION_AMBIGUOUS,
                 confidence=confidence_for_score(best.score),
@@ -413,12 +454,15 @@ def decide(scored: list[ScoredCandidate]) -> CorrelationResult:
             )
         return CorrelationResult(
             decision=DECISION_CREATED_NEW,
-            confidence=confidence_for_score(best.score),
-            score=best.score,
+            confidence=confidence_for_score(best.score) if best else CONFIDENCE_LOW,
+            score=best.score if best else 0,
             selected_asset_id=None,
-            evidence=best.evidence,
+            evidence=best.evidence if best else [],
             candidates=scored,
         )
+    auto.sort(key=lambda row: (-row.score, row.asset_id))
+    best = auto[0]
+    second = auto[1] if len(auto) > 1 else None
     if second and second.score >= REVIEW_THRESHOLD and (best.score - second.score) < AMBIGUOUS_GAP:
         return CorrelationResult(
             decision=DECISION_AMBIGUOUS,
@@ -521,15 +565,7 @@ def persist_correlation_decision(
 
 
 def observation_key_for_report(report: DeviceReport, scope: str) -> str:
-    return observation_fingerprint(
-        report.hostname or "",
-        report.ip or "",
-        scope,
-        list(report.ports or []),
-        mac=report.mac or "",
-        serial=report.serial or "",
-        device_identifier=report.device_identifier or "",
-    )
+    return observation_key_from_snapshot(report_snapshot(report, scope))
 
 
 def post_correlation_asset_policy_hook(
@@ -551,19 +587,25 @@ __all__ = [
     "ALGORITHM_VERSION",
     "AMBIGUOUS_GAP",
     "AUTO_MATCH_THRESHOLD",
+    "CORROBORATING_EVIDENCE_LABELS",
     "CorrelationResult",
     "CorrelationSignals",
+    "NAME_EVIDENCE_LABELS",
     "REVIEW_THRESHOLD",
+    "STRONG_EVIDENCE_LABELS",
     "WEIGHT_HOSTNAME",
     "WEIGHT_MAC",
     "WEIGHT_SAME_ADDRESS",
     "WEIGHT_SAME_SITE",
     "canonical_asset_id",
     "correlate",
+    "decide",
     "find_correlation_decision",
     "generate_candidate_ids",
     "observation_key_for_report",
     "persist_correlation_decision",
     "post_correlation_asset_policy_hook",
+    "qualifies_for_auto_match",
+    "score_candidate",
     "signals_from_report",
 ]

@@ -10,9 +10,9 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.assets import (
     SOURCE_MANUAL,
-    SOURCE_SCANNER,
-    display_name_for,
     normalize_identifier,
+    rebuild_scanner_projections,
+    recalculate_asset_seen,
     utcnow,
 )
 from app.audit import record_audit
@@ -23,12 +23,14 @@ from app.models import (
     IDENTIFIER_VALIDITY_ACTIVE,
     IDENTIFIER_VALIDITY_INCORRECT,
     LIFECYCLE_ACTIVE,
+    Alert,
     Asset,
     AssetAddress,
     AssetIdentifier,
     AssetObservation,
     AssetService,
     Device,
+    Finding,
     User,
 )
 
@@ -64,78 +66,61 @@ def follow_canonical(db: Session, asset: Asset) -> Asset:
     return found
 
 
-def _recalculate_seen(asset: Asset) -> None:
-    times = [row.observed_at for row in asset.observations if row.observed_at is not None]
-    if not times:
-        if asset.is_expected:
-            asset.first_seen = None
-            asset.last_seen = None
-            asset.lifecycle_state = None
-        return
-    asset.first_seen = min(times)
-    asset.last_seen = max(times)
-    if asset.lifecycle_state is None:
-        asset.lifecycle_state = LIFECYCLE_ACTIVE
-
-
-def _rebuild_scanner_projections(db: Session, asset: Asset) -> None:
-    scanner_ids = [
-        row
-        for row in list(asset.identifiers)
-        if row.source == SOURCE_SCANNER and row.validity == IDENTIFIER_VALIDITY_ACTIVE
-    ]
-    for row in scanner_ids:
-        db.delete(row)
-    for row in list(asset.addresses):
-        if row.source == SOURCE_SCANNER:
-            db.delete(row)
-    for row in list(asset.services):
-        if row.source == SOURCE_SCANNER:
-            db.delete(row)
-    db.flush()
-
-    from app.assets import upsert_address, upsert_identifier, upsert_services
-
-    for observation in sorted(asset.observations, key=lambda row: row.observed_at):
-        if observation.hostname:
-            upsert_identifier(
-                db,
-                asset,
-                "hostname",
-                observation.hostname,
-                source=SOURCE_SCANNER,
-                seen_at=observation.observed_at,
-            )
-        address = upsert_address(
-            db,
-            asset,
-            observation.ip,
-            site_id=observation.site_id,
-            network_id=observation.network_id,
-            source=SOURCE_SCANNER,
-            seen_at=observation.observed_at,
-        )
-        snapshot = observation.snapshot or {}
-        upsert_services(
-            db,
-            asset,
-            observation.ip,
-            snapshot.get("ports") or [],
-            address_id=address.id if address else None,
-            title=str(snapshot.get("title") or ""),
-            tech=str(snapshot.get("tech") or ""),
-            source=SOURCE_SCANNER,
-            seen_at=observation.observed_at,
-        )
-    _recalculate_seen(asset)
-    name = display_name_for(
-        next((row.hostname for row in reversed(asset.observations) if row.hostname), ""),
-        next((row.ip for row in reversed(asset.observations) if row.ip), ""),
-        asset.display_name,
+def _consolidate_devices(db: Session, keeper: Device, donor: Device) -> Device:
+    """Merge two compatibility Device rows after an explicit Asset merge."""
+    if donor.id == keeper.id:
+        return keeper
+    if donor.ip and (not keeper.ip or (donor.last_seen or donor.first_seen) >= (keeper.last_seen or keeper.first_seen)):
+        keeper.ip = donor.ip
+    if donor.ports:
+        keeper.ports = sorted({*(keeper.ports or []), *(donor.ports or [])})
+    if donor.title and not keeper.title:
+        keeper.title = donor.title
+    if donor.tech and not keeper.tech:
+        keeper.tech = donor.tech
+    if donor.auto_label and not keeper.auto_label:
+        keeper.auto_label = donor.auto_label
+    if donor.description and not keeper.description:
+        keeper.description = donor.description
+    if keeper.classification in ("", "Unknown") and donor.classification not in ("", "Unknown", "Other"):
+        keeper.classification = donor.classification
+    if donor.first_seen and (not keeper.first_seen or donor.first_seen < keeper.first_seen):
+        keeper.first_seen = donor.first_seen
+    if donor.last_seen and (not keeper.last_seen or donor.last_seen > keeper.last_seen):
+        keeper.last_seen = donor.last_seen
+    if keeper.site_id is None and donor.site_id is not None:
+        keeper.site_id = donor.site_id
+    db.query(Finding).filter(Finding.device_id == donor.id).update(
+        {Finding.device_id: keeper.id}, synchronize_session=False
     )
-    if name:
-        asset.display_name = name
-    asset.updated_at = utcnow()
+    db.query(Alert).filter(Alert.device_id == donor.id).update(
+        {Alert.device_id: keeper.id}, synchronize_session=False
+    )
+    db.delete(donor)
+    db.flush()
+    return keeper
+
+
+def _attach_device_to_canonical(db: Session, device: Device, target: Asset) -> Device:
+    if target.site_id and device.scope == "lan" and device.site_id is None:
+        device.site_id = target.site_id
+    query = db.query(Device).filter(
+        Device.id != device.id,
+        Device.tenant_id == target.tenant_id,
+        Device.hostname == device.hostname,
+        Device.scope == device.scope,
+        Device.asset_id == target.id,
+    )
+    if device.site_id is None:
+        query = query.filter(Device.site_id.is_(None))
+    else:
+        query = query.filter(Device.site_id == device.site_id)
+    existing = query.first()
+    if existing is None:
+        device.asset_id = target.id
+        db.flush()
+        return device
+    return _consolidate_devices(db, existing, device)
 
 
 def merge_assets(
@@ -217,6 +202,8 @@ def merge_assets(
             else:
                 if service.last_seen and (not existing.last_seen or service.last_seen > existing.last_seen):
                     existing.last_seen = service.last_seen
+                if service.first_seen and (not existing.first_seen or service.first_seen < existing.first_seen):
+                    existing.first_seen = service.first_seen
         db.flush()
         for observation in list(source.observations):
             collision = (
@@ -234,9 +221,7 @@ def merge_assets(
                 observation.asset_id = target.id
                 observation.tenant_id = target.tenant_id
         for device in list(source.devices):
-            device.asset_id = target.id
-            if target.site_id and device.scope == "lan" and device.site_id is None:
-                device.site_id = target.site_id
+            _attach_device_to_canonical(db, device, target)
         source.merged_into_asset_id = target.id
         source.merged_at = now
         source.updated_at = now
@@ -252,13 +237,34 @@ def merge_assets(
                 break
     target.updated_at = now
     db.flush()
+    db.expire(target, ["observations", "identifiers", "addresses", "services", "devices"])
+    for merged in sources:
+        db.expire(merged, ["observations", "identifiers", "addresses", "services", "devices"])
     target = (
         db.query(Asset)
-        .options(selectinload(Asset.observations), selectinload(Asset.identifiers), selectinload(Asset.addresses))
+        .options(
+            selectinload(Asset.observations),
+            selectinload(Asset.identifiers),
+            selectinload(Asset.addresses),
+            selectinload(Asset.services),
+        )
         .filter(Asset.id == target.id)
         .one()
     )
-    _recalculate_seen(target)
+    for merged in sources:
+        emptied = (
+            db.query(Asset)
+            .options(selectinload(Asset.observations))
+            .filter(Asset.id == merged.id)
+            .one()
+        )
+        remaining = (
+            db.query(AssetObservation)
+            .filter(AssetObservation.asset_id == emptied.id)
+            .all()
+        )
+        recalculate_asset_seen(emptied, remaining)
+    rebuild_scanner_projections(db, target)
     record_audit(
         db,
         actor=actor,
@@ -325,18 +331,28 @@ def reassociate_observations(
     db.refresh(target)
     source = (
         db.query(Asset)
-        .options(selectinload(Asset.observations), selectinload(Asset.identifiers), selectinload(Asset.addresses))
+        .options(
+            selectinload(Asset.observations),
+            selectinload(Asset.identifiers),
+            selectinload(Asset.addresses),
+            selectinload(Asset.services),
+        )
         .filter(Asset.id == source.id)
         .one()
     )
     target = (
         db.query(Asset)
-        .options(selectinload(Asset.observations), selectinload(Asset.identifiers), selectinload(Asset.addresses))
+        .options(
+            selectinload(Asset.observations),
+            selectinload(Asset.identifiers),
+            selectinload(Asset.addresses),
+            selectinload(Asset.services),
+        )
         .filter(Asset.id == target.id)
         .one()
     )
-    _rebuild_scanner_projections(db, source)
-    _rebuild_scanner_projections(db, target)
+    rebuild_scanner_projections(db, source)
+    rebuild_scanner_projections(db, target)
     record_audit(
         db,
         actor=actor,

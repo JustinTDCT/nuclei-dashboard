@@ -319,7 +319,10 @@ def test_correlation_safety_cases(reset_db):
 
         wan_job = _job(db, tenant.id, scope="wan")
         _, laptop_devs = upsert_devices(
-            db, tenant.id, wan_job, [DeviceReport(ip="10.1.1.50", scope="wan", hostname="laptop01")]
+            db,
+            tenant.id,
+            wan_job,
+            [DeviceReport(ip="10.1.1.50", scope="wan", hostname="laptop01", mac="aa:bb:cc:dd:ee:99")],
         )
         laptop = db.get(Asset, laptop_devs[0].asset_id)
         later_job = _job(db, tenant.id, scope="wan")
@@ -535,11 +538,22 @@ def test_correlation_safety_cases(reset_db):
         original_first = inactive.first_seen
         original_disp = inactive.disposition
         db.flush()
+        before_host_only = db.query(Asset).filter(Asset.tenant_id == tenant.id).count()
         upsert_devices(
             db,
             tenant.id,
             _job(db, tenant.id, scope="wan"),
             [DeviceReport(ip="10.2.2.2", scope="wan", hostname="laptop01")],
+        )
+        db.refresh(inactive)
+        assert inactive.lifecycle_state == LIFECYCLE_INACTIVE
+        assert inactive.first_seen == original_first
+        assert db.query(Asset).filter(Asset.tenant_id == tenant.id).count() == before_host_only + 1
+        upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="wan"),
+            [DeviceReport(ip="10.2.2.2", scope="wan", hostname="laptop01", mac="aa:bb:cc:dd:ee:99")],
         )
         db.refresh(inactive)
         assert inactive.lifecycle_state == "active"
@@ -838,7 +852,13 @@ def test_manual_identity_ops_and_rbac(reset_db):
 
         detail = client.get(f"/api/assets/{one_id}", headers=_headers(viewer))
         assert detail.status_code == 200
-        assert detail.json().get("latest_correlation") is not None or True
+        corr = detail.json().get("latest_correlation")
+        assert corr is not None
+        assert corr["decision"] in {"created_new", "linked_existing", "ambiguous"}
+        assert corr["confidence"] in {"high", "medium", "low"}
+        assert isinstance(corr.get("evidence"), list)
+        assert isinstance(corr.get("candidates"), list)
+        assert corr.get("algorithm_version")
 
         db = SessionLocal()
         try:
@@ -851,6 +871,242 @@ def test_manual_identity_ops_and_rbac(reset_db):
             }.issubset(actions)
         finally:
             db.close()
+
+
+@requires_postgres
+def test_phase1c_corrective_regressions(reset_db):
+    from app.assets import observation_fingerprint
+    from app.auth import hash_password
+    from app.correlation import observation_key_for_report
+    from app.database import SessionLocal
+    from app.identity_ops import merge_assets, split_observations_to_new_asset
+    from app.inventory import upsert_devices
+    from app.migrate import apply_schema
+    from app.models import (
+        Asset,
+        AssetCorrelationDecision,
+        AssetIdentifier,
+        AssetObservation,
+        AssetService,
+        Device,
+        Finding,
+        Tenant,
+        User,
+    )
+    from app.schemas import DeviceReport
+
+    apply_schema()
+    db: Session = SessionLocal()
+    try:
+        tenant = Tenant(name="Corrective Tenant", notes="")
+        db.add(tenant)
+        db.flush()
+        actor = (
+            db.query(User).filter(User.username == "admin").first()
+            or User(
+                username="admin",
+                email="admin@localhost",
+                password_hash=hash_password("test-admin-pass"),
+                role="admin",
+                is_active=True,
+            )
+        )
+        if actor.id is None:
+            db.add(actor)
+            db.flush()
+        hq, hq_agent = _lan_world(db, tenant, "HQ")
+
+        same = observation_fingerprint("srv01", "10.1.1.10", "wan", [443])
+        assert same == observation_fingerprint("srv01", "10.1.1.10", "wan", [443])
+        assert observation_fingerprint(
+            "srv01", "10.1.1.10", "wan", [443], tls_name="old.example.com"
+        ) != observation_fingerprint("srv01", "10.1.1.10", "wan", [443], tls_name="new.example.com")
+        assert observation_key_for_report(
+            DeviceReport(ip="10.1.1.10", scope="wan", hostname="srv01", ports=[443], tls_name="old.example.com"),
+            "wan",
+        ) != observation_key_for_report(
+            DeviceReport(ip="10.1.1.10", scope="wan", hostname="srv01", ports=[443], tls_name="new.example.com"),
+            "wan",
+        )
+
+        retry_job = _job(db, tenant.id, scope="wan")
+        old_tls = DeviceReport(
+            ip="10.1.1.10", scope="wan", hostname="srv01", ports=[443], tls_name="old.example.com"
+        )
+        new_tls = DeviceReport(
+            ip="10.1.1.10", scope="wan", hostname="srv01", ports=[443], tls_name="new.example.com"
+        )
+        upsert_devices(db, tenant.id, retry_job, [old_tls])
+        upsert_devices(db, tenant.id, retry_job, [new_tls])
+        upsert_devices(db, tenant.id, retry_job, [new_tls])
+        tls_asset = db.query(Device).filter(Device.hostname == "srv01").one().asset
+        tls_obs = db.query(AssetObservation).filter(AssetObservation.asset_id == tls_asset.id).all()
+        assert len(tls_obs) == 2
+        assert {row.snapshot.get("tls_name") for row in tls_obs} == {"old.example.com", "new.example.com"}
+        assert (
+            db.query(AssetCorrelationDecision)
+            .filter(AssetCorrelationDecision.scan_job_id == retry_job)
+            .count()
+            == 2
+        )
+
+        _, old_pc = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="wan"),
+            [DeviceReport(ip="10.1.1.20", scope="wan", hostname="accounting-pc")],
+        )
+        before_pc = db.query(Asset).filter(Asset.tenant_id == tenant.id).count()
+        _, new_pc = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="wan"),
+            [DeviceReport(ip="10.1.1.87", scope="wan", hostname="accounting-pc")],
+        )
+        assert new_pc[0].asset_id != old_pc[0].asset_id
+        assert db.query(Asset).filter(Asset.tenant_id == tenant.id).count() == before_pc + 1
+
+        _, created_a = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="lan", agent=hq_agent),
+            [DeviceReport(ip="192.168.1.10", scope="lan", hostname="server01", ports=[443])],
+        )
+        _, created_b = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="lan", agent=hq_agent),
+            [DeviceReport(ip="192.168.1.20", scope="lan", hostname="server01", ports=[443])],
+        )
+        asset_a = db.get(Asset, created_a[0].asset_id)
+        asset_b = db.get(Asset, created_b[0].asset_id)
+        assert asset_a.id != asset_b.id
+        finding_a = Finding(
+            tenant_id=tenant.id,
+            device_id=created_a[0].id,
+            template_id="keep-a",
+            name="finding-a",
+            severity="high",
+            hostname="server01",
+            host="192.168.1.10",
+        )
+        finding_b = Finding(
+            tenant_id=tenant.id,
+            device_id=created_b[0].id,
+            template_id="keep-b",
+            name="finding-b",
+            severity="medium",
+            hostname="server01",
+            host="192.168.1.20",
+        )
+        db.add_all([finding_a, finding_b])
+        db.flush()
+        merge_assets(db, target=asset_a, source_ids=[asset_b.id], actor=actor, reason="same host")
+        db.refresh(asset_b)
+        assert asset_b.merged_into_asset_id == asset_a.id
+        devices = (
+            db.query(Device)
+            .filter(Device.hostname == "server01", Device.site_id == hq.id, Device.asset_id == asset_a.id)
+            .all()
+        )
+        assert len(devices) == 1
+        db.refresh(finding_a)
+        db.refresh(finding_b)
+        assert finding_a.device_id == devices[0].id
+        assert finding_b.device_id == devices[0].id
+        merged_obs = db.query(AssetObservation).filter(AssetObservation.asset_id == asset_a.id).all()
+        assert len(merged_obs) == 2
+        host_ident = (
+            db.query(AssetIdentifier)
+            .filter(
+                AssetIdentifier.asset_id == asset_a.id,
+                AssetIdentifier.identifier_type == "hostname",
+                AssetIdentifier.normalized_value == "server01",
+                AssetIdentifier.validity == "active",
+            )
+            .one()
+        )
+        obs_times = [row.observed_at for row in merged_obs]
+        assert host_ident.first_seen == min(obs_times)
+        assert host_ident.last_seen == max(obs_times)
+        merged_services = (
+            db.query(AssetService)
+            .filter(AssetService.asset_id == asset_a.id, AssetService.port == 443)
+            .all()
+        )
+        assert {row.ip for row in merged_services} == {"192.168.1.10", "192.168.1.20"}
+        for service in merged_services:
+            match = next(row for row in merged_obs if row.ip == service.ip)
+            assert service.first_seen == match.observed_at
+            assert service.last_seen == match.observed_at
+
+        _, rich = upsert_devices(
+            db,
+            tenant.id,
+            _job(db, tenant.id, scope="wan"),
+            [
+                DeviceReport(
+                    ip="10.9.9.9",
+                    scope="wan",
+                    hostname="split-host",
+                    ports=[443],
+                    mac="aa:bb:cc:dd:ee:ff",
+                    fqdn="split-host.example.local",
+                    tls_name="split-host.example.local",
+                    dns_name="split-host.example.local",
+                    serial="SN-SPLIT-1",
+                    device_identifier="det-1",
+                )
+            ],
+        )
+        source = db.get(Asset, rich[0].asset_id)
+        observation = db.query(AssetObservation).filter(AssetObservation.asset_id == source.id).one()
+        original_ts = observation.observed_at
+        original_site = observation.site_id
+        split_into = split_observations_to_new_asset(
+            db,
+            source=source,
+            observation_ids=[observation.id],
+            actor=actor,
+            reason="different machine",
+        )
+        db.refresh(source)
+        db.refresh(split_into)
+        db.refresh(observation)
+        assert observation.observed_at == original_ts
+        assert observation.site_id == original_site
+        assert observation.asset_id == split_into.id
+        types = {
+            row.identifier_type
+            for row in db.query(AssetIdentifier).filter(
+                AssetIdentifier.asset_id == split_into.id,
+                AssetIdentifier.validity == "active",
+            )
+        }
+        assert {
+            "hostname",
+            "mac",
+            "fqdn",
+            "tls_name",
+            "dns_name",
+            "serial",
+            "device_id",
+        }.issubset(types)
+        assert source.first_seen is None
+        assert source.last_seen is None
+        assert source.lifecycle_state is None
+        assert (
+            db.query(AssetIdentifier)
+            .filter(
+                AssetIdentifier.asset_id == source.id,
+                AssetIdentifier.identifier_type == "mac",
+                AssetIdentifier.validity == "active",
+            )
+            .count()
+            == 0
+        )
+    finally:
+        db.close()
 
 
 @requires_postgres

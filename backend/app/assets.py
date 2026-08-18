@@ -11,6 +11,7 @@ from hashlib import sha256
 from ipaddress import ip_address, ip_network
 import json
 
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from app.classify import is_placeholder_name, normalize_hostname
@@ -21,6 +22,7 @@ from app.models import (
     DISPOSITIONS,
     DISPOSITION_UNREVIEWED,
     IDENTIFIER_DEVICE_ID,
+    IDENTIFIER_DNS_NAME,
     IDENTIFIER_FQDN,
     IDENTIFIER_HOSTNAME,
     IDENTIFIER_MAC,
@@ -71,17 +73,17 @@ def observation_fingerprint(
     mac: str = "",
     serial: str = "",
     device_identifier: str = "",
+    fqdn: str = "",
+    tls_name: str = "",
+    dns_name: str = "",
+    title: str = "",
+    tech: str = "",
+    classification: str = "",
+    auto_label: str = "",
 ) -> str:
     host = normalize_hostname(hostname)
     if is_placeholder_hostname(host, ip):
         host = ""
-    extras = {
-        "mac": normalize_identifier(IDENTIFIER_MAC, mac) if mac else "",
-        "serial": normalize_identifier(IDENTIFIER_SERIAL, serial) if serial else "",
-        "device_identifier": normalize_identifier(IDENTIFIER_DEVICE_ID, device_identifier)
-        if device_identifier
-        else "",
-    }
     payload_obj = {
         "hostname": host,
         "ip": (ip or "").strip(),
@@ -90,11 +92,60 @@ def observation_fingerprint(
             for port, protocol, _, _ in sorted(_iter_ports(ports), key=lambda row: (row[0], row[1]))
         ],
         "scope": (scope or "").strip().lower(),
+        "mac": normalize_identifier(IDENTIFIER_MAC, mac) if mac else "",
+        "serial": normalize_identifier(IDENTIFIER_SERIAL, serial) if serial else "",
+        "device_identifier": normalize_identifier(IDENTIFIER_DEVICE_ID, device_identifier)
+        if device_identifier
+        else "",
+        "fqdn": normalize_identifier(IDENTIFIER_FQDN, fqdn) if fqdn else "",
+        "tls_name": normalize_identifier(IDENTIFIER_TLS_NAME, tls_name) if tls_name else "",
+        "dns_name": normalize_identifier(IDENTIFIER_DNS_NAME, dns_name) if dns_name else "",
+        "title": (title or "").strip(),
+        "tech": (tech or "").strip(),
+        "classification": (classification or "").strip(),
+        "auto_label": (auto_label or "").strip(),
     }
-    if any(extras.values()):
-        payload_obj.update(extras)
     payload = json.dumps(payload_obj, separators=(",", ":"), sort_keys=True)
     return sha256(payload.encode("utf-8")).hexdigest()
+
+
+def report_snapshot(report: DeviceReport, scope: str) -> dict:
+    return {
+        "hostname": (report.hostname or "").strip(),
+        "ip": (report.ip or "").strip(),
+        "ports": list(report.ports or []),
+        "title": report.title or "",
+        "tech": report.tech or "",
+        "auto_label": report.auto_label or "",
+        "classification": report.classification or "",
+        "scope": scope,
+        "mac": report.mac or "",
+        "serial": report.serial or "",
+        "device_identifier": report.device_identifier or "",
+        "fqdn": report.fqdn or "",
+        "tls_name": report.tls_name or "",
+        "dns_name": report.dns_name or "",
+    }
+
+
+def observation_key_from_snapshot(snapshot: dict) -> str:
+    snap = snapshot or {}
+    return observation_fingerprint(
+        snap.get("hostname") or "",
+        snap.get("ip") or "",
+        snap.get("scope") or "",
+        snap.get("ports") or [],
+        mac=snap.get("mac") or "",
+        serial=snap.get("serial") or "",
+        device_identifier=snap.get("device_identifier") or "",
+        fqdn=snap.get("fqdn") or "",
+        tls_name=snap.get("tls_name") or "",
+        dns_name=snap.get("dns_name") or "",
+        title=snap.get("title") or "",
+        tech=snap.get("tech") or "",
+        classification=snap.get("classification") or "",
+        auto_label=snap.get("auto_label") or "",
+    )
 
 
 def normalize_identifier(identifier_type: str, value: str) -> str:
@@ -363,7 +414,7 @@ def upsert_services(
             )
             .first()
         )
-        if row is None:
+        if row is None or sa_inspect(row).deleted:
             db.add(
                 AssetService(
                     asset_id=asset.id,
@@ -396,6 +447,7 @@ def upsert_services(
             row.web_title = title
         if tech:
             row.tech = tech
+    db.flush()
 
 
 def find_observation(
@@ -457,23 +509,135 @@ def append_observation(
     return row
 
 
-def _report_snapshot(report: DeviceReport, scope: str) -> dict:
-    return {
-        "hostname": (report.hostname or "").strip(),
-        "ip": (report.ip or "").strip(),
-        "ports": list(report.ports or []),
-        "title": report.title or "",
-        "tech": report.tech or "",
-        "auto_label": report.auto_label or "",
-        "classification": report.classification or "",
-        "scope": scope,
-        "mac": report.mac or "",
-        "serial": report.serial or "",
-        "device_identifier": report.device_identifier or "",
-        "fqdn": report.fqdn or "",
-        "tls_name": report.tls_name or "",
-        "dns_name": report.dns_name or "",
-    }
+def apply_scanner_facts_from_snapshot(
+    db: Session,
+    asset: Asset,
+    snapshot: dict,
+    *,
+    hostname: str = "",
+    ip: str = "",
+    site_id: int | None = None,
+    network_id: int | None = None,
+    seen_at: datetime,
+) -> None:
+    """Replay one observation snapshot onto scanner-derived current projections."""
+    snap = snapshot or {}
+    report_ip = (ip or snap.get("ip") or "").strip()
+    report_hostname = (hostname or snap.get("hostname") or "").strip()
+    if report_hostname and not is_placeholder_hostname(report_hostname, report_ip):
+        upsert_identifier(db, asset, IDENTIFIER_HOSTNAME, report_hostname, source=SOURCE_SCANNER, seen_at=seen_at)
+        if "." in report_hostname:
+            upsert_identifier(db, asset, IDENTIFIER_FQDN, report_hostname, source=SOURCE_SCANNER, seen_at=seen_at)
+    for identifier_type, key in (
+        (IDENTIFIER_MAC, "mac"),
+        (IDENTIFIER_SERIAL, "serial"),
+        (IDENTIFIER_DEVICE_ID, "device_identifier"),
+        (IDENTIFIER_FQDN, "fqdn"),
+        (IDENTIFIER_TLS_NAME, "tls_name"),
+        (IDENTIFIER_DNS_NAME, "dns_name"),
+    ):
+        value = str(snap.get(key) or "").strip()
+        if value:
+            upsert_identifier(db, asset, identifier_type, value, source=SOURCE_SCANNER, seen_at=seen_at)
+    address = upsert_address(
+        db,
+        asset,
+        report_ip,
+        site_id=site_id,
+        network_id=network_id,
+        source=SOURCE_SCANNER,
+        seen_at=seen_at,
+    )
+    upsert_services(
+        db,
+        asset,
+        report_ip,
+        snap.get("ports") or [],
+        address_id=address.id if address else None,
+        title=str(snap.get("title") or ""),
+        tech=str(snap.get("tech") or ""),
+        source=SOURCE_SCANNER,
+        seen_at=seen_at,
+    )
+
+
+def recalculate_asset_seen(asset: Asset, observations: list[AssetObservation] | None = None) -> None:
+    """Current first/last-seen and lifecycle must reflect remaining observations."""
+    rows = observations if observations is not None else list(asset.observations)
+    times = [row.observed_at for row in rows if row.observed_at is not None]
+    if not times:
+        asset.first_seen = None
+        asset.last_seen = None
+        asset.lifecycle_state = None
+        return
+    asset.first_seen = min(times)
+    asset.last_seen = max(times)
+    if asset.lifecycle_state != LIFECYCLE_INACTIVE:
+        asset.lifecycle_state = LIFECYCLE_ACTIVE
+
+
+def rebuild_scanner_projections(db: Session, asset: Asset) -> None:
+    """Rebuild scanner-derived identifiers/addresses/services from observations.
+
+    Manual identifiers and identifiers marked incorrect are preserved.
+    """
+    scanner_ids = (
+        db.query(AssetIdentifier)
+        .filter(
+            AssetIdentifier.asset_id == asset.id,
+            AssetIdentifier.source == SOURCE_SCANNER,
+            AssetIdentifier.validity == IDENTIFIER_VALIDITY_ACTIVE,
+        )
+        .all()
+    )
+    for row in scanner_ids:
+        db.delete(row)
+    scanner_addresses = (
+        db.query(AssetAddress)
+        .filter(AssetAddress.asset_id == asset.id, AssetAddress.source == SOURCE_SCANNER)
+        .all()
+    )
+    for row in scanner_addresses:
+        db.delete(row)
+    scanner_services = (
+        db.query(AssetService)
+        .filter(AssetService.asset_id == asset.id, AssetService.source == SOURCE_SCANNER)
+        .all()
+    )
+    for row in scanner_services:
+        db.delete(row)
+    db.flush()
+    for row in [*scanner_ids, *scanner_addresses, *scanner_services]:
+        if row in db:
+            db.expunge(row)
+    db.expire(asset, ["identifiers", "addresses", "services", "observations"])
+
+    observations = (
+        db.query(AssetObservation)
+        .filter(AssetObservation.asset_id == asset.id)
+        .order_by(AssetObservation.observed_at.asc(), AssetObservation.id.asc())
+        .all()
+    )
+    for observation in observations:
+        apply_scanner_facts_from_snapshot(
+            db,
+            asset,
+            observation.snapshot or {},
+            hostname=observation.hostname,
+            ip=observation.ip,
+            site_id=observation.site_id,
+            network_id=observation.network_id,
+            seen_at=observation.observed_at or utcnow(),
+        )
+    recalculate_asset_seen(asset, observations)
+    name = display_name_for(
+        next((row.hostname for row in reversed(observations) if row.hostname), ""),
+        next((row.ip for row in reversed(observations) if row.ip), ""),
+        asset.display_name,
+    )
+    if name:
+        asset.display_name = name
+    asset.updated_at = utcnow()
 
 
 def _write_observation_facts(
@@ -488,42 +652,14 @@ def _write_observation_facts(
 ) -> None:
     report_ip = (report.ip or "").strip()
     report_hostname = (report.hostname or "").strip()
-    if report_hostname and not is_placeholder_hostname(report_hostname, report_ip):
-        upsert_identifier(db, asset, IDENTIFIER_HOSTNAME, report_hostname, source=SOURCE_SCANNER, seen_at=observed_at)
-        if "." in report_hostname:
-            upsert_identifier(db, asset, IDENTIFIER_FQDN, report_hostname, source=SOURCE_SCANNER, seen_at=observed_at)
-    if report.mac:
-        upsert_identifier(db, asset, IDENTIFIER_MAC, report.mac, source=SOURCE_SCANNER, seen_at=observed_at)
-    if report.serial:
-        upsert_identifier(db, asset, IDENTIFIER_SERIAL, report.serial, source=SOURCE_SCANNER, seen_at=observed_at)
-    if report.device_identifier:
-        upsert_identifier(
-            db, asset, IDENTIFIER_DEVICE_ID, report.device_identifier, source=SOURCE_SCANNER, seen_at=observed_at
-        )
-    if report.fqdn:
-        upsert_identifier(db, asset, IDENTIFIER_FQDN, report.fqdn, source=SOURCE_SCANNER, seen_at=observed_at)
-    if report.tls_name:
-        upsert_identifier(db, asset, IDENTIFIER_TLS_NAME, report.tls_name, source=SOURCE_SCANNER, seen_at=observed_at)
-    if report.dns_name:
-        upsert_identifier(db, asset, "dns_name", report.dns_name, source=SOURCE_SCANNER, seen_at=observed_at)
-    address = upsert_address(
+    apply_scanner_facts_from_snapshot(
         db,
         asset,
-        report_ip,
+        snapshot,
+        hostname=report_hostname,
+        ip=report_ip,
         site_id=context.get("site_id"),
         network_id=context.get("network_id"),
-        source=SOURCE_SCANNER,
-        seen_at=observed_at,
-    )
-    upsert_services(
-        db,
-        asset,
-        report_ip,
-        list(report.ports or []),
-        address_id=address.id if address else None,
-        title=report.title or "",
-        tech=report.tech or "",
-        source=SOURCE_SCANNER,
         seen_at=observed_at,
     )
     append_observation(
@@ -613,7 +749,6 @@ def ingest_device_report(
         canonical_asset_id,
         correlate,
         find_correlation_decision,
-        observation_key_for_report,
         persist_correlation_decision,
         post_correlation_asset_policy_hook,
         signals_from_report,
@@ -623,8 +758,8 @@ def ingest_device_report(
     report_scope = (report.scope or "").strip()
     context = observation_context(db, job_id, report_ip, report_scope)
     scope = context.get("scope") or report_scope
-    snapshot = _report_snapshot(report, scope)
-    observation_key = observation_key_for_report(report, scope)
+    snapshot = report_snapshot(report, scope)
+    observation_key = observation_key_from_snapshot(snapshot)
     existing_decision = find_correlation_decision(db, scan_job_id=job_id, observation_key=observation_key)
     if existing_decision is not None:
         asset_id = existing_decision.selected_asset_id
@@ -761,6 +896,7 @@ __all__ = [
     "SOURCE_MANUAL",
     "SOURCE_SCANNER",
     "apply_device_report",
+    "apply_scanner_facts_from_snapshot",
     "ingest_device_report",
     "assign_tag",
     "display_name_for",
@@ -771,7 +907,11 @@ __all__ = [
     "normalize_tag_name",
     "observation_context",
     "observation_fingerprint",
+    "observation_key_from_snapshot",
+    "rebuild_scanner_projections",
+    "recalculate_asset_seen",
     "remove_tag",
+    "report_snapshot",
     "resolve_network_for_ip",
     "sync_linked_devices",
     "upsert_address",
