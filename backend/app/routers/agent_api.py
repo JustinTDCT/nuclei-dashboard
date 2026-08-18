@@ -10,8 +10,17 @@ from app.crypto_util import new_nonce, verify_ed25519
 from app.database import get_db
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
-from app.locality import LanScanInvalidError, assert_scan_executable, is_authorized
-from app.models import JOB_QUEUED, JOB_WAITING_FOR_AGENT, Agent, Device, Network, Scan, ScanJob
+from app.locality import LanScanInvalidError, is_authorized
+from app.models import (
+    JOB_QUEUED,
+    JOB_WAITING_FOR_AGENT,
+    LEGACY_PRE_1D_REQUEUE_ERROR,
+    Agent,
+    Device,
+    Network,
+    Scan,
+    ScanJob,
+)
 from app.scan_dispatch import agent_may_claim_now, atomic_claim_job, is_agent_healthy
 from app.scan_security import ExecutionBlocked, revalidate_lan_claim
 from app.scan_snapshot import merge_provenance
@@ -159,13 +168,8 @@ def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_d
             if len(payloads) >= 5:
                 break
             continue
-        if job.scan.agent_id != agent.id:
-            continue
-        try:
-            assert_scan_executable(db, job.scan)
-            payloads.append(job_payload(db, job))
-        except LanScanInvalidError as exc:
-            fail_job(db, job, exc.detail)
+        fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
+        continue
         if len(payloads) >= 5:
             break
     return payloads
@@ -189,9 +193,8 @@ def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = 
             if not agent_may_claim_now(agent, job.execution_snapshot, agents):
                 raise HTTPException(status_code=409, detail="Preferred agent still has claim priority")
         else:
-            if job.scan.agent_id != agent.id:
-                raise HTTPException(status_code=404, detail="Job not available")
-            assert_scan_executable(db, job.scan)
+            fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
+            raise HTTPException(status_code=409, detail=LEGACY_PRE_1D_REQUEUE_ERROR)
         payload = job_payload(db, job)
     except ExecutionBlocked as exc:
         fail_job(db, job, exc.detail)
@@ -206,7 +209,8 @@ def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = 
         if claimed.execution_snapshot:
             revalidate_lan_claim(db, claimed, agent)
         else:
-            assert_scan_executable(db, claimed.scan)
+            fail_job(db, claimed, LEGACY_PRE_1D_REQUEUE_ERROR)
+            raise HTTPException(status_code=409, detail=LEGACY_PRE_1D_REQUEUE_ERROR)
     except (ExecutionBlocked, LanScanInvalidError) as exc:
         fail_job(db, claimed, getattr(exc, "detail", str(exc)))
         raise HTTPException(status_code=409, detail=getattr(exc, "detail", str(exc))) from exc

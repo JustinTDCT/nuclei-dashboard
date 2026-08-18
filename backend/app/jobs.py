@@ -7,6 +7,7 @@ from app.models import (
     JOB_QUEUED,
     JOB_RUNNING,
     JOB_WAITING_FOR_AGENT,
+    LEGACY_PRE_1D_REQUEUE_ERROR,
     SCHEDULE_MANUAL,
     SNAPSHOT_LEGACY_PRE_1D,
     TRIGGER_MANUAL,
@@ -15,6 +16,8 @@ from app.models import (
     ScanJob,
     Subnet,
 )
+
+RUNNABLE_LEGACY_STATUSES = (JOB_QUEUED, JOB_WAITING_FOR_AGENT, JOB_RUNNING)
 from app.scan_definitions import DEFINITION_ERRORS, ScanDefinitionError, create_run, validate_definition
 from app.scan_schedule import next_future_after_catchup, next_occurrence
 from app.scan_snapshot import SnapshotError, job_payload_from_snapshot
@@ -61,7 +64,30 @@ def fail_job(db: Session, job: ScanJob, detail: str) -> ScanJob:
 def job_payload(db: Session, job: ScanJob) -> dict:
     if job.execution_snapshot:
         return job_payload_from_snapshot(job)
+    if job.status in RUNNABLE_LEGACY_STATUSES or job.finished_at is None:
+        fail_pending_legacy_pre_1d_jobs(db, job_id=job.id)
+        raise LanScanInvalidError(LEGACY_PRE_1D_REQUEUE_ERROR)
     return _legacy_job_payload(db, job)
+
+
+def fail_pending_legacy_pre_1d_jobs(db: Session, *, job_id: int | None = None) -> int:
+    q = db.query(ScanJob).filter(
+        ScanJob.execution_snapshot.is_(None),
+        ScanJob.status.in_(RUNNABLE_LEGACY_STATUSES),
+    )
+    if job_id is not None:
+        q = q.filter(ScanJob.id == job_id)
+    rows = q.all()
+    now = _now()
+    for job in rows:
+        already_running = job.status == JOB_RUNNING
+        job.status = "failed"
+        job.error = LEGACY_PRE_1D_REQUEUE_ERROR
+        job.finished_at = now
+        if not already_running:
+            job.claimed_agent_id = None
+            job.claimed_by = None
+    return len(rows)
 
 
 def _legacy_job_payload(db: Session, job: ScanJob) -> dict:

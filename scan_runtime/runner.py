@@ -16,6 +16,7 @@ from commands import (
     PORT_MODE_NONE,
     build_httpx_command,
     build_naabu_command,
+    build_naabu_host_discovery_command,
     build_nuclei_command,
     job_intensity,
     job_stages,
@@ -115,7 +116,12 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
             log=log,
         )
     elif stages.get("discovery"):
-        _log("Discovery enabled with port mode none; skipping naabu", log)
+        hosts = run_host_discovery(
+            targets,
+            intensity=intensity,
+            exclude_hosts=_exclusion_hosts(job),
+            log=log,
+        )
     http_info: list[dict[str, Any]] = []
     if stages.get("fingerprint", True):
         probe_hosts = hosts or [{"ip": row["value"]} for row in targets if row["type"] in {"ip", "fqdn"}]
@@ -281,6 +287,39 @@ def run_naabu(
     if cmd is None:
         return []
     return _parse_jsonl(_run(cmd, log))
+
+
+def run_host_discovery(
+    targets: list[dict[str, str]],
+    log: LogFn | None = None,
+    *,
+    intensity: dict[str, Any] | None = None,
+    exclude_hosts: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    values = [row["value"] for row in targets]
+    binary = _which("naabu")
+    if binary:
+        cmd = build_naabu_host_discovery_command(
+            binary,
+            values,
+            intensity=intensity,
+            exclude_hosts=exclude_hosts,
+        )
+        if cmd:
+            _log("Discovery enabled with port mode none; running Naabu host discovery (-sn)", log)
+            return _parse_jsonl(_run(cmd, log))
+    hosts: list[dict[str, Any]] = []
+    for row in targets:
+        kind = row.get("type") or "cidr"
+        value = row.get("value") or ""
+        if kind in {"ip", "fqdn"}:
+            hosts.append({"ip": value, "host": value, "port": None, "discovery": True})
+        elif kind == "cidr":
+            raise RuntimeError("naabu is required for CIDR host discovery when port mode is none")
+    if not hosts:
+        raise RuntimeError("Host discovery produced no hosts")
+    _log(f"Host discovery recorded {len(hosts)} explicit IP/FQDN target(s)", log)
+    return hosts
 
 
 def _pd_httpx() -> str | None:

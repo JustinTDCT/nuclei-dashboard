@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.events import emit_scan_missed_unavailable_agent
-from app.jobs import due_scans, queue_scheduled_run
+from app.jobs import due_scans, fail_pending_legacy_pre_1d_jobs, queue_scheduled_run
 from app.lifecycle import mark_inactive_assets
 from app.locality import LanScanInvalidError
 from app.models import JOB_WAITING_FOR_AGENT, Device, ScanJob
@@ -25,6 +25,8 @@ def tick_schedules() -> None:
     db: Session = SessionLocal()
     try:
         expire_waiting_jobs(db)
+        if fail_pending_legacy_pre_1d_jobs(db):
+            db.commit()
         for scan in due_scans(db):
             try:
                 job = queue_scheduled_run(db, scan)

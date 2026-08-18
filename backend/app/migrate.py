@@ -193,12 +193,14 @@ def apply_schema() -> str | None:
         log.info("Alembic: upgrading existing versioned database to head")
         command.upgrade(cfg, "head")
         engine.dispose()
+        _fail_pending_legacy_pre_1d_jobs()
         return current_revision()
 
     if not managed and not markers:
         log.info("Alembic: fresh database, upgrading to head")
         command.upgrade(cfg, "head")
         engine.dispose()
+        _fail_pending_legacy_pre_1d_jobs()
         return current_revision()
 
     if PHASE0_TABLES.issubset(tables) and not markers:
@@ -213,6 +215,7 @@ def apply_schema() -> str | None:
         command.stamp(cfg, BASELINE_REVISION)
         command.upgrade(cfg, "head")
         engine.dispose()
+        _fail_pending_legacy_pre_1d_jobs()
         return current_revision()
 
     found = ", ".join(sorted(managed | markers)) or ", ".join(sorted(app_tables))
@@ -221,3 +224,15 @@ def apply_schema() -> str | None:
         + found
         + ". Refusing to stamp or upgrade."
     )
+
+
+def _fail_pending_legacy_pre_1d_jobs() -> None:
+    from app.database import SessionLocal
+    from app.jobs import fail_pending_legacy_pre_1d_jobs
+
+    db = SessionLocal()
+    try:
+        if fail_pending_legacy_pre_1d_jobs(db):
+            db.commit()
+    finally:
+        db.close()

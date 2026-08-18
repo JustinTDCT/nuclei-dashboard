@@ -308,9 +308,10 @@ function Scans({ tenantId }: { tenantId: number }) {
   const [exclusions, setExclusions] = useState<ScanExclusion[]>([]);
   const [selectedJob, setSelectedJob] = useState<ScanJob | null>(null);
   const [step, setStep] = useState(1);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const { defaultTimezone } = useTimezone();
-  const [form, setForm] = useState({
+  const emptyForm = {
     name: "",
     scope: "lan" as "lan" | "wan",
     site_id: "",
@@ -324,6 +325,18 @@ function Scans({ tenantId }: { tenantId: number }) {
     nuclei_severities: "critical,high,medium",
     nuclei_tags: "",
     intensity: "normal",
+    naabu_rate: "1000",
+    naabu_concurrency: "25",
+    naabu_timeout_ms: "1000",
+    naabu_retries: "3",
+    httpx_rate: "150",
+    httpx_threads: "50",
+    httpx_timeout: "10",
+    httpx_retries: "1",
+    nuclei_rate: "150",
+    nuclei_concurrency: "25",
+    nuclei_timeout: "10",
+    nuclei_retries: "1",
     schedule_type: "manual",
     hour: "2",
     minute: "0",
@@ -332,7 +345,8 @@ function Scans({ tenantId }: { tenantId: number }) {
     cron: "",
     exclusion_value: "",
     exclusion_type: "cidr",
-  });
+  };
+  const [form, setForm] = useState(emptyForm);
 
   function load() {
     api<Scan[]>(`/api/tenants/${tenantId}/scans`).then(setScans);
@@ -366,44 +380,120 @@ function Scans({ tenantId }: { tenantId: number }) {
           ? "Preferred Agent + failover"
           : "Any Available";
 
+  const selectedWanTargets = wanTargets.filter((t) => !t.archived_at && form.wan_target_ids.includes(t.id));
+
+  function intensityPayload() {
+    if (form.intensity !== "custom") return { preset: form.intensity };
+    return {
+      preset: "custom",
+      naabu_rate: Number(form.naabu_rate),
+      naabu_concurrency: Number(form.naabu_concurrency),
+      naabu_timeout_ms: Number(form.naabu_timeout_ms),
+      naabu_retries: Number(form.naabu_retries),
+      httpx_rate: Number(form.httpx_rate),
+      httpx_threads: Number(form.httpx_threads),
+      httpx_timeout: Number(form.httpx_timeout),
+      httpx_retries: Number(form.httpx_retries),
+      nuclei_rate: Number(form.nuclei_rate),
+      nuclei_concurrency: Number(form.nuclei_concurrency),
+      nuclei_timeout: Number(form.nuclei_timeout),
+      nuclei_retries: Number(form.nuclei_retries),
+    };
+  }
+
+  function beginEdit(scan: Scan) {
+    const stages = (scan.stage_config || {}) as Record<string, unknown>;
+    const intensity = (scan.intensity_config || {}) as Record<string, unknown>;
+    const schedule = (scan.schedule_config || {}) as Record<string, unknown>;
+    setEditingId(scan.id);
+    setForm({
+      ...emptyForm,
+      name: scan.name,
+      scope: scan.scope,
+      site_id: scan.site_id ? String(scan.site_id) : "",
+      network_ids: scan.network_ids || [],
+      wan_target_ids: scan.wan_target_ids || [],
+      discovery: Boolean(stages.discovery ?? true),
+      port_mode: String(stages.port_mode || "common"),
+      custom_ports: Array.isArray(stages.custom_ports) ? (stages.custom_ports as string[]).join(",") : String(stages.custom_ports || ""),
+      fingerprint: Boolean(stages.fingerprint ?? true),
+      vulnerability: Boolean(stages.vulnerability),
+      nuclei_severities: String(stages.nuclei_severities || scan.nuclei_severities),
+      nuclei_tags: String(stages.nuclei_tags || scan.nuclei_tags || ""),
+      intensity: String(intensity.preset || "normal"),
+      naabu_rate: String(intensity.naabu_rate ?? 1000),
+      naabu_concurrency: String(intensity.naabu_concurrency ?? 25),
+      naabu_timeout_ms: String(intensity.naabu_timeout_ms ?? 1000),
+      naabu_retries: String(intensity.naabu_retries ?? 3),
+      httpx_rate: String(intensity.httpx_rate ?? 150),
+      httpx_threads: String(intensity.httpx_threads ?? 50),
+      httpx_timeout: String(intensity.httpx_timeout ?? 10),
+      httpx_retries: String(intensity.httpx_retries ?? 1),
+      nuclei_rate: String(intensity.nuclei_rate ?? 150),
+      nuclei_concurrency: String(intensity.nuclei_concurrency ?? 25),
+      nuclei_timeout: String(intensity.nuclei_timeout ?? 10),
+      nuclei_retries: String(intensity.nuclei_retries ?? 1),
+      schedule_type: String(schedule.type || (scan.interval_minutes ? "legacy_interval" : "manual")),
+      hour: String(schedule.hour ?? 2),
+      minute: String(schedule.minute ?? 0),
+      weekday: String(schedule.weekday ?? 0),
+      day: String(schedule.day ?? 1),
+      cron: String(schedule.expression || ""),
+    });
+    setStep(1);
+  }
+
   async function onCreate(e: FormEvent) {
     e.preventDefault();
     setError("");
+    if (form.scope === "wan" && form.wan_target_ids.length === 0) {
+      setError("Select at least one authorized WAN target");
+      return;
+    }
+    if (form.scope === "lan" && form.network_ids.length === 0) {
+      setError("Select at least one network");
+      return;
+    }
+    const body = {
+      name: form.name,
+      scope: form.scope,
+      site_id: form.scope === "lan" ? Number(form.site_id) : null,
+      network_ids: form.scope === "lan" ? form.network_ids : [],
+      wan_target_ids: form.scope === "wan" ? form.wan_target_ids : [],
+      is_enabled: true,
+      stage_config: {
+        discovery: form.discovery,
+        port_mode: form.port_mode,
+        custom_ports: form.custom_ports,
+        fingerprint: form.fingerprint,
+        vulnerability: form.vulnerability,
+        nuclei_severities: form.nuclei_severities,
+        nuclei_tags: form.nuclei_tags,
+      },
+      intensity_config: intensityPayload(),
+      schedule_config:
+        form.schedule_type === "manual"
+          ? { type: "manual" }
+          : form.schedule_type === "cron"
+            ? { type: "cron", expression: form.cron }
+            : form.schedule_type === "legacy_interval"
+              ? undefined
+              : {
+                  type: form.schedule_type,
+                  hour: Number(form.hour),
+                  minute: Number(form.minute),
+                  weekday: Number(form.weekday),
+                  day: Number(form.day),
+                },
+    };
     try {
-      await api(`/api/tenants/${tenantId}/scans`, {
-        method: "POST",
-        body: JSON.stringify({
-          name: form.name,
-          scope: form.scope,
-          site_id: form.scope === "lan" ? Number(form.site_id) : null,
-          network_ids: form.scope === "lan" ? form.network_ids : [],
-          wan_target_ids: form.scope === "wan" ? form.wan_target_ids : [],
-          is_enabled: true,
-          stage_config: {
-            discovery: form.discovery,
-            port_mode: form.port_mode,
-            custom_ports: form.custom_ports,
-            fingerprint: form.fingerprint,
-            vulnerability: form.vulnerability,
-            nuclei_severities: form.nuclei_severities,
-            nuclei_tags: form.nuclei_tags,
-          },
-          intensity_config: { preset: form.intensity },
-          schedule_config:
-            form.schedule_type === "manual"
-              ? { type: "manual" }
-              : form.schedule_type === "cron"
-                ? { type: "cron", expression: form.cron }
-                : {
-                    type: form.schedule_type,
-                    hour: Number(form.hour),
-                    minute: Number(form.minute),
-                    weekday: Number(form.weekday),
-                    day: Number(form.day),
-                  },
-        }),
-      });
-      setForm({ ...form, name: "" });
+      if (editingId) {
+        await api(`/api/scans/${editingId}`, { method: "PATCH", body: JSON.stringify(body) });
+      } else {
+        await api(`/api/tenants/${tenantId}/scans`, { method: "POST", body: JSON.stringify(body) });
+      }
+      setForm(emptyForm);
+      setEditingId(null);
       setStep(1);
       load();
     } catch (err) {
@@ -430,6 +520,14 @@ function Scans({ tenantId }: { tenantId: number }) {
     <div className="space-y-6">
       {write && (
         <form onSubmit={onCreate} className="space-y-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div className="flex justify-between items-center">
+            <h3 className="font-medium">{editingId ? `Edit scan definition #${editingId}` : "New scan definition"}</h3>
+            {editingId && (
+              <button type="button" className="text-slate-400 text-sm" onClick={() => { setEditingId(null); setForm(emptyForm); }}>
+                Cancel edit
+              </button>
+            )}
+          </div>
           <div className="flex flex-wrap gap-2 text-xs text-slate-400">
             {["Scope", "Stages", "Intensity", "Exclusions", "Schedule", "Review"].map((label, idx) => (
               <button
@@ -560,7 +658,24 @@ function Scans({ tenantId }: { tenantId: number }) {
                 <option value="low">Low</option>
                 <option value="normal">Normal</option>
                 <option value="high">High</option>
+                <option value="custom">Custom</option>
               </select>
+              {form.intensity === "custom" && (
+                <div className="grid md:grid-cols-3 gap-3 mt-3">
+                  <Field label="Naabu rate" value={form.naabu_rate} onChange={(v) => setForm({ ...form, naabu_rate: v })} />
+                  <Field label="Naabu concurrency" value={form.naabu_concurrency} onChange={(v) => setForm({ ...form, naabu_concurrency: v })} />
+                  <Field label="Naabu timeout ms" value={form.naabu_timeout_ms} onChange={(v) => setForm({ ...form, naabu_timeout_ms: v })} />
+                  <Field label="Naabu retries" value={form.naabu_retries} onChange={(v) => setForm({ ...form, naabu_retries: v })} />
+                  <Field label="httpx rate" value={form.httpx_rate} onChange={(v) => setForm({ ...form, httpx_rate: v })} />
+                  <Field label="httpx threads" value={form.httpx_threads} onChange={(v) => setForm({ ...form, httpx_threads: v })} />
+                  <Field label="httpx timeout" value={form.httpx_timeout} onChange={(v) => setForm({ ...form, httpx_timeout: v })} />
+                  <Field label="httpx retries" value={form.httpx_retries} onChange={(v) => setForm({ ...form, httpx_retries: v })} />
+                  <Field label="Nuclei rate" value={form.nuclei_rate} onChange={(v) => setForm({ ...form, nuclei_rate: v })} />
+                  <Field label="Nuclei concurrency" value={form.nuclei_concurrency} onChange={(v) => setForm({ ...form, nuclei_concurrency: v })} />
+                  <Field label="Nuclei timeout" value={form.nuclei_timeout} onChange={(v) => setForm({ ...form, nuclei_timeout: v })} />
+                  <Field label="Nuclei retries" value={form.nuclei_retries} onChange={(v) => setForm({ ...form, nuclei_retries: v })} />
+                </div>
+              )}
             </div>
           )}
           {step === 4 && (
@@ -620,11 +735,23 @@ function Scans({ tenantId }: { tenantId: number }) {
             <div className="text-sm text-slate-300 space-y-1">
               <div>Name: {form.name}</div>
               <div>Scope: {form.scope.toUpperCase()}</div>
+              {form.scope === "lan" ? (
+                <div>
+                  Site: {sites.find((s) => String(s.id) === form.site_id)?.name || "—"} · Networks:{" "}
+                  {selectedNetworks.map((n) => `${n.name} (${n.cidr})`).join(", ") || "none selected"}
+                </div>
+              ) : (
+                <div>
+                  WAN targets: {selectedWanTargets.map((t) => `${t.name} (${t.normalized_value})`).join(", ") || "none selected"}
+                </div>
+              )}
               <div>Dispatch: {dispatchLabel}</div>
               <div>Stages: discovery {form.discovery ? "on" : "off"}, ports {form.port_mode}, fingerprint {form.fingerprint ? "on" : "off"}, vuln {form.vulnerability ? "on" : "off"}</div>
               <div>Intensity: {form.intensity}</div>
               <div>Schedule: {form.schedule_type}</div>
-              <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2 px-4 mt-2">Create scan definition</button>
+              <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2 px-4 mt-2">
+                {editingId ? "Save scan definition" : "Create scan definition"}
+              </button>
             </div>
           )}
           {error && <div className="text-rose-300 text-sm">{error}</div>}
@@ -646,6 +773,9 @@ function Scans({ tenantId }: { tenantId: number }) {
             (s.schedule_config?.type as string) || (s.interval_minutes ? `Every ${s.interval_minutes}m` : "Manual"),
             write && !s.archived_at ? (
               <div className="flex gap-3">
+                <button className="text-cyan-400 text-sm" onClick={() => beginEdit(s)}>
+                  Edit
+                </button>
                 <button className="text-cyan-400 text-sm" onClick={() => api(`/api/scans/${s.id}/run`, { method: "POST" }).then(load)}>
                   Run now
                 </button>

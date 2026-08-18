@@ -479,10 +479,16 @@ def test_scanner_lan_wan_observations_and_service_history(reset_db):
                 "profile": "discovery",
             },
         ).json()
+        wan_target = client.post(
+            f"/api/tenants/{tenant['id']}/wan-targets",
+            headers=_headers(admin),
+            json={"name": "Edge", "target_type": "cidr", "value": "203.0.113.0/24"},
+        )
+        assert wan_target.status_code == 200, wan_target.text
         wan_scan = client.post(
             f"/api/tenants/{tenant['id']}/scans",
             headers=_headers(admin),
-            json={"name": "WAN", "scope": "wan", "profile": "discovery"},
+            json={"name": "WAN", "scope": "wan", "profile": "discovery", "wan_target_ids": [wan_target.json()["id"]]},
         ).json()
         lan_job = client.post(f"/api/scans/{lan_scan['id']}/run", headers=_headers(admin)).json()
         wan_job = client.post(f"/api/scans/{wan_scan['id']}/run", headers=_headers(admin)).json()

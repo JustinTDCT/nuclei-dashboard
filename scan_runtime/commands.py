@@ -56,6 +56,31 @@ def build_naabu_command(
     return cmd
 
 
+def build_naabu_host_discovery_command(
+    binary: str,
+    targets: list[str],
+    *,
+    intensity: dict[str, Any] | None = None,
+    exclude_hosts: list[str] | None = None,
+) -> list[str] | None:
+    """Host discovery only. Uses documented Naabu -sn / -host-discovery, not a port scan."""
+    if not targets:
+        return None
+    cmd = [binary, "-host", ",".join(targets), "-json", "-silent", "-sn"]
+    intensity = intensity or {}
+    if intensity.get("naabu_rate") is not None:
+        cmd.extend(["-rate", str(int(intensity["naabu_rate"]))])
+    if intensity.get("naabu_concurrency") is not None:
+        cmd.extend(["-c", str(int(intensity["naabu_concurrency"]))])
+    if intensity.get("naabu_timeout_ms") is not None:
+        cmd.extend(["-timeout", str(int(intensity["naabu_timeout_ms"]))])
+    if intensity.get("naabu_retries") is not None:
+        cmd.extend(["-retries", str(int(intensity["naabu_retries"]))])
+    if exclude_hosts:
+        cmd.extend(["-exclude-hosts", ",".join(exclude_hosts)])
+    return cmd
+
+
 def build_httpx_command(
     binary: str,
     list_path: str,

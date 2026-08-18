@@ -96,6 +96,9 @@ CORRELATION_ALGORITHM_VERSION = "1c.3"
 
 SNAPSHOT_VERSION = "1d.1"
 SNAPSHOT_LEGACY_PRE_1D = "legacy_pre_1d"
+LEGACY_PRE_1D_REQUEUE_ERROR = (
+    "Pre-1D job has no immutable execution snapshot and must be requeued after Phase 1D upgrade"
+)
 
 EVENT_SCAN_MISSED_UNAVAILABLE_AGENT = "scan_missed_unavailable_agent"
 PHASE1D_EVENT_TYPES = frozenset({EVENT_SCAN_MISSED_UNAVAILABLE_AGENT})

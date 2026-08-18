@@ -386,14 +386,7 @@ def _apply_wan_targets(db: Session, scan: Scan, payload: Any) -> None:
     if not target_ids and payload.subnet_ids:
         target_ids = _wan_ids_from_subnets(db, scan.tenant_id, payload.subnet_ids)
     if not target_ids:
-        from app.wan_targets import active_wan_targets_for_tenant
-
-        target_ids = [row.id for row in active_wan_targets_for_tenant(db, scan.tenant_id)]
-    if not target_ids:
-        scan.network_targets.clear()
-        scan.wan_target_links.clear()
-        scan.subnet_ids = []
-        return
+        raise ScanDefinitionError("WAN scans require at least one authorized target")
     targets = [require_active_wan_target(db, target_id, tenant_id=scan.tenant_id) for target_id in target_ids]
     scan.network_targets.clear()
     scan.wan_target_links.clear()

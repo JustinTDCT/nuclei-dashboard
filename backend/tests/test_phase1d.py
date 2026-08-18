@@ -774,6 +774,13 @@ def test_command_builders_honor_stages_and_do_not_invent_flags():
 
     none = build_naabu_command("naabu", ["10.0.0.0/24"], port_mode="none")
     assert none is None
+    from commands import build_naabu_host_discovery_command
+
+    host_disc = build_naabu_host_discovery_command("naabu", ["10.0.0.0/24"], intensity={"naabu_rate": 200})
+    assert host_disc is not None
+    assert "-sn" in host_disc
+    assert "-top-ports" not in host_disc
+    assert "-p" not in host_disc
     common = build_naabu_command("naabu", ["10.0.0.0/24"], port_mode="common", intensity={"naabu_rate": 200})
     assert "-top-ports" in common and "100" in common
     assert "-rate" in common
@@ -915,14 +922,16 @@ def test_fingerprint_and_vulnerability_off_skip_commands():
     with patch.dict(os.environ, env, clear=True):
         with (
             patch.object(runtime_runner, "run_naabu") as naabu,
+            patch.object(runtime_runner, "run_host_discovery", return_value=[{"ip": "203.0.113.10"}]) as discovery,
             patch.object(runtime_runner, "run_httpx") as httpx,
             patch.object(runtime_runner, "run_nuclei") as nuclei,
         ):
             result = runtime_runner.run_pipeline(job)
     naabu.assert_not_called()
+    discovery.assert_called_once()
     httpx.assert_not_called()
     nuclei.assert_not_called()
-    assert result["findings"] == []
+    assert result["devices"]
 
 
 @requires_postgres
@@ -982,3 +991,147 @@ def test_manual_legacy_interval_viewer_caps_and_timezone_snapshot(reset_db):
         settings = client.get("/api/admin/settings", headers=_headers(admin)).json()
         viewer_caps = client.put("/api/admin/settings", headers=_headers(viewer), json=settings)
         assert viewer_caps.status_code == 403
+
+
+@requires_postgres
+def test_pending_legacy_pre_1d_jobs_cannot_execute_mutable_scan(reset_db):
+    from alembic import command
+
+    from app.config import settings
+    from app.database import SessionLocal, engine
+    from app.jobs import fail_pending_legacy_pre_1d_jobs
+    from app.migrate import alembic_config, apply_schema
+    from app.models import LEGACY_PRE_1D_REQUEUE_ERROR, ScanJob
+
+    command.upgrade(alembic_config(), PHASE1C_HEAD)
+    with engine.begin() as conn:
+        tenant_id = conn.execute(text("INSERT INTO tenants (name, notes) VALUES ('Legacy queue', '') RETURNING id")).scalar_one()
+        wan_id = conn.execute(
+            text("INSERT INTO subnets (tenant_id, name, cidr, scope) VALUES (:t, 'WAN', '198.51.100.0/24', 'wan') RETURNING id"),
+            {"t": tenant_id},
+        ).scalar_one()
+        scan_id = conn.execute(
+            text(
+                """
+                INSERT INTO scans (tenant_id, name, scope, profile, nuclei_severities, nuclei_tags, subnet_ids, is_enabled)
+                VALUES (:t, 'Old WAN', 'wan', 'discovery', 'high', '', CAST(:ids AS jsonb), true)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id, "ids": f"[{wan_id}]"},
+        ).scalar_one()
+        queued_id = conn.execute(
+            text("INSERT INTO scan_jobs (scan_id, tenant_id, status, hosts_found, findings_count) VALUES (:s, :t, 'queued', 0, 0) RETURNING id"),
+            {"s": scan_id, "t": tenant_id},
+        ).scalar_one()
+        done_id = conn.execute(
+            text("INSERT INTO scan_jobs (scan_id, tenant_id, status, hosts_found, findings_count) VALUES (:s, :t, 'done', 4, 1) RETURNING id"),
+            {"s": scan_id, "t": tenant_id},
+        ).scalar_one()
+    apply_schema()
+    db = SessionLocal()
+    try:
+        queued = db.get(ScanJob, queued_id)
+        done = db.get(ScanJob, done_id)
+        assert queued is not None and done is not None
+        assert queued.execution_snapshot is None
+        assert queued.snapshot_version == "legacy_pre_1d"
+        if queued.status != "failed":
+            fail_pending_legacy_pre_1d_jobs(db)
+            db.commit()
+            queued = db.get(ScanJob, queued_id)
+        assert queued.status == "failed"
+        assert LEGACY_PRE_1D_REQUEUE_ERROR in (queued.error or "")
+        assert done.status == "done"
+        assert done.execution_snapshot is None
+        assert done.hosts_found == 4
+    finally:
+        db.close()
+
+    with _client() as client:
+        start = client.post(
+            f"/api/internal/scanner/jobs/{queued_id}/start",
+            headers={"X-Scanner-Token": settings.scanner_token},
+        )
+        assert start.status_code in {404, 409}
+
+
+@requires_postgres
+def test_new_wan_definition_rejects_empty_target_list(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        empty = client.post(
+            f"/api/tenants/{world['tenant']['id']}/scans",
+            headers=_headers(token),
+            json={"name": "Silent all", "scope": "wan", "wan_target_ids": []},
+        )
+        assert empty.status_code == 400
+        assert "authorized target" in empty.json()["detail"].lower()
+
+
+@requires_postgres
+def test_queued_fqdn_is_blocked_by_new_ip_exclusion(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        fqdn = client.post(
+            f"/api/tenants/{world['tenant']['id']}/wan-targets",
+            headers=_headers(token),
+            json={"name": "Edge", "target_type": "fqdn", "value": "edge.example.com"},
+        )
+        assert fqdn.status_code == 200, fqdn.text
+        scan = client.post(
+            f"/api/tenants/{world['tenant']['id']}/scans",
+            headers=_headers(token),
+            json={"name": "FQDN", "scope": "wan", "wan_target_ids": [fqdn.json()["id"]]},
+        )
+        assert scan.status_code == 200, scan.text
+        run = client.post(f"/api/scans/{scan.json()['id']}/run", headers=_headers(token))
+        assert run.status_code == 200, run.text
+        excl = client.post(
+            "/api/scan-exclusions",
+            headers=_headers(token),
+            json={"scope": "tenant", "tenant_id": world["tenant"]["id"], "exclusion_type": "ip", "value": "203.0.113.50"},
+        )
+        assert excl.status_code == 200, excl.text
+        from app.config import settings
+        from app.scan_security import resolve_fqdn_addresses
+
+        with patch("app.scan_security.socket.getaddrinfo", return_value=[(None, None, None, None, ("203.0.113.50", 0))]):
+            addrs = resolve_fqdn_addresses("edge.example.com")
+            assert str(addrs[0]) == "203.0.113.50"
+            blocked = client.post(
+                f"/api/internal/scanner/jobs/{run.json()['id']}/start",
+                headers={"X-Scanner-Token": settings.scanner_token},
+            )
+        assert blocked.status_code == 409
+        assert "exclusion" in blocked.json()["detail"].lower()
+
+
+@requires_postgres
+def test_wan_subnet_rename_and_cidr_change_archives_old_authorization(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        created = client.post(
+            f"/api/tenants/{world['tenant']['id']}/subnets",
+            headers=_headers(token),
+            json={"name": "Old Edge", "cidr": "198.51.100.0/24", "scope": "wan"},
+        )
+        assert created.status_code == 200, created.text
+        updated = client.patch(
+            f"/api/subnets/{created.json()['id']}",
+            headers=_headers(token),
+            json={"name": "New Edge", "cidr": "192.0.2.0/24", "scope": "wan"},
+        )
+        assert updated.status_code == 200, updated.text
+        rows = client.get(
+            f"/api/tenants/{world['tenant']['id']}/wan-targets?include_archived=true",
+            headers=_headers(token),
+        ).json()
+        by_value = {row["normalized_value"]: row for row in rows}
+        assert "198.51.100.0/24" in by_value
+        assert by_value["198.51.100.0/24"]["archived_at"] is not None
+        assert "192.0.2.0/24" in by_value
+        assert by_value["192.0.2.0/24"]["archived_at"] is None

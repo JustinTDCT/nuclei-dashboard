@@ -7,7 +7,7 @@ from app.config import settings
 from app.database import get_db
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
-from app.models import JOB_QUEUED, Device, Scan, ScanJob
+from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, Scan, ScanJob
 from app.scan_dispatch import CENTRAL_WORKER
 from app.scan_security import ExecutionBlocked, revalidate_wan_start
 from app.scan_snapshot import merge_provenance
@@ -38,8 +38,10 @@ def poll_jobs(_: None = Depends(require_scanner), db: Session = Depends(get_db))
     payloads = []
     for job in jobs:
         try:
-            if job.execution_snapshot:
-                revalidate_wan_start(db, job)
+            if not job.execution_snapshot:
+                fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
+                continue
+            revalidate_wan_start(db, job)
             payloads.append(job_payload(db, job))
         except ExecutionBlocked as exc:
             fail_job(db, job, exc.detail)
@@ -57,8 +59,10 @@ def start_job(job_id: int, _: None = Depends(require_scanner), db: Session = Dep
     if not job:
         raise HTTPException(status_code=404, detail="Job not available")
     try:
-        if job.execution_snapshot:
-            revalidate_wan_start(db, job)
+        if not job.execution_snapshot:
+            fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
+            raise HTTPException(status_code=409, detail=LEGACY_PRE_1D_REQUEUE_ERROR)
+        revalidate_wan_start(db, job)
         payload = job_payload(db, job)
     except ExecutionBlocked as exc:
         fail_job(db, job, exc.detail)

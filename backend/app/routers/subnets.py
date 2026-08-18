@@ -38,7 +38,7 @@ def create_subnet(
         subnet = Subnet(tenant_id=tenant_id, name=body.name, cidr=cidr, scope="wan")
         db.add(subnet)
         db.flush()
-        _upsert_wan_target_from_subnet(db, subnet, user)
+        _upsert_wan_target_from_subnet(db, subnet, user, previous_name=None, previous_cidr=None)
         db.commit()
         db.refresh(subnet)
         return subnet
@@ -84,9 +84,17 @@ def update_subnet(
     if subnet.scope == "wan":
         if body.scope != "wan":
             raise HTTPException(status_code=400, detail="Cannot convert a WAN target into a LAN network")
+        previous_name = subnet.name
+        previous_cidr = subnet.cidr
         subnet.name = body.name
         subnet.cidr = cidr
-        _upsert_wan_target_from_subnet(db, subnet, user, value_changed=True)
+        _upsert_wan_target_from_subnet(
+            db,
+            subnet,
+            user,
+            previous_name=previous_name,
+            previous_cidr=previous_cidr,
+        )
         db.commit()
         db.refresh(subnet)
         return subnet
@@ -135,10 +143,43 @@ def delete_subnet(subnet_id: int, user: User = Depends(require_user), db: Sessio
     return {"ok": True}
 
 
-def _upsert_wan_target_from_subnet(db: Session, subnet: Subnet, user: User, value_changed: bool = False) -> None:
+def _upsert_wan_target_from_subnet(
+    db: Session,
+    subnet: Subnet,
+    user: User,
+    *,
+    previous_name: str | None,
+    previous_cidr: str | None,
+) -> None:
     from app.audit import record_audit, utcnow
 
     target_type, normalized = normalize_wan_target("cidr", subnet.cidr)
+    if previous_cidr:
+        try:
+            _, previous_normalized = normalize_wan_target("cidr", previous_cidr)
+        except Exception:
+            previous_normalized = None
+        if previous_normalized and previous_normalized != normalized:
+            previous = (
+                db.query(AuthorizedWanTarget)
+                .filter(
+                    AuthorizedWanTarget.tenant_id == subnet.tenant_id,
+                    AuthorizedWanTarget.archived_at.is_(None),
+                    AuthorizedWanTarget.normalized_value == previous_normalized,
+                )
+                .all()
+            )
+            for row in previous:
+                row.archived_at = utcnow()
+                record_audit(
+                    db,
+                    actor=user,
+                    action="wan_target.archive",
+                    object_type="wan_target",
+                    object_id=row.id,
+                    tenant_id=subnet.tenant_id,
+                    details={"via": "subnet_api", "normalized": row.normalized_value, "replaced_by": normalized},
+                )
     existing = (
         db.query(AuthorizedWanTarget)
         .filter(
@@ -151,27 +192,7 @@ def _upsert_wan_target_from_subnet(db: Session, subnet: Subnet, user: User, valu
     if existing:
         existing.name = subnet.name
         return
-    if value_changed:
-        previous = (
-            db.query(AuthorizedWanTarget)
-            .filter(
-                AuthorizedWanTarget.tenant_id == subnet.tenant_id,
-                AuthorizedWanTarget.archived_at.is_(None),
-                AuthorizedWanTarget.name == subnet.name,
-            )
-            .all()
-        )
-        for row in previous:
-            row.archived_at = utcnow()
-            record_audit(
-                db,
-                actor=user,
-                action="wan_target.archive",
-                object_type="wan_target",
-                object_id=row.id,
-                tenant_id=subnet.tenant_id,
-                details={"via": "subnet_api", "normalized": row.normalized_value},
-            )
+    _ = previous_name
     target = AuthorizedWanTarget(
         tenant_id=subnet.tenant_id,
         name=subnet.name,

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.locality import is_authorized
-from app.models import Agent, AuthorizedWanTarget, Network, ScanJob, Site
+from app.models import WAN_TARGET_FQDN, Agent, AuthorizedWanTarget, Network, ScanJob, Site
 from app.scan_exclusions import (
     effective_exclusions,
     exclusion_networks_from_rows,
@@ -113,6 +115,36 @@ def _revalidate_caps_and_exclusions(
                 for row in (snapshot.get("targets") or {}).get("wan_targets") or []:
                     if row.get("type") in {"ip", "cidr"}:
                         targets.append(ip_network(row["normalized"], strict=False))
+                    elif row.get("type") == WAN_TARGET_FQDN:
+                        _assert_fqdn_safe_against(row.get("normalized") or row.get("value") or "", extra_nets)
             if any(t.overlaps(exc) for t in targets for exc in extra_nets):
                 raise ExecutionBlocked("Newly added exclusions make this run unsafe")
             _ = original_nets
+
+
+def resolve_fqdn_addresses(fqdn: str) -> list[ipaddress._BaseAddress]:
+    name = (fqdn or "").strip().rstrip(".").lower()
+    if not name:
+        raise ExecutionBlocked("Queued FQDN target is empty")
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError as exc:
+        raise ExecutionBlocked(f"Cannot resolve FQDN {name} against current exclusions") from exc
+    addresses = []
+    for info in infos:
+        host = info[4][0]
+        try:
+            addresses.append(ipaddress.ip_address(host.split("%", 1)[0]))
+        except ValueError:
+            continue
+    if not addresses:
+        raise ExecutionBlocked(f"Cannot resolve FQDN {name} against current exclusions")
+    return addresses
+
+
+def _assert_fqdn_safe_against(fqdn: str, extra_nets: list) -> None:
+    if not extra_nets:
+        return
+    for address in resolve_fqdn_addresses(fqdn):
+        if any(address in network for network in extra_nets):
+            raise ExecutionBlocked("Newly added exclusions make this run unsafe")
