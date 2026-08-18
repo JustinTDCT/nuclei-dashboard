@@ -5,10 +5,12 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.jobs import create_job, due_scans
+from app.events import emit_scan_missed_unavailable_agent
+from app.jobs import due_scans, queue_scheduled_run
 from app.lifecycle import mark_inactive_assets
 from app.locality import LanScanInvalidError
-from app.models import Device, ScanJob
+from app.models import JOB_WAITING_FOR_AGENT, Device, ScanJob
+from app.scan_dispatch import mark_job_missed, utcnow
 from app.settings_store import get_settings
 
 log = logging.getLogger(__name__)
@@ -22,21 +24,36 @@ def _now() -> datetime:
 def tick_schedules() -> None:
     db: Session = SessionLocal()
     try:
+        expire_waiting_jobs(db)
         for scan in due_scans(db):
             try:
-                create_job(db, scan)
+                job = queue_scheduled_run(db, scan)
             except LanScanInvalidError as exc:
                 db.rollback()
                 log.warning("Skipping scheduled scan %s: %s", scan.id, exc.detail)
                 continue
-            scan.last_scheduled_at = _now()
             db.commit()
-            log.info("Queued scheduled job for scan %s", scan.id)
+            if job:
+                log.info("Queued scheduled job for scan %s", scan.id)
     except Exception:
         log.exception("Schedule tick failed")
         db.rollback()
     finally:
         db.close()
+
+
+def expire_waiting_jobs(db: Session) -> None:
+    now = utcnow()
+    waiting = (
+        db.query(ScanJob)
+        .filter(ScanJob.status == JOB_WAITING_FOR_AGENT, ScanJob.wait_expires_at.isnot(None), ScanJob.wait_expires_at <= now)
+        .all()
+    )
+    for job in waiting:
+        mark_job_missed(db, job, "No healthy eligible agent before wait expiry")
+        emit_scan_missed_unavailable_agent(db, job)
+    if waiting:
+        db.commit()
 
 
 def mark_stale_devices() -> None:

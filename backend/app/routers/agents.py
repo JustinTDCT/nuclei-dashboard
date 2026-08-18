@@ -12,20 +12,15 @@ from app.compose_gen import agent_compose, agent_env
 from app.database import get_db
 from app.locality import drop_cross_site_authorizations, get_agent, get_site, get_tenant, require_active_site
 from app.models import Agent, Tenant, User
+from app.scan_dispatch import is_agent_healthy
 from app.schemas import AgentCreate, AgentOut, AgentUpdate
 from app.settings_store import central_url
 
 router = APIRouter(tags=["agents"])
-ONLINE_SECONDS = 90
 
 
 def _online(agent: Agent) -> bool:
-    if not agent.last_heartbeat:
-        return False
-    hb = agent.last_heartbeat
-    if hb.tzinfo is None:
-        hb = hb.replace(tzinfo=timezone.utc)
-    return hb >= datetime.now(timezone.utc) - timedelta(seconds=ONLINE_SECONDS)
+    return is_agent_healthy(agent)
 
 
 def serialize(agent: Agent, include_secret: bool = False) -> AgentOut:

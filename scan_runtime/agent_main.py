@@ -34,6 +34,11 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token) -> None
     try:
         result = run_pipeline(job, log=lambda message: print(message, flush=True))
         token = refresh_token() or token
+        if result.get("provenance"):
+            try:
+                client.provenance(token, job_id, result["provenance"])
+            except ApiError:
+                pass
         if result["devices"]:
             client.devices(token, job_id, result["devices"])
         if result["findings"]:

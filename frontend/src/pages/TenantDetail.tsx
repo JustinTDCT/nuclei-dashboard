@@ -5,11 +5,22 @@ import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import { Alerts } from "./Alerts";
 import { formatUtc, useTimezone } from "../timezone";
-import type { Agent, Finding, Network, Scan, ScanJob, Site, Subnet, Tenant, TenantSummary } from "../types";
+import type {
+  Agent,
+  AuthorizedWanTarget,
+  Finding,
+  Network,
+  Scan,
+  ScanExclusion,
+  ScanJob,
+  Site,
+  Tenant,
+  TenantSummary,
+} from "../types";
 import { AssetsPanel } from "./AssetsPanel";
 import { SitesPanel } from "./SitesPanel";
 
-type Tab = "overview" | "sites" | "subnets" | "agents" | "scans" | "assets" | "findings" | "alerts";
+type Tab = "overview" | "sites" | "wan" | "agents" | "scans" | "assets" | "findings" | "alerts";
 
 export function TenantDetail() {
   const { id } = useParams();
@@ -23,7 +34,7 @@ export function TenantDetail() {
 
   if (!tenant) return <div className="text-slate-400">Loading…</div>;
 
-  const tabs: Tab[] = ["overview", "sites", "subnets", "agents", "scans", "assets", "findings", "alerts"];
+  const tabs: Tab[] = ["overview", "sites", "wan", "agents", "scans", "assets", "findings", "alerts"];
 
   return (
     <div className="space-y-6">
@@ -41,13 +52,13 @@ export function TenantDetail() {
             onClick={() => setTab(t)}
             className={`px-3 py-1.5 rounded-md text-sm capitalize ${tab === t ? "bg-cyan-700 text-white" : "bg-slate-800 text-slate-300"}`}
           >
-            {t}
+            {t === "wan" ? "WAN targets" : t}
           </button>
         ))}
       </div>
       {tab === "overview" && <Overview tenantId={tenantId} />}
       {tab === "sites" && <SitesPanel tenantId={tenantId} />}
-      {tab === "subnets" && <Subnets tenantId={tenantId} />}
+      {tab === "wan" && <WanTargets tenantId={tenantId} />}
       {tab === "agents" && <Agents tenantId={tenantId} />}
       {tab === "scans" && <Scans tenantId={tenantId} />}
       {tab === "assets" && <AssetsPanel tenantId={tenantId} />}
@@ -92,30 +103,31 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function Subnets({ tenantId }: { tenantId: number }) {
+function WanTargets({ tenantId }: { tenantId: number }) {
   const { user } = useAuth();
   const write = canWrite(user?.role);
-  const [rows, setRows] = useState<Subnet[]>([]);
+  const [rows, setRows] = useState<AuthorizedWanTarget[]>([]);
   const [name, setName] = useState("");
-  const [cidr, setCidr] = useState("");
-  const [scope, setScope] = useState<"wan" | "lan">("wan");
+  const [value, setValue] = useState("");
+  const [targetType, setTargetType] = useState<"ip" | "cidr" | "fqdn">("cidr");
   const [error, setError] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
 
   function load() {
-    api<Subnet[]>(`/api/tenants/${tenantId}/subnets`).then(setRows);
+    api<AuthorizedWanTarget[]>(`/api/tenants/${tenantId}/wan-targets?include_archived=${showArchived}`).then(setRows);
   }
-  useEffect(load, [tenantId]);
+  useEffect(load, [tenantId, showArchived]);
 
   async function onCreate(e: FormEvent) {
     e.preventDefault();
     setError("");
     try {
-      await api(`/api/tenants/${tenantId}/subnets`, {
+      await api(`/api/tenants/${tenantId}/wan-targets`, {
         method: "POST",
-        body: JSON.stringify({ name, cidr, scope }),
+        body: JSON.stringify({ name, target_type: targetType, value }),
       });
       setName("");
-      setCidr("");
+      setValue("");
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed");
@@ -125,34 +137,42 @@ function Subnets({ tenantId }: { tenantId: number }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-slate-400">
-        WAN targets stay here. LAN CIDRs are Networks under the Sites tab so overlapping private ranges can exist at different sites.
+        Authorized WAN targets only. Workers cannot receive arbitrary Internet scope. Archive instead of deleting so history stays intact.
       </p>
       {write && (
         <form onSubmit={onCreate} className="grid md:grid-cols-4 gap-3 items-end bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <Field label="Name" value={name} onChange={setName} />
-          <Field label="CIDR" value={cidr} onChange={setCidr} placeholder="203.0.113.0/24" />
+          <Field label="Label" value={name} onChange={setName} />
           <div>
-            <label>Scope</label>
-            <select className="w-full" value={scope} onChange={(e) => setScope(e.target.value as "wan" | "lan")}>
-              <option value="wan">WAN (central scanner)</option>
+            <label>Type</label>
+            <select className="w-full" value={targetType} onChange={(e) => setTargetType(e.target.value as "ip" | "cidr" | "fqdn")}>
+              <option value="ip">IP</option>
+              <option value="cidr">CIDR</option>
+              <option value="fqdn">FQDN</option>
             </select>
           </div>
-          <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2">Add WAN target</button>
+          <Field label="Value" value={value} onChange={setValue} placeholder={targetType === "fqdn" ? "edge.example.com" : "203.0.113.0/24"} />
+          <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2">Add authorized target</button>
         </form>
       )}
+      <label className="flex items-center gap-2 text-sm text-slate-300 normal-case tracking-normal">
+        <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+        Show archived
+      </label>
       {error && <div className="text-rose-300 text-sm">{error}</div>}
       <Table
-        headers={["Name", "CIDR", "Scope", ""]}
+        headers={["Name", "Type", "Value", "Normalized", "Status", ""]}
         rows={rows.map((s) => [
           s.name,
-          <span className="font-mono">{s.cidr}</span>,
-          <Badge value={s.scope} />,
-          write && s.scope === "wan" ? (
-            <button className="text-rose-300 text-sm" onClick={() => api(`/api/subnets/${s.id}`, { method: "DELETE" }).then(load)}>
-              Delete
+          <Badge value={s.target_type} />,
+          <span className="font-mono">{s.value}</span>,
+          <span className="font-mono text-xs">{s.normalized_value}</span>,
+          s.archived_at ? <Badge value="archived" /> : <Badge value="active" />,
+          write && !s.archived_at ? (
+            <button className="text-rose-300 text-sm" onClick={() => api(`/api/wan-targets/${s.id}/archive`, { method: "POST" }).then(load)}>
+              Archive
             </button>
           ) : (
-            s.scope === "lan" ? "Managed under Sites" : ""
+            ""
           ),
         ])}
       />
@@ -282,27 +302,45 @@ function Scans({ tenantId }: { tenantId: number }) {
   const write = canWrite(user?.role);
   const [scans, setScans] = useState<Scan[]>([]);
   const [jobs, setJobs] = useState<ScanJob[]>([]);
-  const [subnets, setSubnets] = useState<Subnet[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
   const [sites, setSites] = useState<Site[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const [wanTargets, setWanTargets] = useState<AuthorizedWanTarget[]>([]);
+  const [exclusions, setExclusions] = useState<ScanExclusion[]>([]);
+  const [selectedJob, setSelectedJob] = useState<ScanJob | null>(null);
+  const [step, setStep] = useState(1);
+  const [error, setError] = useState("");
   const { defaultTimezone } = useTimezone();
   const [form, setForm] = useState({
     name: "",
     scope: "lan" as "lan" | "wan",
-    agent_id: "",
-    profile: "discovery",
-    interval_minutes: "",
-    subnet_ids: [] as number[],
+    site_id: "",
+    network_ids: [] as number[],
+    wan_target_ids: [] as number[],
+    discovery: true,
+    port_mode: "common",
+    custom_ports: "",
+    fingerprint: true,
+    vulnerability: false,
+    nuclei_severities: "critical,high,medium",
+    nuclei_tags: "",
+    intensity: "normal",
+    schedule_type: "manual",
+    hour: "2",
+    minute: "0",
+    weekday: "0",
+    day: "1",
+    cron: "",
+    exclusion_value: "",
+    exclusion_type: "cidr",
   });
 
   function load() {
     api<Scan[]>(`/api/tenants/${tenantId}/scans`).then(setScans);
     api<ScanJob[]>(`/api/tenants/${tenantId}/jobs`).then(setJobs);
-    api<Subnet[]>(`/api/tenants/${tenantId}/subnets`).then(setSubnets);
     api<Network[]>(`/api/tenants/${tenantId}/networks`).then(setNetworks);
     api<Site[]>(`/api/tenants/${tenantId}/sites`).then(setSites);
-    api<Agent[]>(`/api/tenants/${tenantId}/agents`).then(setAgents);
+    api<AuthorizedWanTarget[]>(`/api/tenants/${tenantId}/wan-targets`).then(setWanTargets);
+    api<ScanExclusion[]>(`/api/tenants/${tenantId}/scan-exclusions`).then(setExclusions);
   }
   useEffect(() => {
     load();
@@ -310,118 +348,311 @@ function Scans({ tenantId }: { tenantId: number }) {
     return () => clearInterval(id);
   }, [tenantId]);
 
-  const selectedAgent = agents.find((a) => String(a.id) === form.agent_id);
-  const scopedTargets = useMemo(() => {
-    if (form.scope === "wan") return subnets.filter((s) => s.scope === "wan");
-    return networks.filter(
-      (n) =>
-        !n.is_archived &&
-        selectedAgent &&
-        n.site_id === selectedAgent.site_id &&
-        n.authorized_agent_ids.includes(selectedAgent.id)
-    );
-  }, [form.scope, subnets, networks, selectedAgent]);
+  const siteNetworks = useMemo(
+    () => networks.filter((n) => !n.is_archived && String(n.site_id) === form.site_id),
+    [networks, form.site_id]
+  );
+  const selectedNetworks = siteNetworks.filter((n) => form.network_ids.includes(n.id));
+  const preferredIds = [
+    ...new Set(selectedNetworks.filter((n) => n.dispatch_mode === "preferred_failover").map((n) => n.preferred_agent_id)),
+  ];
+  const dispatchConflict = preferredIds.length > 1;
+  const dispatchLabel =
+    form.scope === "wan"
+      ? "Central WAN scanner"
+      : dispatchConflict
+        ? "Conflicting preferred agents"
+        : preferredIds.length === 1
+          ? "Preferred Agent + failover"
+          : "Any Available";
 
   async function onCreate(e: FormEvent) {
     e.preventDefault();
-    await api(`/api/tenants/${tenantId}/scans`, {
+    setError("");
+    try {
+      await api(`/api/tenants/${tenantId}/scans`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: form.name,
+          scope: form.scope,
+          site_id: form.scope === "lan" ? Number(form.site_id) : null,
+          network_ids: form.scope === "lan" ? form.network_ids : [],
+          wan_target_ids: form.scope === "wan" ? form.wan_target_ids : [],
+          is_enabled: true,
+          stage_config: {
+            discovery: form.discovery,
+            port_mode: form.port_mode,
+            custom_ports: form.custom_ports,
+            fingerprint: form.fingerprint,
+            vulnerability: form.vulnerability,
+            nuclei_severities: form.nuclei_severities,
+            nuclei_tags: form.nuclei_tags,
+          },
+          intensity_config: { preset: form.intensity },
+          schedule_config:
+            form.schedule_type === "manual"
+              ? { type: "manual" }
+              : form.schedule_type === "cron"
+                ? { type: "cron", expression: form.cron }
+                : {
+                    type: form.schedule_type,
+                    hour: Number(form.hour),
+                    minute: Number(form.minute),
+                    weekday: Number(form.weekday),
+                    day: Number(form.day),
+                  },
+        }),
+      });
+      setForm({ ...form, name: "" });
+      setStep(1);
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed");
+    }
+  }
+
+  async function addExclusion() {
+    if (!form.exclusion_value) return;
+    await api("/api/scan-exclusions", {
       method: "POST",
       body: JSON.stringify({
-        name: form.name,
-        scope: form.scope,
-        agent_id: form.scope === "lan" ? Number(form.agent_id) : null,
-        profile: form.profile,
-        interval_minutes: form.interval_minutes ? Number(form.interval_minutes) : null,
-        subnet_ids: form.subnet_ids,
-        is_enabled: true,
+        scope: "tenant",
+        tenant_id: tenantId,
+        exclusion_type: form.exclusion_type,
+        value: form.exclusion_value,
       }),
     });
-    setForm({ ...form, name: "" });
+    setForm({ ...form, exclusion_value: "" });
     load();
   }
 
   return (
     <div className="space-y-6">
       {write && (
-        <form onSubmit={onCreate} className="grid md:grid-cols-3 gap-3 bg-slate-900 border border-slate-800 rounded-xl p-4">
-          <Field label="Scan name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
-          <div>
-            <label>Scope</label>
-            <select className="w-full" value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value as "lan" | "wan", subnet_ids: [] })}>
-              <option value="lan">LAN (agent)</option>
-              <option value="wan">WAN (central)</option>
-            </select>
+        <form onSubmit={onCreate} className="space-y-4 bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div className="flex flex-wrap gap-2 text-xs text-slate-400">
+            {["Scope", "Stages", "Intensity", "Exclusions", "Schedule", "Review"].map((label, idx) => (
+              <button
+                key={label}
+                type="button"
+                onClick={() => setStep(idx + 1)}
+                className={`px-2 py-1 rounded ${step === idx + 1 ? "bg-cyan-800 text-white" : "bg-slate-800"}`}
+              >
+                {idx + 1}. {label}
+              </button>
+            ))}
           </div>
-          {form.scope === "lan" && (
+          {step === 1 && (
+            <div className="grid md:grid-cols-2 gap-3">
+              <Field label="Scan name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} />
+              <div>
+                <label>Scope</label>
+                <select className="w-full" value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value as "lan" | "wan" })}>
+                  <option value="lan">LAN</option>
+                  <option value="wan">WAN</option>
+                </select>
+              </div>
+              {form.scope === "lan" && (
+                <>
+                  <div>
+                    <label>Site</label>
+                    <select className="w-full" value={form.site_id} onChange={(e) => setForm({ ...form, site_id: e.target.value, network_ids: [] })} required>
+                      <option value="">Select site</option>
+                      {sites.filter((s) => !s.is_archived).map((site) => (
+                        <option key={site.id} value={site.id}>
+                          {site.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="md:col-span-2">
+                    <label>Networks at this site</label>
+                    <div className="flex flex-wrap gap-3 mt-1">
+                      {siteNetworks.map((n) => (
+                        <label key={n.id} className="flex items-center gap-2 text-sm text-slate-300 normal-case tracking-normal">
+                          <input
+                            type="checkbox"
+                            checked={form.network_ids.includes(n.id)}
+                            onChange={(e) =>
+                              setForm({
+                                ...form,
+                                network_ids: e.target.checked
+                                  ? [...form.network_ids, n.id]
+                                  : form.network_ids.filter((id) => id !== n.id),
+                              })
+                            }
+                          />
+                          {n.name} ({n.cidr})
+                        </label>
+                      ))}
+                    </div>
+                    <p className="text-xs text-slate-400 mt-2">
+                      Dispatch is derived from the selected networks: {dispatchLabel}
+                      {dispatchConflict ? " — selected networks disagree on the preferred agent." : ""}
+                    </p>
+                  </div>
+                </>
+              )}
+              {form.scope === "wan" && (
+                <div className="md:col-span-2">
+                  <label>Authorized WAN targets</label>
+                  <div className="flex flex-wrap gap-3 mt-1">
+                    {wanTargets.filter((t) => !t.archived_at).map((t) => (
+                      <label key={t.id} className="flex items-center gap-2 text-sm text-slate-300 normal-case tracking-normal">
+                        <input
+                          type="checkbox"
+                          checked={form.wan_target_ids.includes(t.id)}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              wan_target_ids: e.target.checked
+                                ? [...form.wan_target_ids, t.id]
+                                : form.wan_target_ids.filter((id) => id !== t.id),
+                            })
+                          }
+                        />
+                        {t.name} ({t.normalized_value})
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {step === 2 && (
+            <div className="grid md:grid-cols-2 gap-3">
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={form.discovery} onChange={(e) => setForm({ ...form, discovery: e.target.checked })} />
+                Discovery
+              </label>
+              <div>
+                <label>Port discovery</label>
+                <select className="w-full" value={form.port_mode} onChange={(e) => setForm({ ...form, port_mode: e.target.value })}>
+                  <option value="none">None</option>
+                  <option value="common">Common</option>
+                  <option value="deep">Deep</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              {form.port_mode === "custom" && (
+                <Field label="Custom ports" value={form.custom_ports} onChange={(v) => setForm({ ...form, custom_ports: v })} placeholder="22,80,443,8000-8010" />
+              )}
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={form.fingerprint} onChange={(e) => setForm({ ...form, fingerprint: e.target.checked })} />
+                Fingerprinting
+              </label>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={form.vulnerability} onChange={(e) => setForm({ ...form, vulnerability: e.target.checked })} />
+                Vulnerability (Nuclei)
+              </label>
+              {form.vulnerability && (
+                <>
+                  <Field label="Nuclei severities" value={form.nuclei_severities} onChange={(v) => setForm({ ...form, nuclei_severities: v })} />
+                  <Field label="Nuclei tags" value={form.nuclei_tags} onChange={(v) => setForm({ ...form, nuclei_tags: v })} />
+                </>
+              )}
+            </div>
+          )}
+          {step === 3 && (
             <div>
-              <label>Agent</label>
-              <select className="w-full" value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: e.target.value, subnet_ids: [] })} required>
-                <option value="">Select agent</option>
-                {agents.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.name} ({a.status})
-                  </option>
-                ))}
+              <label>Intensity</label>
+              <select className="w-full max-w-xs" value={form.intensity} onChange={(e) => setForm({ ...form, intensity: e.target.value })}>
+                <option value="low">Low</option>
+                <option value="normal">Normal</option>
+                <option value="high">High</option>
               </select>
             </div>
           )}
-          <div>
-            <label>Profile</label>
-            <select className="w-full" value={form.profile} onChange={(e) => setForm({ ...form, profile: e.target.value })}>
-              <option value="discovery">Discovery only</option>
-              <option value="discovery_nuclei">Discovery + Nuclei</option>
-            </select>
-          </div>
-          <div>
-            <label>Interval (minutes, blank = manual)</label>
-            <input className="w-full" value={form.interval_minutes} onChange={(e) => setForm({ ...form, interval_minutes: e.target.value })} />
-          </div>
-          <div className="md:col-span-3">
-            <label>
-              {form.scope === "lan"
-                ? "Networks the selected agent is authorized for (empty = all authorized on its site)"
-                : "WAN targets (leave empty for all WAN)"}
-            </label>
-            <div className="flex flex-wrap gap-3 mt-1">
-              {scopedTargets.map((s) => {
-                const id = form.scope === "lan" ? ((s as Network).subnet_id || s.id) : s.id;
-                const siteName = form.scope === "lan" ? sites.find((site) => site.id === (s as Network).site_id)?.name : null;
-                return (
-                  <label key={id} className="flex items-center gap-2 text-sm text-slate-300 normal-case tracking-normal">
-                    <input
-                      type="checkbox"
-                      checked={form.subnet_ids.includes(id)}
-                      onChange={(e) =>
-                        setForm({
-                          ...form,
-                          subnet_ids: e.target.checked
-                            ? [...form.subnet_ids, id]
-                            : form.subnet_ids.filter((existing) => existing !== id),
-                        })
-                      }
-                    />
-                    {s.name} ({s.cidr}){siteName ? ` · ${siteName}` : ""}
-                  </label>
-                );
-              })}
+          {step === 4 && (
+            <div className="space-y-3">
+              <div className="flex gap-3 items-end">
+                <div>
+                  <label>Type</label>
+                  <select value={form.exclusion_type} onChange={(e) => setForm({ ...form, exclusion_type: e.target.value })}>
+                    <option value="ip">IP</option>
+                    <option value="cidr">CIDR</option>
+                    <option value="range">Range</option>
+                  </select>
+                </div>
+                <Field label="Tenant exclusion" value={form.exclusion_value} onChange={(v) => setForm({ ...form, exclusion_value: v })} />
+                <button type="button" className="bg-slate-800 rounded-md px-3 py-2" onClick={addExclusion}>
+                  Add
+                </button>
+              </div>
+              <div className="text-sm text-slate-400">
+                Effective exclusions include Global + Tenant + Site + Network + this scan. They can only remove scope.
+              </div>
+              <ul className="text-sm text-slate-300">
+                {exclusions.filter((row) => !row.archived_at).map((row) => (
+                  <li key={row.id}>
+                    {row.scope}: {row.normalized_value}
+                  </li>
+                ))}
+              </ul>
             </div>
-          </div>
-          <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2">Create scan</button>
+          )}
+          {step === 5 && (
+            <div className="grid md:grid-cols-3 gap-3">
+              <div>
+                <label>Schedule</label>
+                <select className="w-full" value={form.schedule_type} onChange={(e) => setForm({ ...form, schedule_type: e.target.value })}>
+                  <option value="manual">Manual</option>
+                  <option value="daily">Daily</option>
+                  <option value="weekly">Weekly</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="cron">Advanced cron</option>
+                </select>
+              </div>
+              {form.schedule_type !== "manual" && form.schedule_type !== "cron" && (
+                <>
+                  <Field label="Hour" value={form.hour} onChange={(v) => setForm({ ...form, hour: v })} />
+                  <Field label="Minute" value={form.minute} onChange={(v) => setForm({ ...form, minute: v })} />
+                </>
+              )}
+              {form.schedule_type === "weekly" && (
+                <Field label="Weekday (0=Mon)" value={form.weekday} onChange={(v) => setForm({ ...form, weekday: v })} />
+              )}
+              {form.schedule_type === "monthly" && <Field label="Day of month" value={form.day} onChange={(v) => setForm({ ...form, day: v })} />}
+              {form.schedule_type === "cron" && <Field label="Cron (m h dom mon dow)" value={form.cron} onChange={(v) => setForm({ ...form, cron: v })} />}
+            </div>
+          )}
+          {step === 6 && (
+            <div className="text-sm text-slate-300 space-y-1">
+              <div>Name: {form.name}</div>
+              <div>Scope: {form.scope.toUpperCase()}</div>
+              <div>Dispatch: {dispatchLabel}</div>
+              <div>Stages: discovery {form.discovery ? "on" : "off"}, ports {form.port_mode}, fingerprint {form.fingerprint ? "on" : "off"}, vuln {form.vulnerability ? "on" : "off"}</div>
+              <div>Intensity: {form.intensity}</div>
+              <div>Schedule: {form.schedule_type}</div>
+              <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2 px-4 mt-2">Create scan definition</button>
+            </div>
+          )}
+          {error && <div className="text-rose-300 text-sm">{error}</div>}
         </form>
       )}
       <div>
         <h3 className="font-medium mb-2">Scan definitions</h3>
         <Table
-          headers={["Name", "Scope", "Profile", "Schedule", ""]}
+          headers={["Name", "Scope", "Revision", "Dispatch", "Schedule", ""]}
           rows={scans.map((s) => [
             s.name,
             <Badge value={s.scope} />,
-            s.profile === "discovery_nuclei" ? "Discovery + Nuclei" : "Discovery",
-            s.interval_minutes ? `Every ${s.interval_minutes}m` : "Manual",
-            write ? (
-              <button className="text-cyan-400 text-sm" onClick={() => api(`/api/scans/${s.id}/run`, { method: "POST" }).then(load)}>
-                Run now
-              </button>
+            s.definition_revision ?? 1,
+            s.dispatch_summary?.mode === "preferred_failover"
+              ? `Preferred + ${s.dispatch_summary.failover_count ?? 0} failover`
+              : s.scope === "wan"
+                ? "Central"
+                : "Any Available",
+            (s.schedule_config?.type as string) || (s.interval_minutes ? `Every ${s.interval_minutes}m` : "Manual"),
+            write && !s.archived_at ? (
+              <div className="flex gap-3">
+                <button className="text-cyan-400 text-sm" onClick={() => api(`/api/scans/${s.id}/run`, { method: "POST" }).then(load)}>
+                  Run now
+                </button>
+                <button className="text-rose-300 text-sm" onClick={() => api(`/api/scans/${s.id}/archive`, { method: "POST" }).then(load)}>
+                  Archive
+                </button>
+              </div>
             ) : (
               ""
             ),
@@ -429,19 +660,47 @@ function Scans({ tenantId }: { tenantId: number }) {
         />
       </div>
       <div>
-        <h3 className="font-medium mb-2">Job history</h3>
+        <h3 className="font-medium mb-2">Run history</h3>
         <Table
-          headers={["Job", "Scan", "Status", "Hosts", "Findings", "Created"]}
+          headers={["Run", "Definition", "Trigger", "Status", "Worker", "Scheduled", "Created", "Started", "Finished", "Hosts", "Findings"]}
           rows={jobs.map((j) => [
-            `#${j.id}`,
+            <button className="text-cyan-400" onClick={() => api<ScanJob>(`/api/jobs/${j.id}`).then(setSelectedJob)}>
+              #{j.id}
+            </button>,
             j.scan_name || j.scan_id,
+            j.trigger_type || "—",
             <Badge value={j.status} />,
+            j.claimed_by || "—",
+            formatUtc(j.scheduled_for, defaultTimezone),
+            formatUtc(j.created_at, defaultTimezone),
+            formatUtc(j.started_at, defaultTimezone),
+            formatUtc(j.finished_at, defaultTimezone),
             j.hosts_found,
             j.findings_count,
-            formatUtc(j.created_at, defaultTimezone),
           ])}
         />
       </div>
+      {selectedJob && (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm space-y-2">
+          <div className="flex justify-between">
+            <h3 className="font-medium">Run #{selectedJob.id}</h3>
+            <button className="text-slate-400" onClick={() => setSelectedJob(null)}>
+              Close
+            </button>
+          </div>
+          <div>Revision {selectedJob.definition_revision} · snapshot {selectedJob.snapshot_version || "legacy"}</div>
+          <pre className="text-xs overflow-auto bg-slate-950 p-3 rounded max-h-80">
+            {JSON.stringify(
+              {
+                snapshot: selectedJob.execution_snapshot,
+                provenance: selectedJob.runtime_provenance,
+              },
+              null,
+              2
+            )}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }

@@ -14,6 +14,7 @@ from app.routers import (
     assets,
     auth,
     devices,
+    exclusions,
     findings,
     networks,
     scans,
@@ -22,6 +23,7 @@ from app.routers import (
     subnets,
     tenants,
     users,
+    wan_targets,
 )
 from app.scheduler import start_scheduler
 from app.inventory import refresh_discovery_metadata
@@ -61,6 +63,8 @@ app.include_router(networks.router, prefix="/api")
 app.include_router(subnets.router, prefix="/api")
 app.include_router(agents.router, prefix="/api")
 app.include_router(scans.router, prefix="/api")
+app.include_router(wan_targets.router, prefix="/api")
+app.include_router(exclusions.router, prefix="/api")
 app.include_router(devices.router, prefix="/api")
 app.include_router(assets.router, prefix="/api")
 app.include_router(findings.router, prefix="/api")

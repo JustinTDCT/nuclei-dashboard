@@ -12,8 +12,9 @@ from app.locality import (
     sync_lan_subnet,
     valid_cidr,
 )
-from app.models import DISPATCH_ANY_AVAILABLE, Network, Subnet, User
+from app.models import DISPATCH_ANY_AVAILABLE, AuthorizedWanTarget, Network, Subnet, User
 from app.schemas import SubnetIn, SubnetOut
+from app.wan_targets import normalize_wan_target
 
 router = APIRouter(tags=["subnets"])
 
@@ -36,6 +37,8 @@ def create_subnet(
     if body.scope == "wan":
         subnet = Subnet(tenant_id=tenant_id, name=body.name, cidr=cidr, scope="wan")
         db.add(subnet)
+        db.flush()
+        _upsert_wan_target_from_subnet(db, subnet, user)
         db.commit()
         db.refresh(subnet)
         return subnet
@@ -83,6 +86,7 @@ def update_subnet(
             raise HTTPException(status_code=400, detail="Cannot convert a WAN target into a LAN network")
         subnet.name = body.name
         subnet.cidr = cidr
+        _upsert_wan_target_from_subnet(db, subnet, user, value_changed=True)
         db.commit()
         db.refresh(subnet)
         return subnet
@@ -125,6 +129,93 @@ def delete_subnet(subnet_id: int, user: User = Depends(require_user), db: Sessio
             status_code=400,
             detail="LAN networks cannot be deleted; archive the Network instead",
         )
+    _archive_wan_target_for_subnet(db, subnet, user)
     db.delete(subnet)
     db.commit()
     return {"ok": True}
+
+
+def _upsert_wan_target_from_subnet(db: Session, subnet: Subnet, user: User, value_changed: bool = False) -> None:
+    from app.audit import record_audit, utcnow
+
+    target_type, normalized = normalize_wan_target("cidr", subnet.cidr)
+    existing = (
+        db.query(AuthorizedWanTarget)
+        .filter(
+            AuthorizedWanTarget.tenant_id == subnet.tenant_id,
+            AuthorizedWanTarget.normalized_value == normalized,
+            AuthorizedWanTarget.archived_at.is_(None),
+        )
+        .first()
+    )
+    if existing:
+        existing.name = subnet.name
+        return
+    if value_changed:
+        previous = (
+            db.query(AuthorizedWanTarget)
+            .filter(
+                AuthorizedWanTarget.tenant_id == subnet.tenant_id,
+                AuthorizedWanTarget.archived_at.is_(None),
+                AuthorizedWanTarget.name == subnet.name,
+            )
+            .all()
+        )
+        for row in previous:
+            row.archived_at = utcnow()
+            record_audit(
+                db,
+                actor=user,
+                action="wan_target.archive",
+                object_type="wan_target",
+                object_id=row.id,
+                tenant_id=subnet.tenant_id,
+                details={"via": "subnet_api", "normalized": row.normalized_value},
+            )
+    target = AuthorizedWanTarget(
+        tenant_id=subnet.tenant_id,
+        name=subnet.name,
+        target_type=target_type,
+        value=subnet.cidr,
+        normalized_value=normalized,
+    )
+    db.add(target)
+    db.flush()
+    record_audit(
+        db,
+        actor=user,
+        action="wan_target.create",
+        object_type="wan_target",
+        object_id=target.id,
+        tenant_id=subnet.tenant_id,
+        details={"via": "subnet_api", "normalized": normalized, "name": subnet.name},
+    )
+
+
+def _archive_wan_target_for_subnet(db: Session, subnet: Subnet, user: User) -> None:
+    from app.audit import record_audit, utcnow
+
+    try:
+        _, normalized = normalize_wan_target("cidr", subnet.cidr)
+    except Exception:
+        return
+    rows = (
+        db.query(AuthorizedWanTarget)
+        .filter(
+            AuthorizedWanTarget.tenant_id == subnet.tenant_id,
+            AuthorizedWanTarget.normalized_value == normalized,
+            AuthorizedWanTarget.archived_at.is_(None),
+        )
+        .all()
+    )
+    for row in rows:
+        row.archived_at = utcnow()
+        record_audit(
+            db,
+            actor=user,
+            action="wan_target.archive",
+            object_type="wan_target",
+            object_id=row.id,
+            tenant_id=subnet.tenant_id,
+            details={"via": "subnet_api", "normalized": normalized},
+        )

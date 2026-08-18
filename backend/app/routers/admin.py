@@ -8,6 +8,8 @@ from app.audit import record_audit
 from app.auth import require_admin, require_any
 from app.database import get_db
 from app.models import Agent, Alert, Device, Finding, ScanJob, Tenant, User
+from app.scan_dispatch import is_agent_healthy
+from app.scan_intensity import DEFAULT_CAPS
 from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
 from app.settings_store import get_settings, save_settings
 from app.timezones import list_iana_timezones, validate_iana_timezone
@@ -27,6 +29,12 @@ def write_settings(body: SettingsIn, user: User = Depends(require_admin), db: Se
     payload = body.model_dump()
     payload["default_timezone"] = timezone
     saved = save_settings(db, payload)
+    cap_keys = ("preferred_agent_grace_seconds", "agent_job_wait_minutes", *DEFAULT_CAPS)
+    cap_changes = {
+        key: {"before": current.get(key), "after": saved.get(key)}
+        for key in cap_keys
+        if current.get(key) != saved.get(key)
+    }
     if current.get("default_timezone") != timezone:
         record_audit(
             db,
@@ -35,8 +43,17 @@ def write_settings(body: SettingsIn, user: User = Depends(require_admin), db: Se
             object_type="settings",
             object_id=None,
             details={"before": current.get("default_timezone"), "after": timezone},
-            commit=True,
         )
+    if cap_changes:
+        record_audit(
+            db,
+            actor=user,
+            action="settings.scan_limits_change",
+            object_type="settings",
+            object_id=None,
+            details=cap_changes,
+        )
+    db.commit()
     return SettingsOut(**saved)
 
 
@@ -52,7 +69,6 @@ def timezones(_: User = Depends(require_any)):
 
 @router.get("/dashboard")
 def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
-    online_cut = datetime.now(timezone.utc) - timedelta(seconds=90)
     agents = db.query(Agent).all()
     return {
         "tenants": db.query(func.count(Tenant.id)).scalar() or 0,
@@ -62,13 +78,7 @@ def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
         "agents": {
             "total": len(agents),
             "pending": sum(1 for a in agents if a.status == "pending_approval"),
-            "online": sum(
-                1
-                for a in agents
-                if a.last_heartbeat
-                and (a.last_heartbeat if a.last_heartbeat.tzinfo else a.last_heartbeat.replace(tzinfo=timezone.utc))
-                >= online_cut
-            ),
+            "online": sum(1 for a in agents if is_agent_healthy(a)),
         },
         "findings": dict(
             db.query(Finding.severity, func.count(Finding.id)).group_by(Finding.severity).all()

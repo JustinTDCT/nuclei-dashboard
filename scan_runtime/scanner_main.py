@@ -22,6 +22,11 @@ def main() -> None:
                 client.start(job_id)
                 try:
                     result = run_pipeline(job)
+                    if result.get("provenance"):
+                        try:
+                            client.provenance(job_id, result["provenance"])
+                        except ApiError:
+                            pass
                     if result["devices"]:
                         client.devices(job_id, result["devices"])
                     if result["findings"]:

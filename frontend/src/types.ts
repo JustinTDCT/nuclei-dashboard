@@ -79,16 +79,33 @@ export interface Scan {
   id: number;
   tenant_id: number;
   agent_id: number | null;
+  site_id?: number | null;
   name: string;
   scope: "wan" | "lan";
   profile: "discovery" | "discovery_nuclei";
   nuclei_severities: string;
   nuclei_tags: string;
   subnet_ids: number[];
+  network_ids?: number[];
+  wan_target_ids?: number[];
   interval_minutes: number | null;
   is_enabled: boolean;
   last_scheduled_at: string | null;
+  next_run_at?: string | null;
+  definition_revision?: number;
+  stage_config?: Record<string, unknown>;
+  intensity_config?: Record<string, unknown>;
+  schedule_config?: Record<string, unknown>;
+  archived_at?: string | null;
+  needs_review?: boolean;
+  dispatch_summary?: {
+    mode?: string;
+    preferred_agent_id?: number | null;
+    eligible_agent_ids?: number[];
+    failover_count?: number;
+  } | null;
   created_at: string;
+  updated_at?: string | null;
 }
 
 export interface ScanJob {
@@ -97,6 +114,7 @@ export interface ScanJob {
   tenant_id: number;
   status: string;
   claimed_by: string | null;
+  claimed_agent_id?: number | null;
   error: string | null;
   hosts_found: number;
   findings_count: number;
@@ -105,6 +123,39 @@ export interface ScanJob {
   finished_at: string | null;
   scan_name?: string | null;
   scope?: string | null;
+  trigger_type?: string | null;
+  scheduled_for?: string | null;
+  definition_revision?: number | null;
+  snapshot_version?: string | null;
+  waiting_since?: string | null;
+  wait_expires_at?: string | null;
+  execution_snapshot?: Record<string, unknown> | null;
+  runtime_provenance?: Record<string, unknown> | null;
+}
+
+export interface AuthorizedWanTarget {
+  id: number;
+  tenant_id: number;
+  name: string;
+  target_type: "ip" | "cidr" | "fqdn";
+  value: string;
+  normalized_value: string;
+  archived_at: string | null;
+  created_at: string;
+}
+
+export interface ScanExclusion {
+  id: number;
+  scope: "global" | "tenant" | "site" | "network" | "scan";
+  exclusion_type: "ip" | "cidr" | "range";
+  value: string;
+  normalized_value: string;
+  tenant_id: number | null;
+  site_id: number | null;
+  network_id: number | null;
+  scan_id: number | null;
+  archived_at: string | null;
+  created_at: string;
 }
 
 export interface Tag {
@@ -319,6 +370,20 @@ export interface Settings {
   asset_inactive_days: number;
   default_nuclei_severities: string;
   default_timezone: string;
+  preferred_agent_grace_seconds?: number;
+  agent_job_wait_minutes?: number;
+  scan_cap_naabu_rate?: number;
+  scan_cap_naabu_concurrency?: number;
+  scan_cap_naabu_timeout_ms?: number;
+  scan_cap_naabu_retries?: number;
+  scan_cap_httpx_rate?: number;
+  scan_cap_httpx_threads?: number;
+  scan_cap_httpx_timeout?: number;
+  scan_cap_httpx_retries?: number;
+  scan_cap_nuclei_rate?: number;
+  scan_cap_nuclei_concurrency?: number;
+  scan_cap_nuclei_timeout?: number;
+  scan_cap_nuclei_retries?: number;
 }
 
 export interface Dashboard {

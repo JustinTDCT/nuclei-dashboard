@@ -94,6 +94,84 @@ PHASE1C_EVENT_TYPES = frozenset(
 
 CORRELATION_ALGORITHM_VERSION = "1c.3"
 
+SNAPSHOT_VERSION = "1d.1"
+SNAPSHOT_LEGACY_PRE_1D = "legacy_pre_1d"
+
+EVENT_SCAN_MISSED_UNAVAILABLE_AGENT = "scan_missed_unavailable_agent"
+PHASE1D_EVENT_TYPES = frozenset({EVENT_SCAN_MISSED_UNAVAILABLE_AGENT})
+
+WAN_TARGET_IP = "ip"
+WAN_TARGET_CIDR = "cidr"
+WAN_TARGET_FQDN = "fqdn"
+WAN_TARGET_TYPES = frozenset({WAN_TARGET_IP, WAN_TARGET_CIDR, WAN_TARGET_FQDN})
+
+PORT_MODE_NONE = "none"
+PORT_MODE_COMMON = "common"
+PORT_MODE_DEEP = "deep"
+PORT_MODE_CUSTOM = "custom"
+PORT_MODES = frozenset({PORT_MODE_NONE, PORT_MODE_COMMON, PORT_MODE_DEEP, PORT_MODE_CUSTOM})
+
+INTENSITY_LOW = "low"
+INTENSITY_NORMAL = "normal"
+INTENSITY_HIGH = "high"
+INTENSITY_CUSTOM = "custom"
+INTENSITY_PRESETS = frozenset({INTENSITY_LOW, INTENSITY_NORMAL, INTENSITY_HIGH, INTENSITY_CUSTOM})
+
+SCHEDULE_MANUAL = "manual"
+SCHEDULE_DAILY = "daily"
+SCHEDULE_WEEKLY = "weekly"
+SCHEDULE_MONTHLY = "monthly"
+SCHEDULE_CRON = "cron"
+SCHEDULE_LEGACY_INTERVAL = "legacy_interval"
+SCHEDULE_TYPES = frozenset(
+    {
+        SCHEDULE_MANUAL,
+        SCHEDULE_DAILY,
+        SCHEDULE_WEEKLY,
+        SCHEDULE_MONTHLY,
+        SCHEDULE_CRON,
+        SCHEDULE_LEGACY_INTERVAL,
+    }
+)
+
+TRIGGER_MANUAL = "manual"
+TRIGGER_SCHEDULED = "scheduled"
+TRIGGER_TYPES = frozenset({TRIGGER_MANUAL, TRIGGER_SCHEDULED})
+
+JOB_QUEUED = "queued"
+JOB_WAITING_FOR_AGENT = "waiting_for_agent"
+JOB_RUNNING = "running"
+JOB_DONE = "done"
+JOB_FAILED = "failed"
+JOB_MISSED = "missed"
+JOB_STATUSES = frozenset(
+    {JOB_QUEUED, JOB_WAITING_FOR_AGENT, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_MISSED}
+)
+
+EXCLUSION_SCOPE_GLOBAL = "global"
+EXCLUSION_SCOPE_TENANT = "tenant"
+EXCLUSION_SCOPE_SITE = "site"
+EXCLUSION_SCOPE_NETWORK = "network"
+EXCLUSION_SCOPE_SCAN = "scan"
+EXCLUSION_SCOPES = frozenset(
+    {
+        EXCLUSION_SCOPE_GLOBAL,
+        EXCLUSION_SCOPE_TENANT,
+        EXCLUSION_SCOPE_SITE,
+        EXCLUSION_SCOPE_NETWORK,
+        EXCLUSION_SCOPE_SCAN,
+    }
+)
+
+EXCLUSION_IP = "ip"
+EXCLUSION_CIDR = "cidr"
+EXCLUSION_RANGE = "range"
+EXCLUSION_TYPES = frozenset({EXCLUSION_IP, EXCLUSION_CIDR, EXCLUSION_RANGE})
+
+AGENT_HEALTH_SECONDS = 90
+DEFAULT_PREFERRED_AGENT_GRACE_SECONDS = 60
+DEFAULT_AGENT_JOB_WAIT_MINUTES = 30
+
 tag_assets = Table(
     "asset_tags",
     Base.metadata,
@@ -145,6 +223,9 @@ class Tenant(Base):
     tags: Mapped[list["Tag"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     findings: Mapped[list["Finding"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    authorized_wan_targets: Mapped[list["AuthorizedWanTarget"]] = relationship(
+        back_populates="tenant", cascade="all, delete-orphan"
+    )
 
 
 class Site(Base):
@@ -261,6 +342,7 @@ class Scan(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
     scope: Mapped[str] = mapped_column(String(10))  # wan, lan
     profile: Mapped[str] = mapped_column(String(30), default="discovery")  # discovery, discovery_nuclei
@@ -270,20 +352,39 @@ class Scan(Base):
     interval_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    definition_revision: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
+    stage_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    intensity_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    schedule_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     tenant: Mapped["Tenant"] = relationship(back_populates="scans")
     agent: Mapped["Agent | None"] = relationship(back_populates="scans")
+    site: Mapped["Site | None"] = relationship()
     jobs: Mapped[list["ScanJob"]] = relationship(back_populates="scan", cascade="all, delete-orphan")
+    network_targets: Mapped[list["ScanNetworkTarget"]] = relationship(
+        back_populates="scan", cascade="all, delete-orphan"
+    )
+    wan_target_links: Mapped[list["ScanWanTarget"]] = relationship(
+        back_populates="scan", cascade="all, delete-orphan"
+    )
 
 
 class ScanJob(Base):
     __tablename__ = "scan_jobs"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "scheduled_for", name="uq_scan_jobs_scan_id_scheduled_for"),
+        Index("ix_scan_jobs_status_created_at", "status", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), index=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
-    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued, running, done, failed
+    status: Mapped[str] = mapped_column(String(20), default="queued")
     claimed_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     hosts_found: Mapped[int] = mapped_column(Integer, default=0)
@@ -291,9 +392,133 @@ class ScanJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    snapshot_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    definition_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trigger_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    wait_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    runtime_provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     scan: Mapped["Scan"] = relationship(back_populates="jobs")
+    claimed_agent: Mapped["Agent | None"] = relationship()
     findings: Mapped[list["Finding"]] = relationship(back_populates="job")
+
+
+class AuthorizedWanTarget(Base):
+    __tablename__ = "authorized_wan_targets"
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('ip', 'cidr', 'fqdn')",
+            name="ck_authorized_wan_targets_type",
+        ),
+        Index("ix_authorized_wan_targets_tenant_id_normalized", "tenant_id", "normalized_value"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    target_type: Mapped[str] = mapped_column(String(16))
+    value: Mapped[str] = mapped_column(String(255))
+    normalized_value: Mapped[str] = mapped_column(String(255))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="authorized_wan_targets")
+    scan_links: Mapped[list["ScanWanTarget"]] = relationship(back_populates="wan_target")
+
+
+class ScanNetworkTarget(Base):
+    __tablename__ = "scan_network_targets"
+    __table_args__ = (
+        UniqueConstraint("scan_id", "network_id", name="uq_scan_network_targets_scan_id_network_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), index=True)
+    network_id: Mapped[int] = mapped_column(ForeignKey("networks.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    scan: Mapped["Scan"] = relationship(back_populates="network_targets")
+    network: Mapped["Network"] = relationship()
+
+
+class ScanWanTarget(Base):
+    __tablename__ = "scan_wan_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "scan_id",
+            "authorized_wan_target_id",
+            name="uq_scan_wan_targets_scan_id_target_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scan_id: Mapped[int] = mapped_column(ForeignKey("scans.id", ondelete="CASCADE"), index=True)
+    authorized_wan_target_id: Mapped[int] = mapped_column(
+        ForeignKey("authorized_wan_targets.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    scan: Mapped["Scan"] = relationship(back_populates="wan_target_links")
+    wan_target: Mapped["AuthorizedWanTarget"] = relationship(back_populates="scan_links")
+
+
+class ScanExclusion(Base):
+    __tablename__ = "scan_exclusions"
+    __table_args__ = (
+        CheckConstraint(
+            "scope IN ('global', 'tenant', 'site', 'network', 'scan')",
+            name="ck_scan_exclusions_scope",
+        ),
+        CheckConstraint(
+            "exclusion_type IN ('ip', 'cidr', 'range')",
+            name="ck_scan_exclusions_type",
+        ),
+        CheckConstraint(
+            "("
+            "scope = 'global' AND tenant_id IS NULL AND site_id IS NULL "
+            "AND network_id IS NULL AND scan_id IS NULL"
+            ") OR ("
+            "scope = 'tenant' AND tenant_id IS NOT NULL AND site_id IS NULL "
+            "AND network_id IS NULL AND scan_id IS NULL"
+            ") OR ("
+            "scope = 'site' AND tenant_id IS NOT NULL AND site_id IS NOT NULL "
+            "AND network_id IS NULL AND scan_id IS NULL"
+            ") OR ("
+            "scope = 'network' AND tenant_id IS NOT NULL AND site_id IS NOT NULL "
+            "AND network_id IS NOT NULL AND scan_id IS NULL"
+            ") OR ("
+            "scope = 'scan' AND tenant_id IS NOT NULL AND scan_id IS NOT NULL"
+            ")",
+            name="ck_scan_exclusions_scope_keys",
+        ),
+        Index("ix_scan_exclusions_tenant_id_scope", "tenant_id", "scope"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(20))
+    exclusion_type: Mapped[str] = mapped_column(String(16))
+    value: Mapped[str] = mapped_column(String(255))
+    normalized_value: Mapped[str] = mapped_column(String(255))
+    tenant_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    site_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sites.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    network_id: Mapped[int | None] = mapped_column(
+        ForeignKey("networks.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    scan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scans.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Device(Base):

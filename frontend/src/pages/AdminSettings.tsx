@@ -17,6 +17,20 @@ const empty: Settings = {
   asset_inactive_days: 30,
   default_nuclei_severities: "critical,high,medium",
   default_timezone: "UTC",
+  preferred_agent_grace_seconds: 60,
+  agent_job_wait_minutes: 30,
+  scan_cap_naabu_rate: 5000,
+  scan_cap_naabu_concurrency: 100,
+  scan_cap_naabu_timeout_ms: 10000,
+  scan_cap_naabu_retries: 5,
+  scan_cap_httpx_rate: 500,
+  scan_cap_httpx_threads: 150,
+  scan_cap_httpx_timeout: 30,
+  scan_cap_httpx_retries: 5,
+  scan_cap_nuclei_rate: 500,
+  scan_cap_nuclei_concurrency: 100,
+  scan_cap_nuclei_timeout: 30,
+  scan_cap_nuclei_retries: 5,
 };
 
 export function AdminSettings() {
@@ -106,6 +120,25 @@ export function AdminSettings() {
         <div className="text-sm text-slate-400 mt-6">
           Timestamps stay in UTC. The UI displays them in this timezone unless a Site overrides it.
         </div>
+      </section>
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-2 gap-3">
+        <div className="md:col-span-2 text-sm text-slate-400">
+          Agent wait / failover and maximum intensity values Users cannot exceed. Over-cap scan values are rejected, not clamped.
+        </div>
+        <Field
+          label="Preferred agent grace (seconds)"
+          value={String(form.preferred_agent_grace_seconds ?? 60)}
+          onChange={(v) => setForm({ ...form, preferred_agent_grace_seconds: Number(v) || 0 })}
+        />
+        <Field
+          label="Agent job wait (minutes)"
+          value={String(form.agent_job_wait_minutes ?? 30)}
+          onChange={(v) => setForm({ ...form, agent_job_wait_minutes: Number(v) || 1 })}
+        />
+        <Field label="Cap Naabu rate" value={String(form.scan_cap_naabu_rate ?? 5000)} onChange={(v) => setForm({ ...form, scan_cap_naabu_rate: Number(v) || 0 })} />
+        <Field label="Cap Naabu concurrency" value={String(form.scan_cap_naabu_concurrency ?? 100)} onChange={(v) => setForm({ ...form, scan_cap_naabu_concurrency: Number(v) || 0 })} />
+        <Field label="Cap httpx rate" value={String(form.scan_cap_httpx_rate ?? 500)} onChange={(v) => setForm({ ...form, scan_cap_httpx_rate: Number(v) || 0 })} />
+        <Field label="Cap Nuclei rate" value={String(form.scan_cap_nuclei_rate ?? 500)} onChange={(v) => setForm({ ...form, scan_cap_nuclei_rate: Number(v) || 0 })} />
       </section>
       {error && <div className="text-rose-300 text-sm">{error}</div>}
       {saved && <div className="text-emerald-300 text-sm">Saved.</div>}

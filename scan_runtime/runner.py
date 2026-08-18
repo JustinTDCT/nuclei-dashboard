@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
+from commands import (
+    PORT_MODE_NONE,
+    build_httpx_command,
+    build_naabu_command,
+    build_nuclei_command,
+    job_intensity,
+    job_stages,
+    job_targets,
+)
 from enrich import enrich_identities, usable_hostname
 
 LogFn = Callable[[str], None]
@@ -82,43 +91,195 @@ def dry_run(cidrs: list[str], scope: str, profile: str) -> dict[str, Any]:
 
 
 def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any]:
-    cidrs: list[str] = job.get("cidrs") or []
+    stages = job_stages(job)
+    intensity = job_intensity(job)
+    targets = resolve_execution_targets(job, log=log)
     scope = job.get("scope") or "lan"
-    profile = job.get("profile") or "discovery"
+    profile = "discovery_nuclei" if stages.get("vulnerability") else "discovery"
+    cidrs = [row["value"] for row in targets if row["type"] in {"ip", "cidr"}]
     if os.environ.get("SCAN_DRY_RUN") == "1":
         _log("SCAN_DRY_RUN=1 — emitting sample results", log)
-        return dry_run(cidrs, scope, profile)
-    if not cidrs:
-        raise RuntimeError("No CIDRs configured for this scan")
+        return dry_run(cidrs or [row["value"] for row in targets], scope, profile)
+    if not targets:
+        raise RuntimeError("No targets configured for this scan")
 
-    hosts = run_naabu(cidrs, log=log)
-    http_info = run_httpx(hosts, log=log)
+    port_mode = stages.get("port_mode") or PORT_MODE_NONE
+    hosts: list[dict[str, Any]] = []
+    if port_mode != PORT_MODE_NONE:
+        hosts = run_naabu(
+            [row["value"] for row in targets],
+            port_mode=port_mode,
+            custom_ports=stages.get("custom_ports") or [],
+            intensity=intensity,
+            exclude_hosts=_exclusion_hosts(job),
+            log=log,
+        )
+    elif stages.get("discovery"):
+        _log("Discovery enabled with port mode none; skipping naabu", log)
+    http_info: list[dict[str, Any]] = []
+    if stages.get("fingerprint", True):
+        probe_hosts = hosts or [{"ip": row["value"]} for row in targets if row["type"] in {"ip", "fqdn"}]
+        http_info = run_httpx(probe_hosts, intensity=intensity, log=log)
     devices = merge_devices(hosts, http_info, scope)
     attach_hostnames(devices, log=log)
     enrich_identities(devices, log=log)
     findings: list[dict[str, Any]] = []
-    if profile == "discovery_nuclei":
-        targets = [h["url"] for h in http_info if h.get("url")]
-        if not targets:
-            targets = [f"{h['ip']}:{h['port']}" for h in hosts]
+    if stages.get("vulnerability"):
+        nuclei_targets = [h["url"] for h in http_info if h.get("url")]
+        if not nuclei_targets:
+            nuclei_targets = [f"{h['ip']}:{h['port']}" for h in hosts if h.get("ip") and h.get("port")]
+        if not nuclei_targets:
+            nuclei_targets = [row["value"] for row in targets]
         findings = run_nuclei(
-            targets,
-            severities=job.get("nuclei_severities") or "critical,high,medium",
-            tags=job.get("nuclei_tags") or "",
+            nuclei_targets,
+            severities=stages.get("nuclei_severities") or "critical,high,medium",
+            tags=stages.get("nuclei_tags") or "",
+            intensity=intensity,
             log=log,
         )
         apply_nuclei_hostnames(devices, findings)
     finalize_devices(devices)
     named = sum(1 for d in devices if usable_hostname(d.get("hostname") or ""))
     _log(f"Hostnames resolved on agent: {named}/{len(devices)}", log)
-    return {"devices": devices, "findings": findings}
+    return {"devices": devices, "findings": findings, "provenance": collect_tool_versions(log=log)}
 
 
-def run_naabu(cidrs: list[str], log: LogFn | None = None) -> list[dict[str, Any]]:
+def resolve_execution_targets(job: dict[str, Any], log: LogFn | None = None) -> list[dict[str, str]]:
+    import ipaddress
+
+    exclusions = []
+    for row in job.get("exclusions") or []:
+        kind = row.get("type") or row.get("exclusion_type")
+        value = row.get("normalized") or row.get("normalized_value") or row.get("value")
+        if not value:
+            continue
+        if kind == "ip":
+            exclusions.append(ipaddress.ip_network(ipaddress.ip_address(value)))
+        elif kind == "cidr":
+            exclusions.append(ipaddress.ip_network(value, strict=False))
+        elif kind == "range" and "-" in value:
+            start, _, end = value.partition("-")
+            exclusions.extend(ipaddress.summarize_address_range(ipaddress.ip_address(start), ipaddress.ip_address(end)))
+    resolved: list[dict[str, str]] = []
+    for row in job_targets(job):
+        kind = row.get("type") or "cidr"
+        value = row.get("value") or ""
+        if kind == "fqdn":
+            kept = _keep_fqdn(value, exclusions, log=log)
+            if kept:
+                resolved.append({"type": "fqdn", "value": value})
+            continue
+        try:
+            network = ipaddress.ip_network(value, strict=False)
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid target {value}") from exc
+        if any(network.overlaps(exc) for exc in exclusions):
+            remaining = list(network.address_exclude(exc)) if False else [network]
+            for exclusion in exclusions:
+                nxt = []
+                for current in remaining:
+                    if current.overlaps(exclusion) and current.version == exclusion.version:
+                        if exclusion.supernet_of(current) or exclusion == current:
+                            continue
+                        if current.supernet_of(exclusion):
+                            nxt.extend(current.address_exclude(exclusion))
+                        continue
+                    nxt.append(current)
+                remaining = nxt
+            resolved.extend({"type": "cidr", "value": str(item)} for item in remaining)
+        else:
+            resolved.append({"type": kind, "value": value})
+    if job_targets(job) and not resolved:
+        raise RuntimeError("Exclusions remove all targets")
+    return resolved
+
+
+def _keep_fqdn(fqdn: str, exclusions: list, log: LogFn | None = None) -> bool:
+    try:
+        infos = socket.getaddrinfo(fqdn, None)
+    except socket.gaierror:
+        _log(f"FQDN {fqdn} did not resolve; excluding fail-closed", log)
+        return False
+    ips = {item[4][0] for item in infos if item[4]}
+    import ipaddress
+
+    for ip in ips:
+        addr = ipaddress.ip_address(ip)
+        if any(addr in network for network in exclusions):
+            _log(f"FQDN {fqdn} resolved to excluded address {ip}; excluding fail-closed", log)
+            return False
+    return True
+
+
+def _exclusion_hosts(job: dict[str, Any]) -> list[str]:
+    hosts = []
+    for row in job.get("exclusions") or []:
+        kind = row.get("type") or row.get("exclusion_type")
+        value = row.get("normalized") or row.get("value")
+        if kind == "ip" and value:
+            hosts.append(value)
+    return hosts
+
+
+def collect_tool_versions(log: LogFn | None = None) -> dict[str, Any]:
+    versions = {
+        "runtime_version": os.environ.get("SCAN_RUNTIME_VERSION") or None,
+        "naabu_version": _tool_version("naabu"),
+        "httpx_version": _tool_version(_pd_httpx() or "httpx"),
+        "nuclei_version": _tool_version("nuclei"),
+        "nuclei_templates": _nuclei_template_version(),
+    }
+    return {key: value for key, value in versions.items() if value}
+
+
+def _tool_version(name: str | None) -> str | None:
+    if not name:
+        return None
+    binary = name if os.path.isabs(name) else _which(name)
+    if not binary:
+        return None
+    proc = subprocess.run([binary, "-version"], capture_output=True, text=True)
+    text = (proc.stdout or proc.stderr or "").strip()
+    if not text:
+        return None
+    return text.splitlines()[0][:200]
+
+
+def _nuclei_template_version() -> str | None:
+    binary = _which("nuclei")
+    if not binary:
+        return None
+    proc = subprocess.run([binary, "-tl", "-silent"], capture_output=True, text=True)
+    # Do not invent a template commit. Only record a path hint when nuclei reports one.
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    for line in combined.splitlines():
+        if "templates" in line.lower() and any(token in line.lower() for token in ("version", "commit", "release")):
+            return line.strip()[:200]
+    return None
+
+
+def run_naabu(
+    targets: list[str],
+    log: LogFn | None = None,
+    *,
+    port_mode: str = "common",
+    custom_ports: list[str] | None = None,
+    intensity: dict[str, Any] | None = None,
+    exclude_hosts: list[str] | None = None,
+) -> list[dict[str, Any]]:
     binary = _which("naabu")
     if not binary:
         raise RuntimeError("naabu is not installed")
-    cmd = [binary, "-host", ",".join(cidrs), "-top-ports", "100", "-json", "-silent"]
+    cmd = build_naabu_command(
+        binary,
+        targets,
+        port_mode=port_mode,
+        custom_ports=custom_ports,
+        intensity=intensity,
+        exclude_hosts=exclude_hosts,
+    )
+    if cmd is None:
+        return []
     return _parse_jsonl(_run(cmd, log))
 
 
@@ -136,7 +297,12 @@ def _is_pd_httpx(path: str) -> bool:
     return "projectdiscovery" in text or "current version" in text
 
 
-def run_httpx(hosts: list[dict[str, Any]], log: LogFn | None = None) -> list[dict[str, Any]]:
+def run_httpx(
+    hosts: list[dict[str, Any]],
+    log: LogFn | None = None,
+    *,
+    intensity: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     if not hosts:
         return []
     binary = _pd_httpx()
@@ -153,30 +319,25 @@ def run_httpx(hosts: list[dict[str, Any]], log: LogFn | None = None) -> list[dic
                 handle.write(f"{ip}\n")
         path = handle.name
     try:
-        cmd = [
-            binary,
-            "-l",
-            path,
-            "-json",
-            "-silent",
-            "-title",
-            "-tech-detect",
-            "-status-code",
-            "-cname",
-            "-web-server",
-            "-tls-grab",
-        ]
+        cmd = build_httpx_command(binary, path, intensity=intensity, tls_grab=True)
         try:
             return _parse_jsonl(_run(cmd, log))
         except RuntimeError as exc:
             _log(f"httpx tls-grab failed ({exc}); retrying without it", log)
-            cmd = cmd[:-1]
+            cmd = build_httpx_command(binary, path, intensity=intensity, tls_grab=False)
             return _parse_jsonl(_run(cmd, log))
     finally:
         Path(path).unlink(missing_ok=True)
 
 
-def run_nuclei(targets: list[str], severities: str, tags: str, log: LogFn | None = None) -> list[dict[str, Any]]:
+def run_nuclei(
+    targets: list[str],
+    severities: str,
+    tags: str,
+    log: LogFn | None = None,
+    *,
+    intensity: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     if not targets:
         return []
     binary = _which("nuclei")
@@ -186,9 +347,7 @@ def run_nuclei(targets: list[str], severities: str, tags: str, log: LogFn | None
         handle.write("\n".join(targets) + "\n")
         path = handle.name
     try:
-        cmd = [binary, "-l", path, "-jsonl", "-silent", "-severity", severities]
-        if tags:
-            cmd.extend(["-tags", tags])
+        cmd = build_nuclei_command(binary, path, severities=severities, tags=tags, intensity=intensity)
         rows = _parse_jsonl(_run(cmd, log))
     finally:
         Path(path).unlink(missing_ok=True)

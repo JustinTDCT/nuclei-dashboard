@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0005_asset_correlation_lifecycle` (after frozen `0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, and `0004_asset_observation_integrity`).
+Current head revision: `0006_scan_definition_execution` (after frozen `0001_baseline` through `0005_asset_correlation_lifecycle`).
 
-`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, and `0004_asset_observation_integrity` are immutable. Phase 1C schema lives in `0005_asset_correlation_lifecycle`.
+`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, `0004_asset_observation_integrity`, and `0005_asset_correlation_lifecycle` are immutable. Phase 1D schema lives in `0006_scan_definition_execution`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -30,6 +30,8 @@ Current head revision: `0005_asset_correlation_lifecycle` (after frozen `0001_ba
 `alembic downgrade` from `0004_asset_observation_integrity` is **refused**. It would restore over-coarse observation idempotence and undo expected-lifecycle / identifier hygiene.
 
 `alembic downgrade` from `0005_asset_correlation_lifecycle` is **refused**. It would destroy correlation decisions, domain events, merge lineage, and identifier correction history.
+
+`alembic downgrade` from `0006_scan_definition_execution` is **refused**. It would destroy authorized WAN targets, scan definition associations, exclusions, execution snapshots, and schedule history.
 
 ### Fresh install
 
@@ -59,7 +61,7 @@ alembic upgrade head
 Startup **fails closed** and refuses to stamp or upgrade when:
 
 - some Phase 0 tables exist but the complete Phase 0 set does not, or
-- any Phase 1A/1B/1C table or marker column is present and `alembic_version` is missing (including a database that only has `sites`/`networks`, `assets`, `devices.asset_id`, `devices.site_id`, `assets.merged_into_asset_id`, or `asset_identifiers.validity`).
+- any Phase 1A/1B/1C/1D table or marker column is present and `alembic_version` is missing (including a database that only has `sites`/`networks`, `assets`, `devices.asset_id`, `devices.site_id`, `assets.merged_into_asset_id`, `asset_identifiers.validity`, `authorized_wan_targets`, or `scans.definition_revision`).
 
 Do not guess. Inspect the database and repair or restore it before retrying.
 
@@ -165,6 +167,14 @@ Keep agent trust material in `./agent-certs`. Caddy's `./certs` directory is onl
 Do not embed environment-specific CA material in the repository.
 
 Development opt-out only: `AGENT_TLS_VERIFY=0` or `TLS_VERIFY=0`.
+
+## Phase 1D scan definitions and immutable runs
+
+`0006_scan_definition_execution` evolves existing `scans` into editable Scan Definitions and `scan_jobs` into immutable Scan Runs. New Runs store `execution_snapshot` JSONB. Historical pre-1D jobs keep `snapshot_version = legacy_pre_1d` and a NULL snapshot.
+
+WAN Subnet rows are copied to `authorized_wan_targets`. LAN `subnet_ids` become `scan_network_targets`. Site is taken only from the Agent/Site relationship. Invalid legacy LAN scans are preserved, disabled, and marked `needs_review`.
+
+Workers execute the snapshot. Agent dispatch uses the common authorized pool, Any Available or Preferred + Failover, atomic claim, and `waiting_for_agent` / `missed`. `scan_missed_unavailable_agent` is a DomainEvent only; no alert routing.
 
 ## Viewer / Auditor
 

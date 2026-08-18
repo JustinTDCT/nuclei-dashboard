@@ -175,28 +175,46 @@ class ScanIn(BaseModel):
     name: str
     scope: str = Field(pattern="^(wan|lan)$")
     agent_id: int | None = None
+    site_id: int | None = None
     profile: str = Field(default="discovery", pattern="^(discovery|discovery_nuclei)$")
     nuclei_severities: str = "critical,high,medium"
     nuclei_tags: str = ""
     subnet_ids: list[int] = []
+    network_ids: list[int] = []
+    wan_target_ids: list[int] = []
     interval_minutes: int | None = None
     is_enabled: bool = True
+    stage_config: dict[str, Any] | None = None
+    intensity_config: dict[str, Any] | None = None
+    schedule_config: dict[str, Any] | None = None
 
 
 class ScanOut(BaseModel):
     id: int
     tenant_id: int
     agent_id: int | None
+    site_id: int | None = None
     name: str
     scope: str
     profile: str
     nuclei_severities: str
     nuclei_tags: str
     subnet_ids: list[Any]
+    network_ids: list[int] = []
+    wan_target_ids: list[int] = []
     interval_minutes: int | None
     is_enabled: bool
     last_scheduled_at: datetime | None
+    next_run_at: datetime | None = None
+    definition_revision: int = 1
+    stage_config: dict[str, Any] = {}
+    intensity_config: dict[str, Any] = {}
+    schedule_config: dict[str, Any] = {}
+    archived_at: datetime | None = None
+    needs_review: bool = False
+    dispatch_summary: dict[str, Any] | None = None
     created_at: datetime
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -207,6 +225,7 @@ class ScanJobOut(BaseModel):
     tenant_id: int
     status: str
     claimed_by: str | None
+    claimed_agent_id: int | None = None
     error: str | None
     hosts_found: int
     findings_count: int
@@ -215,6 +234,59 @@ class ScanJobOut(BaseModel):
     finished_at: datetime | None
     scan_name: str | None = None
     scope: str | None = None
+    trigger_type: str | None = None
+    scheduled_for: datetime | None = None
+    definition_revision: int | None = None
+    snapshot_version: str | None = None
+    waiting_since: datetime | None = None
+    wait_expires_at: datetime | None = None
+    execution_snapshot: dict[str, Any] | None = None
+    runtime_provenance: dict[str, Any] | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AuthorizedWanTargetIn(BaseModel):
+    name: str = ""
+    target_type: str = Field(pattern="^(ip|cidr|fqdn)$")
+    value: str = Field(min_length=1, max_length=255)
+
+
+class AuthorizedWanTargetOut(BaseModel):
+    id: int
+    tenant_id: int
+    name: str
+    target_type: str
+    value: str
+    normalized_value: str
+    archived_at: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ScanExclusionIn(BaseModel):
+    scope: str = Field(pattern="^(global|tenant|site|network|scan)$")
+    exclusion_type: str = Field(pattern="^(ip|cidr|range)$")
+    value: str = Field(min_length=1, max_length=255)
+    tenant_id: int | None = None
+    site_id: int | None = None
+    network_id: int | None = None
+    scan_id: int | None = None
+
+
+class ScanExclusionOut(BaseModel):
+    id: int
+    scope: str
+    exclusion_type: str
+    value: str
+    normalized_value: str
+    tenant_id: int | None
+    site_id: int | None
+    network_id: int | None
+    scan_id: int | None
+    archived_at: datetime | None
+    created_at: datetime
 
     model_config = {"from_attributes": True}
 
@@ -298,6 +370,20 @@ class SettingsOut(BaseModel):
     asset_inactive_days: int = 30
     default_nuclei_severities: str = "critical,high,medium"
     default_timezone: str = "UTC"
+    preferred_agent_grace_seconds: int = 60
+    agent_job_wait_minutes: int = 30
+    scan_cap_naabu_rate: int = 5000
+    scan_cap_naabu_concurrency: int = 100
+    scan_cap_naabu_timeout_ms: int = 10000
+    scan_cap_naabu_retries: int = 5
+    scan_cap_httpx_rate: int = 500
+    scan_cap_httpx_threads: int = 150
+    scan_cap_httpx_timeout: int = 30
+    scan_cap_httpx_retries: int = 5
+    scan_cap_nuclei_rate: int = 500
+    scan_cap_nuclei_concurrency: int = 100
+    scan_cap_nuclei_timeout: int = 30
+    scan_cap_nuclei_retries: int = 5
 
 
 class DisplaySettingsOut(BaseModel):

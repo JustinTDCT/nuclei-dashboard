@@ -10,8 +10,11 @@ from app.crypto_util import new_nonce, verify_ed25519
 from app.database import get_db
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
-from app.locality import LanScanInvalidError, assert_scan_executable
-from app.models import Agent, Device, Scan, ScanJob
+from app.locality import LanScanInvalidError, assert_scan_executable, is_authorized
+from app.models import JOB_QUEUED, JOB_WAITING_FOR_AGENT, Agent, Device, Network, Scan, ScanJob
+from app.scan_dispatch import agent_may_claim_now, atomic_claim_job, is_agent_healthy
+from app.scan_security import ExecutionBlocked, revalidate_lan_claim
+from app.scan_snapshot import merge_provenance
 from app.schemas import AgentTokenIn, DeviceReport, EnrollIn, FindingReport
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -130,38 +133,89 @@ def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_d
         db.query(ScanJob)
         .join(Scan, Scan.id == ScanJob.scan_id)
         .filter(
-            ScanJob.status == "queued",
+            ScanJob.status.in_((JOB_QUEUED, JOB_WAITING_FOR_AGENT)),
             Scan.scope == "lan",
-            Scan.agent_id == agent.id,
         )
         .order_by(ScanJob.created_at.asc())
-        .limit(5)
+        .limit(25)
         .all()
     )
     payloads = []
     for job in jobs:
+        if not _agent_in_job_pool(job, agent):
+            continue
+        if job.execution_snapshot:
+            if not _any_snapshot_agent_authorized(db, job):
+                fail_job(db, job, "Agent is not authorized for network after queueing")
+                continue
+            try:
+                revalidate_lan_claim(db, job, agent)
+            except ExecutionBlocked:
+                continue
+            agents = _agents_for_snapshot(db, job)
+            if not agent_may_claim_now(agent, job.execution_snapshot, agents):
+                continue
+            payloads.append(job_payload(db, job))
+            if len(payloads) >= 5:
+                break
+            continue
+        if job.scan.agent_id != agent.id:
+            continue
         try:
             assert_scan_executable(db, job.scan)
             payloads.append(job_payload(db, job))
         except LanScanInvalidError as exc:
             fail_job(db, job, exc.detail)
+        if len(payloads) >= 5:
+            break
     return payloads
 
 
 @router.post("/jobs/{job_id}/start")
 def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = Depends(get_db)):
-    job = _claim_lan_job(db, job_id, agent)
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    if not job or not job.scan or job.scan.scope != "lan":
+        raise HTTPException(status_code=404, detail="Job not available")
+    if job.status not in {JOB_QUEUED, JOB_WAITING_FOR_AGENT}:
+        raise HTTPException(status_code=404, detail="Job not available")
+    if not _agent_in_job_pool(job, agent):
+        raise HTTPException(status_code=404, detail="Job not available")
     try:
-        assert_scan_executable(db, job.scan)
+        if job.execution_snapshot:
+            revalidate_lan_claim(db, job, agent)
+            agents = _agents_for_snapshot(db, job)
+            if not is_agent_healthy(agent):
+                raise HTTPException(status_code=409, detail="Agent is not healthy")
+            if not agent_may_claim_now(agent, job.execution_snapshot, agents):
+                raise HTTPException(status_code=409, detail="Preferred agent still has claim priority")
+        else:
+            if job.scan.agent_id != agent.id:
+                raise HTTPException(status_code=404, detail="Job not available")
+            assert_scan_executable(db, job.scan)
         payload = job_payload(db, job)
+    except ExecutionBlocked as exc:
+        fail_job(db, job, exc.detail)
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     except LanScanInvalidError as exc:
         fail_job(db, job, exc.detail)
         raise HTTPException(status_code=409, detail=exc.detail) from exc
-    job.status = "running"
-    job.claimed_by = agent.uuid
-    job.started_at = _now()
+    claimed = atomic_claim_job(db, job.id, agent)
+    if claimed is None:
+        raise HTTPException(status_code=409, detail="Job already claimed")
+    try:
+        if claimed.execution_snapshot:
+            revalidate_lan_claim(db, claimed, agent)
+        else:
+            assert_scan_executable(db, claimed.scan)
+    except (ExecutionBlocked, LanScanInvalidError) as exc:
+        fail_job(db, claimed, getattr(exc, "detail", str(exc)))
+        raise HTTPException(status_code=409, detail=getattr(exc, "detail", str(exc))) from exc
+    claimed.runtime_provenance = merge_provenance(
+        claimed.runtime_provenance,
+        {"worker": "agent", "claimed_agent_id": agent.id, "agent_uuid": agent.uuid},
+    )
     db.commit()
-    return payload
+    return job_payload(db, claimed)
 
 
 @router.post("/jobs/{job_id}/devices")
@@ -208,15 +262,53 @@ def complete_job(
     return {"ok": True, "status": job.status}
 
 
-def _claim_lan_job(db: Session, job_id: int, agent: Agent) -> ScanJob:
-    job = db.query(ScanJob).filter(ScanJob.id == job_id, ScanJob.status == "queued").first()
-    if not job or not job.scan or job.scan.scope != "lan" or job.scan.agent_id != agent.id:
-        raise HTTPException(status_code=404, detail="Job not available")
-    return job
-
-
 def _owned_job(db: Session, job_id: int, claimed_by: str) -> ScanJob:
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
     if not job or job.claimed_by != claimed_by:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@router.post("/jobs/{job_id}/provenance")
+def post_provenance(
+    job_id: int,
+    body: dict,
+    agent: Agent = Depends(current_agent),
+    db: Session = Depends(get_db),
+):
+    job = _owned_job(db, job_id, agent.uuid)
+    job.runtime_provenance = merge_provenance(job.runtime_provenance, body)
+    db.commit()
+    return {"ok": True}
+
+
+def _agent_in_job_pool(job: ScanJob, agent: Agent) -> bool:
+    snapshot = job.execution_snapshot or {}
+    eligible = (snapshot.get("dispatch") or {}).get("eligible_agent_ids")
+    if eligible is not None:
+        return agent.id in set(eligible)
+    return job.scan is not None and job.scan.agent_id == agent.id
+
+
+def _agents_for_snapshot(db: Session, job: ScanJob) -> dict[int, Agent]:
+    ids = ((job.execution_snapshot or {}).get("dispatch") or {}).get("eligible_agent_ids") or []
+    if not ids:
+        return {}
+    rows = db.query(Agent).filter(Agent.id.in_(ids)).all()
+    return {row.id: row for row in rows}
+
+
+def _any_snapshot_agent_authorized(db: Session, job: ScanJob) -> bool:
+    snapshot = job.execution_snapshot or {}
+    network_ids = [row["id"] for row in (snapshot.get("targets") or {}).get("networks") or []]
+    if not network_ids:
+        return False
+    networks = db.query(Network).filter(Network.id.in_(network_ids)).all()
+    if len(networks) != len(network_ids):
+        return False
+    if any(network.archived_at is not None or network.tenant_id != job.tenant_id for network in networks):
+        return False
+    for agent_id in (snapshot.get("dispatch") or {}).get("eligible_agent_ids") or []:
+        if all(is_authorized(db, network.id, agent_id) for network in networks):
+            return True
+    return False

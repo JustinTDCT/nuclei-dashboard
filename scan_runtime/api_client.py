@@ -88,6 +88,11 @@ class CentralClient:
             "POST", f"/api/agent/jobs/{job_id}/findings", headers=_auth(token), json=findings
         ).json()
 
+    def provenance(self, token: str, job_id: int, payload: dict[str, Any]) -> dict:
+        return self._request(
+            "POST", f"/api/agent/jobs/{job_id}/provenance", headers=_auth(token), json=payload
+        ).json()
+
     def complete(self, token: str, job_id: int, ok: bool = True, error: str | None = None) -> dict:
         params = {"ok": str(ok).lower()}
         if error:
@@ -128,6 +133,9 @@ class ScannerClient:
 
     def findings(self, job_id: int, findings: list[dict]) -> dict:
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/findings", json=findings).json()
+
+    def provenance(self, job_id: int, payload: dict[str, Any]) -> dict:
+        return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/provenance", json=payload).json()
 
     def complete(self, job_id: int, ok: bool = True, error: str | None = None) -> dict:
         params = {"ok": str(ok).lower()}

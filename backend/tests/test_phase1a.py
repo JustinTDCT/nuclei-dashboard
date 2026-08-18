@@ -16,6 +16,7 @@ BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_s
 PHASE1A_REVISION = "0002_sites_networks"
 PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
+PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
@@ -214,7 +215,7 @@ def test_upgrade_from_0001_preserves_representative_phase0_data(reset_db):
     command.upgrade(alembic_config(), "0001_baseline")
     ids = _insert_phase0_representative(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE1C_HEAD
+    assert revision == head_revision() == current_revision() == PHASE1D_HEAD
     assert PHASE1B_TABLES.issubset(_tables(engine))
 
     db = SessionLocal()

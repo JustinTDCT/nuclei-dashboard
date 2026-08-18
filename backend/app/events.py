@@ -16,6 +16,7 @@ from app.models import (
     EVENT_ASSET_BECAME_INACTIVE,
     EVENT_NEW_ASSET,
     EVENT_PREVIOUSLY_INACTIVE_RETURNED,
+    EVENT_SCAN_MISSED_UNAVAILABLE_AGENT,
     SOURCE_SCANNER,
     DomainEvent,
 )
@@ -100,9 +101,29 @@ def emit_previously_inactive_returned(db: Session, asset, *, observation_key: st
     )
 
 
+def emit_scan_missed_unavailable_agent(db: Session, job) -> tuple[DomainEvent, bool]:
+    key = f"scan_missed_unavailable_agent:{job.id}"
+    site_id = None
+    snapshot = job.execution_snapshot or {}
+    site = snapshot.get("site") or {}
+    if isinstance(site, dict):
+        site_id = site.get("id")
+    return emit_domain_event(
+        db,
+        event_type=EVENT_SCAN_MISSED_UNAVAILABLE_AGENT,
+        tenant_id=job.tenant_id,
+        site_id=site_id,
+        asset_id=None,
+        idempotence_key=key,
+        details={"scan_job_id": job.id, "scan_id": job.scan_id},
+        source="scheduler",
+    )
+
+
 __all__ = [
     "emit_asset_became_inactive",
     "emit_domain_event",
     "emit_new_asset",
     "emit_previously_inactive_returned",
+    "emit_scan_missed_unavailable_agent",
 ]
