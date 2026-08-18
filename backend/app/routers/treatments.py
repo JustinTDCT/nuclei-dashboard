@@ -27,6 +27,7 @@ from app.treatments import (
     revoke_treatment,
     update_compensating_control,
 )
+from app.usernames import load_usernames
 
 router = APIRouter(tags=["treatments"])
 
@@ -38,16 +39,21 @@ def _require_tenant(db: Session, tenant_id: int) -> Tenant:
     return tenant
 
 
-def _usernames(db: Session, *user_ids: int | None) -> dict[int, str]:
-    ids = [item for item in user_ids if item]
-    if not ids:
-        return {}
-    rows = db.query(User.id, User.username).filter(User.id.in_(ids)).all()
-    return {row.id: row.username for row in rows}
+def _treatment_user_ids(rows: list[FindingTreatment]) -> list[int | None]:
+    ids: list[int | None] = []
+    for row in rows:
+        ids.extend((row.created_by_user_id, row.reviewed_by_user_id, row.revoked_by_user_id))
+        for control in row.compensating_controls:
+            ids.extend((control.created_by_user_id, control.retired_by_user_id))
+    return ids
 
 
-def serialize_compensating_control(db: Session, row: CompensatingControl) -> CompensatingControlOut:
-    names = _usernames(db, row.created_by_user_id, row.retired_by_user_id)
+def serialize_compensating_control(
+    db: Session,
+    row: CompensatingControl,
+    names: dict[int, str] | None = None,
+) -> CompensatingControlOut:
+    resolved = names if names is not None else load_usernames(db, (row.created_by_user_id, row.retired_by_user_id))
     return CompensatingControlOut(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -57,18 +63,22 @@ def serialize_compensating_control(db: Session, row: CompensatingControl) -> Com
         evidence_notes=row.evidence_notes,
         status=row.status,
         created_by_user_id=row.created_by_user_id,
-        created_by_username=names.get(row.created_by_user_id) if row.created_by_user_id else None,
+        created_by_username=resolved.get(row.created_by_user_id) if row.created_by_user_id else None,
         created_at=row.created_at,
         updated_at=row.updated_at,
         retired_at=row.retired_at,
         retired_by_user_id=row.retired_by_user_id,
-        retired_by_username=names.get(row.retired_by_user_id) if row.retired_by_user_id else None,
+        retired_by_username=resolved.get(row.retired_by_user_id) if row.retired_by_user_id else None,
         retirement_reason=row.retirement_reason,
     )
 
 
-def serialize_treatment(db: Session, row: FindingTreatment) -> FindingTreatmentOut:
-    names = _usernames(db, row.created_by_user_id, row.reviewed_by_user_id, row.revoked_by_user_id)
+def serialize_treatment(
+    db: Session,
+    row: FindingTreatment,
+    names: dict[int, str] | None = None,
+) -> FindingTreatmentOut:
+    resolved = names if names is not None else load_usernames(db, _treatment_user_ids([row]))
     controls = sorted(row.compensating_controls, key=lambda item: item.id)
     return FindingTreatmentOut(
         id=row.id,
@@ -81,11 +91,11 @@ def serialize_treatment(db: Session, row: FindingTreatment) -> FindingTreatmentO
         evidence_notes=row.evidence_notes,
         source=row.source,
         created_by_user_id=row.created_by_user_id,
-        created_by_username=names.get(row.created_by_user_id) if row.created_by_user_id else None,
+        created_by_username=resolved.get(row.created_by_user_id) if row.created_by_user_id else None,
         reviewed_by_user_id=row.reviewed_by_user_id,
-        reviewed_by_username=names.get(row.reviewed_by_user_id) if row.reviewed_by_user_id else None,
+        reviewed_by_username=resolved.get(row.reviewed_by_user_id) if row.reviewed_by_user_id else None,
         revoked_by_user_id=row.revoked_by_user_id,
-        revoked_by_username=names.get(row.revoked_by_user_id) if row.revoked_by_user_id else None,
+        revoked_by_username=resolved.get(row.revoked_by_user_id) if row.revoked_by_user_id else None,
         created_at=row.created_at,
         updated_at=row.updated_at,
         reviewed_at=row.reviewed_at,
@@ -94,8 +104,13 @@ def serialize_treatment(db: Session, row: FindingTreatment) -> FindingTreatmentO
         revoked_at=row.revoked_at,
         revocation_reason=row.revocation_reason,
         review_notes=row.review_notes,
-        compensating_controls=[serialize_compensating_control(db, item) for item in controls],
+        compensating_controls=[serialize_compensating_control(db, item, names=resolved) for item in controls],
     )
+
+
+def serialize_treatments(db: Session, rows: list[FindingTreatment]) -> list[FindingTreatmentOut]:
+    names = load_usernames(db, _treatment_user_ids(rows))
+    return [serialize_treatment(db, row, names=names) for row in rows]
 
 
 def _run(fn, db: Session):
@@ -123,7 +138,7 @@ def get_treatments(
         rows = list_treatments(db, tenant_id, asset_finding_id)
     except TreatmentError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    return [serialize_treatment(db, row) for row in rows]
+    return serialize_treatments(db, rows)
 
 
 @router.post(

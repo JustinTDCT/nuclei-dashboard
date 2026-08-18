@@ -709,3 +709,256 @@ def test_exactly_one_subject_and_list_query_bound(reset_db):
             db.rollback()
         finally:
             db.close()
+
+
+@requires_postgres
+def test_merge_audits_control_reference_move_and_duplicate_remove(reset_db):
+    from app.database import SessionLocal
+    from app.finding_lifecycle import merge_asset_findings
+    from app.models import Asset, AssetFinding, AuditLog, ComplianceControl
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        tenant_id = world["tenant"]["id"]
+        first = _open_finding(client, token, world, hostname="keep-map", ip="10.1.0.20")
+        second = _open_finding(client, token, world, hostname="donor-map", ip="10.1.0.21")
+        keep_af = first["asset_findings"][0]
+        donor_af = [row for row in second["asset_findings"] if row["id"] != keep_af["id"]][0]
+        db = SessionLocal()
+        try:
+            shared, unique = (
+                db.query(ComplianceControl)
+                .filter(ComplianceControl.control_key.in_(["03.01.01", "03.05.03"]))
+                .order_by(ComplianceControl.control_key.asc())
+                .all()
+            )
+        finally:
+            db.close()
+        headers = _headers(token)
+        for subject_id, control_id in (
+            (keep_af["id"], shared.id),
+            (donor_af["id"], shared.id),
+            (donor_af["id"], unique.id),
+        ):
+            added = client.post(
+                f"/api/tenants/{tenant_id}/control-references",
+                headers=headers,
+                json={
+                    "control_id": control_id,
+                    "subject_type": "asset_finding",
+                    "subject_id": subject_id,
+                    "reference_type": "evidence",
+                },
+            )
+            assert added.status_code == 200, added.text
+        db = SessionLocal()
+        try:
+            merge_asset_findings(db, target=db.get(Asset, keep_af["asset_id"]), sources=[db.get(Asset, donor_af["asset_id"])])
+            db.commit()
+            keeper = db.get(AssetFinding, keep_af["id"])
+            assert keeper is not None
+            audits = [
+                row
+                for row in db.query(AuditLog).filter(AuditLog.object_type == "control_reference").all()
+                if row.action in {"control_reference.moved", "control_reference.removed"}
+                and (row.details or {}).get("donor_asset_finding_id") == donor_af["id"]
+            ]
+            actions = {row.action for row in audits}
+            assert "control_reference.moved" in actions
+            assert "control_reference.removed" in actions
+            for row in audits:
+                details = row.details or {}
+                assert details["keeper_asset_finding_id"] == keep_af["id"]
+                assert details["control_id"]
+                assert details["reference_id"] == row.object_id
+                assert details["old_subject"] == {"subject_type": "asset_finding", "subject_id": donor_af["id"]}
+                assert details["new_disposition"] in {"moved", "removed"}
+                assert details["reason"]
+                assert row.actor_user_id is None
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_elapsed_treatment_expires_on_mutation_instead_of_supersede(reset_db):
+    from app.database import SessionLocal
+    from app.models import AssetFinding, AuditLog, FindingTreatment, TREATMENT_STATUS_ACTIVE
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        tenant_id = world["tenant"]["id"]
+        opened = _open_finding(client, token, world)
+        af_id = opened["asset_findings"][0]["id"]
+        headers = _headers(token)
+        first = client.post(
+            _treat_url(tenant_id, af_id),
+            headers=headers,
+            json={
+                "treatment_type": "mitigated",
+                "rationale": "Temporary ACL",
+                "expires_at": (_now() + timedelta(hours=2)).isoformat(),
+            },
+        )
+        assert first.status_code == 200, first.text
+        db = SessionLocal()
+        try:
+            row = db.get(FindingTreatment, first.json()["id"])
+            row.expires_at = _now() - timedelta(minutes=5)
+            db.commit()
+        finally:
+            db.close()
+        second = client.post(
+            _treat_url(tenant_id, af_id),
+            headers=headers,
+            json={"treatment_type": "mitigated", "rationale": "Replacement ACL"},
+        )
+        assert second.status_code == 200, second.text
+        db = SessionLocal()
+        try:
+            old = db.get(FindingTreatment, first.json()["id"])
+            new = db.get(FindingTreatment, second.json()["id"])
+            finding = db.get(AssetFinding, af_id)
+            assert old.status == "expired"
+            assert new.status == "active"
+            assert finding.treatment_state == "mitigated"
+            assert finding.technical_state == "open"
+            expired_audits = [
+                row
+                for row in db.query(AuditLog).filter(AuditLog.action == "treatment.expired", AuditLog.object_id == old.id).all()
+            ]
+            assert expired_audits
+            assert expired_audits[0].details["treatment_state"] == "unaddressed"
+            assert not any(
+                row.action == "treatment.superseded" and row.object_id == old.id
+                for row in db.query(AuditLog).filter(AuditLog.object_id == old.id).all()
+            )
+        finally:
+            db.close()
+
+        pending = client.post(
+            _treat_url(tenant_id, af_id),
+            headers=headers,
+            json={"treatment_type": "accepted_risk", "rationale": "Accept after elapsed mitigation"},
+        )
+        assert pending.json()["status"] == "pending_review"
+        db = SessionLocal()
+        try:
+            current = (
+                db.query(FindingTreatment)
+                .filter(FindingTreatment.asset_finding_id == af_id, FindingTreatment.status == TREATMENT_STATUS_ACTIVE)
+                .one()
+            )
+            current.expires_at = _now() - timedelta(minutes=1)
+            db.commit()
+            active_id = current.id
+        finally:
+            db.close()
+        approved = client.post(_treat_url(tenant_id, af_id, f"/{pending.json()['id']}/approve"), headers=headers, json={})
+        assert approved.status_code == 200, approved.text
+        db = SessionLocal()
+        try:
+            elapsed = db.get(FindingTreatment, active_id)
+            accepted = db.get(FindingTreatment, pending.json()["id"])
+            finding = db.get(AssetFinding, af_id)
+            assert elapsed.status == "expired"
+            assert accepted.status == "active"
+            assert finding.treatment_state == "accepted_risk"
+            assert finding.technical_state == "open"
+            assert not any(
+                row.action == "treatment.superseded" and row.object_id == elapsed.id
+                for row in db.query(AuditLog).filter(AuditLog.object_id == elapsed.id).all()
+            )
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_control_reference_list_query_count_is_bounded(reset_db):
+    from app.compliance import add_control_reference, create_control, create_framework
+    from app.database import SessionLocal, engine
+    from app.models import User
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        tenant_id = world["tenant"]["id"]
+        opened = _open_finding(client, admin, world)
+        af = opened["asset_findings"][0]
+        db = SessionLocal()
+        try:
+            actor = db.query(User).filter(User.username == "admin").one()
+            framework = create_framework(db, actor=actor, slug="bulk-map", name="Bulk Map", version="1")
+            for index in range(250):
+                control = create_control(
+                    db,
+                    actor=actor,
+                    framework_id=framework.id,
+                    control_key=f"BM-{index:03d}",
+                    title=f"Bulk {index}",
+                )
+                add_control_reference(
+                    db,
+                    tenant_id=tenant_id,
+                    control_id=control.id,
+                    subject_type="asset_finding",
+                    subject_id=af["id"],
+                    actor=actor,
+                    reference_type="related",
+                )
+            db.commit()
+        finally:
+            db.close()
+
+        queries = []
+
+        def before_cursor(conn, cursor, statement, parameters, context, executemany):  # noqa: ARG001
+            queries.append(statement)
+
+        listen_on = engine.sync_engine if hasattr(engine, "sync_engine") else engine
+        event.listen(listen_on, "before_cursor_execute", before_cursor)
+        try:
+            listed = client.get(
+                f"/api/tenants/{tenant_id}/control-references?subject_type=asset_finding&subject_id={af['id']}",
+                headers=_headers(admin),
+            )
+            assert listed.status_code == 200
+            assert len(listed.json()) == 250
+            username_lookups = [sql for sql in queries if "from users" in sql.lower() and " in (" in sql.lower()]
+            assert len(username_lookups) == 1
+            assert len(queries) < 25
+            queries.clear()
+            detail = client.get(f"/api/tenants/{tenant_id}/asset-findings/{af['id']}", headers=_headers(admin))
+            assert detail.status_code == 200
+            assert len(detail.json()["control_references"]) == 250
+            username_lookups = [sql for sql in queries if "from users" in sql.lower() and " in (" in sql.lower()]
+            assert len(username_lookups) <= 2
+            assert len(queries) < 40
+        finally:
+            event.remove(listen_on, "before_cursor_execute", before_cursor)
+
+
+@requires_postgres
+def test_builtin_import_rejects_checksum_mismatch(reset_db):
+    import tempfile
+
+    from app.compliance import ComplianceError, import_builtin_framework
+    from app.database import SessionLocal
+    from app.migrate import apply_schema
+    from app.models import ComplianceFramework
+
+    apply_schema()
+    bundle = json.loads(NIST_BUNDLE.read_text())
+    bundle["provenance"]["controls_checksum_sha256"] = "0" * 64
+    db = SessionLocal()
+    try:
+        before = db.query(ComplianceFramework).count()
+        bad = Path(tempfile.gettempdir()) / "bad-checksum-framework.json"
+        bad.write_text(json.dumps(bundle), encoding="utf-8")
+        with pytest.raises(ComplianceError, match="checksum"):
+            import_builtin_framework(db, bad)
+        db.rollback()
+        assert db.query(ComplianceFramework).count() == before
+    finally:
+        db.close()

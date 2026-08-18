@@ -218,15 +218,15 @@ This product uses the NVD API but is not endorsed or certified by the NVD.
 - **Mitigation** may become active immediately when rationale is supplied. Compensating controls are optional documentation.
 - **Accepted risk** and **false positive** start as `pending_review`. They do not change the projection until an Admin or User explicitly approves them. The reviewer is recorded. Separation of duties is not required.
 - A finding has at most one `active` treatment. Activating a new treatment supersedes the previous active record. A pending record does not supersede an active one.
-- **Revoke** and **expire** preserve history. The projection returns to `unaddressed` unless another effective treatment remains. Scheduler expiration runs every 15 minutes; GET endpoints compute `review_overdue` / `expired` display status without mutating rows.
+- **Revoke** and **expire** preserve history. The projection returns to `unaddressed` unless another effective treatment remains. Scheduler expiration runs every 15 minutes; GET endpoints compute `review_overdue` / `expired` display status without mutating rows. Treatment writes also expire any active row whose `expires_at` has already passed, so the persisted history records `expired` rather than `superseded` during the scheduler gap.
 - **Review due** is not expiration. Past `review_due_at` with a future `expires_at` stays active and is marked review overdue.
 - **Compensating controls** belong to a treatment. They are retired, not deleted.
 - **Framework / Control** is a generic catalog. Framework version is part of identity (`slug` + `version`). NIST SP 800-171 Rev. 3 is bundled from the official NIST OSCAL catalog and imported offline. DoD CMMC Level 2 is **not** bundled and is **not** aliased to Rev. 3: current official CMMC Level 2 self-assessment still uses NIST SP 800-171 Rev. 2.
-- Evidence objects (Asset, Asset Finding, Detection Evidence, Treatment, Scan Run) may reference controls. A mapping means related evidence only. It does **not** mean compliant, certified, implemented, or control satisfied.
+- Evidence objects (Asset, Asset Finding, Detection Evidence, Treatment, Scan Run) may reference controls. A mapping means related evidence only. It does **not** mean compliant, certified, implemented, or control satisfied. Asset Finding merge audits automatic mapping moves and duplicate removals.
 - Admin may create/edit/archive custom frameworks and controls and import built-ins. User may manage treatments, compensating controls, and tenant evidence mappings. Viewer is read-only.
 - Phase 2B P1–P4 scoring is unchanged. Treatment remains 0 priority points. `PRIORITY_MODEL_VERSION` stays `2b.1`.
 
-Built-in catalog files live under `backend/app/data/compliance/`. Import is idempotent, transactional, and does not require live Internet access.
+Built-in catalog files live under `backend/app/data/compliance/`. Import is idempotent, transactional, and does not require live Internet access. The importer verifies the recorded control count and SHA-256 provenance checksums before applying a bundle.
 
 ## Viewer / Auditor
 

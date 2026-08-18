@@ -26,6 +26,7 @@ from app.models import (
     Tenant,
     User,
 )
+from app.usernames import load_usernames
 from app.schemas import (
     ControlIn,
     ControlOut,
@@ -47,14 +48,6 @@ def _require_tenant(db: Session, tenant_id: int) -> Tenant:
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return tenant
-
-
-def _usernames(db: Session, *user_ids: int | None) -> dict[int, str]:
-    ids = [item for item in user_ids if item]
-    if not ids:
-        return {}
-    rows = db.query(User.id, User.username).filter(User.id.in_(ids)).all()
-    return {row.id: row.username for row in rows}
 
 
 def _run(fn, db: Session):
@@ -122,8 +115,12 @@ def _subject_of(row: ComplianceControlReference) -> tuple[str, int]:
     raise ComplianceError("Control mapping is missing a subject")
 
 
-def serialize_reference(db: Session, row: ComplianceControlReference) -> ControlReferenceOut:
-    names = _usernames(db, row.created_by_user_id, row.removed_by_user_id)
+def serialize_reference(
+    db: Session,
+    row: ComplianceControlReference,
+    names: dict[int, str] | None = None,
+) -> ControlReferenceOut:
+    resolved = names if names is not None else load_usernames(db, (row.created_by_user_id, row.removed_by_user_id))
     subject_type, subject_id = _subject_of(row)
     control = row.control
     framework = control.framework if control else None
@@ -136,11 +133,11 @@ def serialize_reference(db: Session, row: ComplianceControlReference) -> Control
         reference_type=row.reference_type,
         notes=row.notes,
         created_by_user_id=row.created_by_user_id,
-        created_by_username=names.get(row.created_by_user_id) if row.created_by_user_id else None,
+        created_by_username=resolved.get(row.created_by_user_id) if row.created_by_user_id else None,
         created_at=row.created_at,
         removed_at=row.removed_at,
         removed_by_user_id=row.removed_by_user_id,
-        removed_by_username=names.get(row.removed_by_user_id) if row.removed_by_user_id else None,
+        removed_by_username=resolved.get(row.removed_by_user_id) if row.removed_by_user_id else None,
         removal_reason=row.removal_reason,
         control_key=control.control_key if control else "",
         control_title=control.title if control else "",
@@ -150,6 +147,14 @@ def serialize_reference(db: Session, row: ComplianceControlReference) -> Control
         framework_slug=framework.slug if framework else "",
         mapping_disclaimer=COMPLIANCE_MAPPING_DISCLAIMER,
     )
+
+
+def serialize_references(db: Session, rows: list[ComplianceControlReference]) -> list[ControlReferenceOut]:
+    names = load_usernames(
+        db,
+        [item.created_by_user_id for item in rows] + [item.removed_by_user_id for item in rows],
+    )
+    return [serialize_reference(db, row, names=names) for row in rows]
 
 
 @router.get("/compliance/frameworks", response_model=list[FrameworkOut])
@@ -365,7 +370,7 @@ def get_references(
         )
     except ComplianceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    return [serialize_reference(db, row) for row in rows]
+    return serialize_references(db, rows)
 
 
 @router.post("/tenants/{tenant_id}/control-references", response_model=ControlReferenceOut)

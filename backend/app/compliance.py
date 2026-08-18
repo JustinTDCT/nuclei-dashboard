@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -47,6 +49,8 @@ COMPLIANCE_MAPPING_DISCLAIMER = (
     "A control mapping means this evidence is related to the selected control. "
     "It does not mean the control is implemented, assessed, satisfied, or certified."
 )
+MERGE_REFERENCE_MOVE_REASON = "Asset finding merge reassigned this mapping to the keeper finding."
+MERGE_REFERENCE_REMOVE_REASON = "Duplicate mapping after asset finding merge"
 
 
 class ComplianceError(Exception):
@@ -337,12 +341,53 @@ def _validate_bundle(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict
     return framework, cleaned
 
 
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def bundle_controls_checksum(controls: list[Any]) -> str:
+    return hashlib.sha256(_canonical_json(controls)).hexdigest()
+
+
+def bundle_content_checksum(payload: dict[str, Any]) -> str:
+    stripped = copy.deepcopy(payload)
+    provenance = stripped.get("provenance")
+    if isinstance(provenance, dict):
+        provenance.pop("checksum_sha256", None)
+        provenance.pop("controls_checksum_sha256", None)
+    return hashlib.sha256(_canonical_json(stripped)).hexdigest()
+
+
+def _verify_bundle_provenance(payload: dict[str, Any], controls: list[dict[str, Any]]) -> None:
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, dict) or not provenance:
+        raise ComplianceError("Built-in framework file is missing provenance")
+    expected_count = provenance.get("oscal_control_count_with_statement")
+    if expected_count is None:
+        raise ComplianceError("Built-in framework provenance is missing control count")
+    try:
+        count = int(expected_count)
+    except (TypeError, ValueError) as exc:
+        raise ComplianceError("Built-in framework provenance control count is invalid") from exc
+    if count != len(controls):
+        raise ComplianceError("Built-in framework control count does not match recorded provenance")
+    recorded_controls = str(provenance.get("controls_checksum_sha256") or "").strip().lower()
+    actual_controls = bundle_controls_checksum(payload.get("controls") or [])
+    if not recorded_controls or recorded_controls != actual_controls:
+        raise ComplianceError("Built-in framework controls checksum does not match recorded provenance")
+    recorded_bundle = str(provenance.get("checksum_sha256") or "").strip().lower()
+    actual_bundle = bundle_content_checksum(payload)
+    if not recorded_bundle or recorded_bundle != actual_bundle:
+        raise ComplianceError("Built-in framework content checksum does not match recorded provenance")
+
+
 def import_builtin_framework(db: Session, path: Path, *, actor: User | None = None) -> ComplianceFramework:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ComplianceError(f"Built-in framework file is unreadable: {path.name}") from exc
     framework_data, controls = _validate_bundle(payload)
+    _verify_bundle_provenance(payload, controls)
     slug = str(framework_data["slug"]).strip().lower()
     version = str(framework_data["version"]).strip()
     nested = db.begin_nested()
@@ -641,13 +686,54 @@ def reassign_asset_finding_control_references(
         .all()
     }
     for row in donor_refs:
+        old_subject_id = row.asset_finding_id
         if row.control_id in keeper_keys:
             row.removed_at = now
-            row.removal_reason = "Duplicate mapping after asset finding merge"
+            row.removed_by_user_id = None
+            row.removal_reason = MERGE_REFERENCE_REMOVE_REASON
+            record_audit(
+                db,
+                actor=None,
+                action="control_reference.removed",
+                object_type="control_reference",
+                object_id=row.id,
+                tenant_id=keeper.tenant_id,
+                details={
+                    "control_id": row.control_id,
+                    "reference_id": row.id,
+                    "donor_asset_finding_id": donor.id,
+                    "keeper_asset_finding_id": keeper.id,
+                    "old_subject": {"subject_type": "asset_finding", "subject_id": old_subject_id},
+                    "new_disposition": "removed",
+                    "reason": MERGE_REFERENCE_REMOVE_REASON,
+                    "disclaimer": COMPLIANCE_MAPPING_DISCLAIMER,
+                    "actor": "system",
+                },
+            )
             continue
         row.asset_finding_id = keeper.id
         row.tenant_id = keeper.tenant_id
         keeper_keys.add(row.control_id)
+        record_audit(
+            db,
+            actor=None,
+            action="control_reference.moved",
+            object_type="control_reference",
+            object_id=row.id,
+            tenant_id=keeper.tenant_id,
+            details={
+                "control_id": row.control_id,
+                "reference_id": row.id,
+                "donor_asset_finding_id": donor.id,
+                "keeper_asset_finding_id": keeper.id,
+                "old_subject": {"subject_type": "asset_finding", "subject_id": old_subject_id},
+                "new_subject": {"subject_type": "asset_finding", "subject_id": keeper.id},
+                "new_disposition": "moved",
+                "reason": MERGE_REFERENCE_MOVE_REASON,
+                "disclaimer": COMPLIANCE_MAPPING_DISCLAIMER,
+                "actor": "system",
+            },
+        )
 
 
 __all__ = [

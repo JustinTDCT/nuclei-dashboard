@@ -92,6 +92,64 @@ def _recalculate_priority(db: Session, finding: AssetFinding) -> None:
     recalculate_asset_finding_priorities(db, [finding])
 
 
+def _is_elapsed(treatment: FindingTreatment, now: datetime) -> bool:
+    expires = _aware(treatment.expires_at)
+    return expires is not None and expires <= now
+
+
+def expire_elapsed_treatments_for_finding(
+    db: Session,
+    finding: AssetFinding,
+    *,
+    now: datetime | None = None,
+) -> int:
+    current = now or utcnow()
+    rows = (
+        db.query(FindingTreatment)
+        .filter(
+            FindingTreatment.asset_finding_id == finding.id,
+            FindingTreatment.status == TREATMENT_STATUS_ACTIVE,
+            FindingTreatment.expires_at.isnot(None),
+            FindingTreatment.expires_at <= current,
+        )
+        .with_for_update()
+        .order_by(FindingTreatment.id.asc())
+        .all()
+    )
+    expired_rows = [
+        treatment
+        for treatment in rows
+        if treatment.status == TREATMENT_STATUS_ACTIVE and _is_elapsed(treatment, current)
+    ]
+    if not expired_rows:
+        return 0
+    for treatment in expired_rows:
+        treatment.status = TREATMENT_STATUS_EXPIRED
+        treatment.updated_at = current
+    db.flush()
+    reconcile_treatment_projection(db, finding)
+    db.flush()
+    for treatment in expired_rows:
+        expires = _aware(treatment.expires_at)
+        record_audit(
+            db,
+            actor=None,
+            action="treatment.expired",
+            object_type="finding_treatment",
+            object_id=treatment.id,
+            tenant_id=finding.tenant_id,
+            details={
+                "asset_finding_id": finding.id,
+                "treatment_type": treatment.treatment_type,
+                "expires_at": expires.isoformat() if expires else None,
+                "technical_state": finding.technical_state,
+                "treatment_state": finding.treatment_state,
+                "actor": "system",
+            },
+        )
+    return len(expired_rows)
+
+
 def _lock_finding(db: Session, tenant_id: int, asset_finding_id: int) -> AssetFinding:
     row = (
         db.query(AssetFinding)
@@ -101,6 +159,7 @@ def _lock_finding(db: Session, tenant_id: int, asset_finding_id: int) -> AssetFi
     )
     if row is None:
         raise TreatmentError("Asset finding not found", 404)
+    expire_elapsed_treatments_for_finding(db, row)
     return row
 
 
@@ -131,6 +190,11 @@ def current_active_treatment(db: Session, asset_finding_id: int, *, lock: bool =
         query = query.with_for_update()
     row = query.order_by(FindingTreatment.id.asc()).first()
     if row is None or row.status != TREATMENT_STATUS_ACTIVE:
+        return None
+    if _is_elapsed(row, utcnow()):
+        finding = db.get(AssetFinding, asset_finding_id)
+        if finding is not None:
+            expire_elapsed_treatments_for_finding(db, finding)
         return None
     return row
 
@@ -378,44 +442,26 @@ def revoke_treatment(
 def expire_due_treatments(db: Session, *, now: datetime | None = None) -> int:
     current = now or utcnow()
     due = (
-        db.query(FindingTreatment)
+        db.query(FindingTreatment.tenant_id, FindingTreatment.asset_finding_id)
         .filter(
             FindingTreatment.status == TREATMENT_STATUS_ACTIVE,
             FindingTreatment.expires_at.isnot(None),
             FindingTreatment.expires_at <= current,
         )
-        .order_by(FindingTreatment.id.asc())
+        .distinct()
         .all()
     )
     expired = 0
-    for treatment in due:
-        finding = _lock_finding(db, treatment.tenant_id, treatment.asset_finding_id)
-        locked = _get_treatment(db, treatment.tenant_id, treatment.asset_finding_id, treatment.id)
-        if locked.status != TREATMENT_STATUS_ACTIVE:
-            continue
-        expires = _aware(locked.expires_at)
-        if expires is None or expires > current:
-            continue
-        locked.status = TREATMENT_STATUS_EXPIRED
-        locked.updated_at = current
-        reconcile_treatment_projection(db, finding)
-        record_audit(
-            db,
-            actor=None,
-            action="treatment.expired",
-            object_type="finding_treatment",
-            object_id=locked.id,
-            tenant_id=finding.tenant_id,
-            details={
-                "asset_finding_id": finding.id,
-                "treatment_type": locked.treatment_type,
-                "expires_at": expires.isoformat(),
-                "technical_state": finding.technical_state,
-                "treatment_state": finding.treatment_state,
-                "actor": "system",
-            },
+    for tenant_id, asset_finding_id in due:
+        finding = (
+            db.query(AssetFinding)
+            .filter(AssetFinding.id == asset_finding_id, AssetFinding.tenant_id == tenant_id)
+            .with_for_update()
+            .first()
         )
-        expired += 1
+        if finding is None:
+            continue
+        expired += expire_elapsed_treatments_for_finding(db, finding, now=current)
     return expired
 
 
@@ -569,6 +615,8 @@ def merge_finding_treatments(
     now: datetime | None = None,
 ) -> None:
     current = now or utcnow()
+    expire_elapsed_treatments_for_finding(db, keeper, now=current)
+    expire_elapsed_treatments_for_finding(db, donor, now=current)
     keeper_active = current_active_treatment(db, keeper.id, lock=True)
     donor_active = current_active_treatment(db, donor.id, lock=True)
     if keeper_active is not None and donor_active is not None:
@@ -649,6 +697,7 @@ __all__ = [
     "current_active_treatment",
     "display_status",
     "expire_due_treatments",
+    "expire_elapsed_treatments_for_finding",
     "list_treatments",
     "merge_finding_treatments",
     "reconcile_treatment_projection",

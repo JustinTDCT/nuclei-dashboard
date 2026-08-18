@@ -36,9 +36,9 @@ from app.models import (
     VulnerabilityReference,
 )
 from app.routers.assets import _current_hostname
-from app.routers.compliance import serialize_reference
+from app.routers.compliance import serialize_references
 from app.routers.devices import _finding_out
-from app.routers.treatments import serialize_treatment
+from app.routers.treatments import serialize_treatments
 from app.schemas import (
     AssetFindingDetail,
     AssetFindingHistoryOut,
@@ -398,6 +398,8 @@ def _asset_finding_detail(db: Session, row: AssetFinding) -> AssetFindingDetail:
     evidence = sorted(row.evidence, key=lambda item: (item.found_at, item.id), reverse=True)
     current = active.get(row.id)
     refs = list_asset_finding_control_references(db, tenant_id=row.tenant_id, asset_finding=row)
+    serialized_treatments = serialize_treatments(db, treatments)
+    current_out = next((item for item in serialized_treatments if current is not None and item.id == current.id), None)
     return AssetFindingDetail(
         **base.model_dump(),
         description=row.vulnerability.description or "",
@@ -416,9 +418,9 @@ def _asset_finding_detail(db: Session, row: AssetFinding) -> AssetFindingDetail:
         priority_explanation=row.priority_explanation,
         history=[AssetFindingHistoryOut.model_validate(item) for item in history],
         evidence=[_finding_out(item) for item in evidence],
-        current_treatment=serialize_treatment(db, current) if current else None,
-        treatments=[serialize_treatment(db, item) for item in treatments],
-        control_references=[serialize_reference(db, item) for item in refs],
+        current_treatment=current_out,
+        treatments=serialized_treatments,
+        control_references=serialize_references(db, refs),
         mapping_disclaimer=COMPLIANCE_MAPPING_DISCLAIMER,
     )
 
