@@ -14,7 +14,7 @@ from tests.conftest import requires_postgres
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1A_REVISION = "0002_sites_networks"
-PHASE1B_HEAD = "0003_assets_observations"
+PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
@@ -293,15 +293,31 @@ def test_downgrade_from_0003_is_refused(reset_db):
     from alembic import command
     from alembic.util import CommandError
 
-    from app.migrate import alembic_config, apply_schema
+    from app.migrate import alembic_config
 
-    apply_schema()
+    command.upgrade(alembic_config(), "0003_assets_observations")
     try:
         command.downgrade(alembic_config(), PHASE1A_REVISION)
     except (NotImplementedError, CommandError) as exc:
         assert "Refusing to downgrade 0003_assets_observations" in str(exc)
     else:
         raise AssertionError("0003 downgrade must refuse instead of dropping Asset history")
+
+
+@requires_postgres
+def test_downgrade_from_0004_is_refused(reset_db):
+    from alembic import command
+    from alembic.util import CommandError
+
+    from app.migrate import alembic_config, apply_schema
+
+    apply_schema()
+    try:
+        command.downgrade(alembic_config(), "0003_assets_observations")
+    except (NotImplementedError, CommandError) as exc:
+        assert "Refusing to downgrade 0004_asset_observation_integrity" in str(exc)
+    else:
+        raise AssertionError("0004 downgrade must refuse instead of reversing observation integrity")
 
 
 @requires_postgres
@@ -493,7 +509,7 @@ def test_scanner_lan_wan_observations_and_service_history(reset_db):
         posted_again = client.post(
             f"/api/agent/jobs/{lan_job['id']}/devices",
             headers=agent_headers,
-            json=[{"ip": "10.1.0.20", "scope": "lan", "hostname": "srv01", "ports": [443]}],
+            json=[{"ip": "10.1.0.20", "scope": "lan", "hostname": "srv01", "ports": [22, 443], "title": "panel"}],
         )
         assert posted_again.status_code == 200
 
@@ -576,10 +592,35 @@ def test_expected_assets_tags_rbac_and_audit(reset_db):
         body = created.json()
         assert body["is_expected"] is True
         assert body["is_not_yet_observed"] is True
+        assert body["lifecycle_state"] is None
         assert body["first_seen"] is None
         assert body["last_seen"] is None
         assert body["disposition"] == "unreviewed"
+        assert body["hostname"] == "dc01.example.local"
         asset_id = body["id"]
+
+        placeholder_expected = client.post(
+            f"/api/tenants/{tenant_a['id']}/assets",
+            headers=_headers(operator),
+            json={
+                "site_id": site_a["id"],
+                "display_name": "IP Only Expected",
+                "hostname": "10.9.9.9",
+                "ip": "10.9.9.9",
+                "classification": "Unknown",
+            },
+        )
+        assert placeholder_expected.status_code == 200, placeholder_expected.text
+        placeholder_body = placeholder_expected.json()
+        assert placeholder_body["lifecycle_state"] is None
+        assert placeholder_body["is_not_yet_observed"] is True
+        assert placeholder_body["current_addresses"] == ["10.9.9.9"]
+        placeholder_detail = client.get(
+            f"/api/assets/{placeholder_body['id']}",
+            headers=_headers(operator),
+        )
+        assert placeholder_detail.status_code == 200
+        assert placeholder_detail.json()["identifiers"] == []
 
         cross = client.post(
             f"/api/tenants/{tenant_a['id']}/assets",
@@ -608,7 +649,7 @@ def test_expected_assets_tags_rbac_and_audit(reset_db):
         assert viewer_tag.status_code == 403
         listed = client.get(f"/api/tenants/{tenant_a['id']}/assets", headers=_headers(viewer))
         assert listed.status_code == 200
-        assert listed.json()[0]["display_name"] == "DC01"
+        assert {row["display_name"] for row in listed.json()} == {"DC01", "IP Only Expected"}
 
         bad_crit = client.patch(f"/api/assets/{asset_id}", headers=_headers(operator), json={"criticality": "urgent"})
         assert bad_crit.status_code == 400
@@ -760,3 +801,254 @@ def test_asset_list_avoids_nplus_one_and_no_phase1c(reset_db):
     routers = (BACKEND_ROOT / "app" / "routers" / "assets.py").read_text()
     assert "/merge" not in routers
     assert "/split" not in routers
+
+
+@requires_postgres
+def test_upgrade_0003_to_0004_fixes_lifecycle_and_placeholder_hostnames(reset_db):
+    from alembic import command
+    from datetime import datetime, timezone
+
+    from app.database import SessionLocal, engine
+    from app.migrate import alembic_config, current_revision, head_revision
+    from app.models import Asset, AssetAddress, AssetIdentifier, AssetObservation
+
+    command.upgrade(alembic_config(), "0003_assets_observations")
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        tenant_id = conn.execute(
+            text("INSERT INTO tenants (name, notes) VALUES ('Integrity Tenant', '') RETURNING id")
+        ).scalar_one()
+        site_id = conn.execute(
+            text("INSERT INTO sites (tenant_id, name, created_at) VALUES (:tid, 'HQ', :now) RETURNING id"),
+            {"tid": tenant_id, "now": now},
+        ).scalar_one()
+        expected_id = conn.execute(
+            text(
+                """
+                INSERT INTO assets (
+                    tenant_id, site_id, display_name, classification, description,
+                    lifecycle_state, disposition, criticality, is_expected,
+                    first_seen, last_seen, created_at, updated_at
+                )
+                VALUES (
+                    :tid, :sid, 'Expected Box', 'Server', '',
+                    'active', 'unreviewed', 'normal', true,
+                    NULL, NULL, :now, :now
+                )
+                RETURNING id
+                """
+            ),
+            {"tid": tenant_id, "sid": site_id, "now": now},
+        ).scalar_one()
+        observed_id = conn.execute(
+            text(
+                """
+                INSERT INTO assets (
+                    tenant_id, site_id, display_name, classification, description,
+                    lifecycle_state, disposition, criticality, is_expected,
+                    first_seen, last_seen, created_at, updated_at
+                )
+                VALUES (
+                    :tid, :sid, '10.1.1.20', 'Unknown', '',
+                    'active', 'unreviewed', 'normal', false,
+                    :now, :now, :now, :now
+                )
+                RETURNING id
+                """
+            ),
+            {"tid": tenant_id, "sid": site_id, "now": now},
+        ).scalar_one()
+        conn.execute(
+            text(
+                """
+                INSERT INTO asset_identifiers (
+                    asset_id, tenant_id, identifier_type, value, normalized_value, source, created_at
+                )
+                VALUES
+                    (:eid, :tid, 'hostname', 'dc01.example.local', 'dc01.example.local', 'manual', :now),
+                    (:oid, :tid, 'hostname', '10.1.1.20', '10.1.1.20', 'legacy_migration', :now),
+                    (:oid, :tid, 'hostname', 'dev-abc123', 'dev-abc123', 'legacy_migration', :now)
+                """
+            ),
+            {"eid": expected_id, "oid": observed_id, "tid": tenant_id, "now": now},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO asset_addresses (
+                    asset_id, tenant_id, site_id, ip, address_family, source, first_seen, last_seen, created_at
+                )
+                VALUES (:oid, :tid, :sid, '10.1.1.20', 'ipv4', 'legacy_migration', :now, :now, :now)
+                """
+            ),
+            {"oid": observed_id, "tid": tenant_id, "sid": site_id, "now": now},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO asset_observations (
+                    asset_id, tenant_id, site_id, scope, source, observed_at, hostname, ip,
+                    snapshot, provenance, created_at
+                )
+                VALUES (
+                    :oid, :tid, :sid, 'wan', 'legacy_migration', :now, '10.1.1.20', '10.1.1.20',
+                    CAST(:snap AS jsonb), 'legacy_migration', :now
+                )
+                """
+            ),
+            {
+                "oid": observed_id,
+                "tid": tenant_id,
+                "sid": site_id,
+                "now": now,
+                "snap": '{"hostname": "10.1.1.20", "ip": "10.1.1.20", "ports": [443], "scope": "wan"}',
+            },
+        )
+
+    command.upgrade(alembic_config(), "head")
+    assert current_revision() == head_revision() == PHASE1B_HEAD
+
+    db = SessionLocal()
+    try:
+        expected = db.get(Asset, expected_id)
+        observed = db.get(Asset, observed_id)
+        assert expected is not None and expected.lifecycle_state is None
+        assert observed is not None and observed.lifecycle_state == "active"
+        names = db.query(AssetIdentifier).filter(AssetIdentifier.asset_id.in_([expected_id, observed_id])).all()
+        assert {row.value for row in names} == {"dc01.example.local"}
+        assert db.query(AssetAddress).filter(AssetAddress.asset_id == observed_id, AssetAddress.ip == "10.1.1.20").one()
+        obs = db.query(AssetObservation).filter(AssetObservation.asset_id == observed_id).one()
+        assert obs.observation_key
+        assert len(obs.observation_key) == 64
+        uniques = inspect(engine).get_unique_constraints("asset_observations")
+        unique_names = {row["name"] for row in uniques}
+        assert "uq_asset_observations_job_asset_key" in unique_names
+        assert "uq_asset_observations_scan_job_id_asset_id" not in unique_names
+        lifecycle = {col["name"]: col for col in inspect(engine).get_columns("assets")}["lifecycle_state"]
+        assert lifecycle["nullable"] is True
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_observation_uses_report_facts_and_per_report_keys(reset_db):
+    from datetime import timedelta
+
+    import importlib.util
+
+    from app.assets import observation_fingerprint
+    from app.database import SessionLocal
+    from app.inventory import upsert_devices
+    from app.migrate import apply_schema
+    from app.models import Asset, AssetAddress, AssetIdentifier, AssetObservation, AssetService, Device, Scan, ScanJob, Tenant
+    from app.schemas import DeviceReport
+
+    spec = importlib.util.spec_from_file_location(
+        "phase1b_0004",
+        BACKEND_ROOT / "alembic" / "versions" / "0004_asset_observation_integrity.py",
+    )
+    assert spec is not None and spec.loader is not None
+    migrated = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migrated)
+    assert observation_fingerprint("srv01", "10.1.1.10", "wan", [443]) == migrated.observation_fingerprint(
+        "srv01", "10.1.1.10", "wan", [443]
+    )
+    assert observation_fingerprint("10.1.1.20", "10.1.1.20", "wan", []) == migrated.observation_fingerprint(
+        "10.1.1.20", "10.1.1.20", "wan", []
+    )
+
+    apply_schema()
+    db: Session = SessionLocal()
+    try:
+        tenant = Tenant(name="Report Facts Tenant", notes="")
+        db.add(tenant)
+        db.flush()
+        scan = Scan(tenant_id=tenant.id, name="wan", scope="wan", profile="discovery")
+        db.add(scan)
+        db.flush()
+        job1 = ScanJob(scan_id=scan.id, tenant_id=tenant.id, status="running")
+        job2 = ScanJob(scan_id=scan.id, tenant_id=tenant.id, status="running")
+        job3 = ScanJob(scan_id=scan.id, tenant_id=tenant.id, status="running")
+        db.add_all([job1, job2, job3])
+        db.flush()
+
+        upsert_devices(
+            db,
+            tenant.id,
+            job1.id,
+            [DeviceReport(ip="10.8.8.8", scope="wan", hostname="srv01", ports=[443], title="panel", tech="nginx")],
+        )
+        device = db.query(Device).filter(Device.hostname == "srv01").one()
+        asset = db.get(Asset, device.asset_id)
+        service = db.query(AssetService).filter(AssetService.asset_id == asset.id, AssetService.port == 443).one()
+        first_seen = service.last_seen
+        assert first_seen is not None
+
+        service.last_seen = first_seen - timedelta(days=1)
+        db.flush()
+        stale_last_seen = service.last_seen
+
+        upsert_devices(
+            db,
+            tenant.id,
+            job2.id,
+            [DeviceReport(ip="10.8.8.8", scope="wan", hostname="srv01", ports=[], title="", tech="")],
+        )
+        db.refresh(service)
+        assert service.port == 443
+        assert service.last_seen == stale_last_seen
+        empty_obs = (
+            db.query(AssetObservation)
+            .filter(AssetObservation.asset_id == asset.id, AssetObservation.scan_job_id == job2.id)
+            .one()
+        )
+        assert empty_obs.snapshot["ports"] == []
+        assert empty_obs.snapshot["title"] == ""
+        assert empty_obs.snapshot["tech"] == ""
+
+        upsert_devices(
+            db,
+            tenant.id,
+            job3.id,
+            [
+                DeviceReport(ip="10.1.1.10", scope="wan", hostname="srv01", ports=[443]),
+                DeviceReport(ip="10.1.1.11", scope="wan", hostname="srv01", ports=[22]),
+                DeviceReport(ip="10.1.1.11", scope="wan", hostname="srv01", ports=[22]),
+            ],
+        )
+        same_job = (
+            db.query(AssetObservation)
+            .filter(AssetObservation.asset_id == asset.id, AssetObservation.scan_job_id == job3.id)
+            .all()
+        )
+        assert len(same_job) == 2
+        assert {row.ip for row in same_job} == {"10.1.1.10", "10.1.1.11"}
+        assert len({row.observation_key for row in same_job}) == 2
+        assert {row.ip for row in db.query(AssetAddress).filter(AssetAddress.asset_id == asset.id).all()} >= {
+            "10.8.8.8",
+            "10.1.1.10",
+            "10.1.1.11",
+        }
+        assert {row.port for row in db.query(AssetService).filter(AssetService.asset_id == asset.id).all()} == {22, 443}
+
+        ip_only = upsert_devices(
+            db,
+            tenant.id,
+            job3.id,
+            [DeviceReport(ip="203.0.113.9", scope="wan", hostname="203.0.113.9", ports=[80])],
+        )
+        created_count, created_devices = ip_only
+        assert created_count == 1
+        placeholder_asset = db.get(Asset, created_devices[0].asset_id)
+        host_ids = (
+            db.query(AssetIdentifier)
+            .filter(
+                AssetIdentifier.asset_id == placeholder_asset.id,
+                AssetIdentifier.identifier_type == "hostname",
+            )
+            .all()
+        )
+        assert host_ids == []
+        assert db.query(AssetAddress).filter(AssetAddress.asset_id == placeholder_asset.id, AssetAddress.ip == "203.0.113.9").one()
+    finally:
+        db.close()

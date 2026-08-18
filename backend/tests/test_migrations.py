@@ -12,7 +12,7 @@ from tests.conftest import requires_postgres
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_schema.py"
 PHASE1A_REVISION = "0002_sites_networks"
-PHASE1B_HEAD = "0003_assets_observations"
+PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
@@ -405,6 +405,23 @@ def test_unversioned_phase1b_marker_columns_fail_closed(reset_db):
     assert "assets" not in _tables(engine)
 
 
+@requires_postgres
+def test_unversioned_phase1b_observation_key_fail_closed(reset_db):
+    from alembic import command
+
+    from app.database import engine
+    from app.migrate import UnrecognizedSchemaError, alembic_config, apply_schema
+
+    command.upgrade(alembic_config(), "0003_assets_observations")
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE asset_observations ADD COLUMN observation_key VARCHAR(64)"))
+        conn.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+    with pytest.raises(UnrecognizedSchemaError, match="Unrecognized/partial"):
+        apply_schema()
+    assert "alembic_version" not in _tables(engine)
+
+
 def test_phase1a_and_baseline_revisions_remain_frozen():
     phase1a = (BACKEND_ROOT / "alembic" / "versions" / "0002_sites_networks.py").read_text()
     phase1b = (BACKEND_ROOT / "alembic" / "versions" / "0003_assets_observations.py").read_text()
@@ -414,3 +431,7 @@ def test_phase1a_and_baseline_revisions_remain_frozen():
     assert "from app.database import Base" not in phase1b
     assert "import app.models" not in phase1b
     assert 'down_revision: str | None = "0002_sites_networks"' in phase1b
+    phase1b_fix = (BACKEND_ROOT / "alembic" / "versions" / "0004_asset_observation_integrity.py").read_text()
+    assert "from app.database import Base" not in phase1b_fix
+    assert "import app.models" not in phase1b_fix
+    assert 'down_revision: str | None = "0003_assets_observations"' in phase1b_fix

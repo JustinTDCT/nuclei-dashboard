@@ -14,7 +14,7 @@ from tests.conftest import requires_postgres
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_schema.py"
 PHASE1A_REVISION = "0002_sites_networks"
-PHASE1B_HEAD = "0003_assets_observations"
+PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",

@@ -17,15 +17,17 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0003_assets_observations` (after frozen `0001_baseline` and `0002_sites_networks`).
+Current head revision: `0004_asset_observation_integrity` (after frozen `0001_baseline`, `0002_sites_networks`, and `0003_assets_observations`).
 
-`0001_baseline` and `0002_sites_networks` are immutable. Phase 1B schema lives only in `0003_assets_observations`.
+`0001_baseline`, `0002_sites_networks`, and `0003_assets_observations` are immutable. Phase 1B corrective schema lives in `0004_asset_observation_integrity`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
 `alembic downgrade` from `0002_sites_networks` is **refused**. It would destroy Site, Network, authorization, and audit rows. Restore from backup instead of pretending a destructive downgrade is safe.
 
 `alembic downgrade` from `0003_assets_observations` is **refused**. It would destroy Asset, identifier, address, service, observation, and tag history.
+
+`alembic downgrade` from `0004_asset_observation_integrity` is **refused**. It would restore over-coarse observation idempotence and undo expected-lifecycle / identifier hygiene.
 
 ### Fresh install
 
@@ -110,9 +112,15 @@ Each migrated Device gets one observation with `source = legacy_migration`. That
 
 Scanner ingestion still uses the legacy Device resolver. After a Device is matched or created, the mapped Asset is reused, an `AssetObservation` is appended, and identifier/address/service facts are upserted. Repeated observations do not change `Asset.disposition`. Matching another Asset by IP/hostname/MAC is Phase 1C and is not implemented.
 
-Agent and central scanner `/jobs/{id}/devices` posts can be retried. Observation idempotence is `(scan_job_id, asset_id)`, not hostname or IP.
+Observation snapshots record only the facts in that `DeviceReport`. Empty `report.ports` does not copy stale Device ports into the snapshot and does not advance `AssetService.last_seen`. Existing positive service rows are retained; they are not closed.
 
-Expected Assets can be created manually (`is_expected`, `first_seen`/`last_seen` NULL). Discovery does not auto-attach to them in Phase 1B.
+Agent and central scanner `/jobs/{id}/devices` posts can be retried. Observation idempotence is `(scan_job_id, asset_id, observation_key)`, where `observation_key` is a SHA-256 fingerprint of the normalized report hostname/IP/scope/ports. The same exact report is deduplicated; a different IP or port set for the same Asset in the same job is a new observation. Hostname/IP are not Asset identity keys.
+
+Expected Assets can be created manually (`is_expected`, `first_seen`/`last_seen` NULL, `lifecycle_state` NULL). Discovery does not auto-attach to them in Phase 1B.
+
+`0004_asset_observation_integrity` is a corrective revision after the already-shipped `0003`. It adds `observation_key`, allows NULL lifecycle for expected Assets, and removes hostname identifiers that are only IP/placeholder values.
+
+IP-as-hostname placeholders are not stored as hostname identifiers. The corresponding `AssetAddress` is retained.
 
 Archived Sites/Networks are soft-deleted (`archived_at`). Do not physically delete them in the normal technician workflow.
 

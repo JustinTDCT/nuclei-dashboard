@@ -8,10 +8,13 @@ Device.asset_id. Matching by IP/hostname/MAC across Assets is Phase 1C.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 from ipaddress import ip_address, ip_network
+import json
 
 from sqlalchemy.orm import Session
 
+from app.classify import is_placeholder_name, normalize_hostname
 from app.locality import compatibility_site_for_tenant
 from app.models import (
     CRITICALITIES,
@@ -45,6 +48,30 @@ def utcnow() -> datetime:
 
 def normalize_tag_name(value: str) -> str:
     return " ".join((value or "").strip().split()).lower()
+
+
+def is_placeholder_hostname(value: str, ip: str = "") -> bool:
+    return is_placeholder_name(value, ip)
+
+
+def observation_fingerprint(hostname: str, ip: str, scope: str, ports) -> str:
+    host = normalize_hostname(hostname)
+    if is_placeholder_hostname(host, ip):
+        host = ""
+    payload = json.dumps(
+        {
+            "hostname": host,
+            "ip": (ip or "").strip(),
+            "ports": [
+                {"port": port, "protocol": protocol}
+                for port, protocol, _, _ in sorted(_iter_ports(ports), key=lambda row: (row[0], row[1]))
+            ],
+            "scope": (scope or "").strip().lower(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 def normalize_identifier(identifier_type: str, value: str) -> str:
@@ -178,6 +205,8 @@ def upsert_identifier(
 ) -> AssetIdentifier | None:
     raw = (value or "").strip()
     if not raw or identifier_type not in IDENTIFIER_TYPES:
+        return None
+    if identifier_type == IDENTIFIER_HOSTNAME and is_placeholder_hostname(raw):
         return None
     normalized = normalize_identifier(identifier_type, raw)
     if not normalized:
@@ -352,19 +381,20 @@ def append_observation(
     ip: str,
     snapshot: dict,
     observed_at: datetime,
+    observation_key: str,
 ) -> AssetObservation:
     scan_job_id = context.get("scan_job_id")
+    existing_q = db.query(AssetObservation).filter(
+        AssetObservation.asset_id == asset.id,
+        AssetObservation.observation_key == observation_key,
+    )
     if scan_job_id is not None:
-        existing = (
-            db.query(AssetObservation)
-            .filter(
-                AssetObservation.asset_id == asset.id,
-                AssetObservation.scan_job_id == scan_job_id,
-            )
-            .first()
-        )
-        if existing is not None:
-            return existing
+        existing_q = existing_q.filter(AssetObservation.scan_job_id == scan_job_id)
+    else:
+        existing_q = existing_q.filter(AssetObservation.scan_job_id.is_(None))
+    existing = existing_q.first()
+    if existing is not None:
+        return existing
     row = AssetObservation(
         asset_id=asset.id,
         tenant_id=asset.tenant_id,
@@ -378,6 +408,7 @@ def append_observation(
         hostname=hostname or "",
         ip=ip or "",
         snapshot=snapshot,
+        observation_key=observation_key,
         provenance=context.get("source") or SOURCE_SCANNER,
     )
     db.add(row)
@@ -390,15 +421,19 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
 
     Does not search other Assets and does not merge by IP/hostname/MAC.
     """
-    context = observation_context(db, job_id, report.ip or device.ip, report.scope or device.scope)
+    report_ip = (report.ip or "").strip()
+    report_hostname = (report.hostname or "").strip()
+    report_scope = (report.scope or "").strip()
+    context = observation_context(db, job_id, report_ip, report_scope or device.scope)
     asset = ensure_asset_for_device(db, device, context)
     now = utcnow()
-    hostname = (device.hostname or report.hostname or "").strip()
-    ip = (device.ip or report.ip or "").strip()
-    if asset.first_seen is None:
-        asset.first_seen = device.first_seen or now
-    asset.last_seen = device.last_seen or now
-    name = display_name_for(hostname, ip, asset.display_name)
+    if not asset.is_expected:
+        if asset.first_seen is None:
+            asset.first_seen = now
+        asset.last_seen = now
+        if asset.lifecycle_state is None:
+            asset.lifecycle_state = LIFECYCLE_ACTIVE
+    name = display_name_for(device.hostname, device.ip, asset.display_name)
     if name:
         asset.display_name = name
     if device.classification and (not asset.classification or asset.classification == "Unknown"):
@@ -409,11 +444,12 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
         asset.site_id = context["site_id"]
     asset.updated_at = now
 
-    upsert_identifier(db, asset, IDENTIFIER_HOSTNAME, hostname, source=SOURCE_SCANNER, seen_at=now)
+    if report_hostname and not is_placeholder_hostname(report_hostname, report_ip):
+        upsert_identifier(db, asset, IDENTIFIER_HOSTNAME, report_hostname, source=SOURCE_SCANNER, seen_at=now)
     address = upsert_address(
         db,
         asset,
-        ip,
+        report_ip,
         site_id=context.get("site_id"),
         network_id=context.get("network_id"),
         source=SOURCE_SCANNER,
@@ -422,31 +458,38 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
     upsert_services(
         db,
         asset,
-        ip,
-        report.ports if report.ports else device.ports,
+        report_ip,
+        list(report.ports or []),
         address_id=address.id if address else None,
-        title=report.title or device.title or "",
-        tech=report.tech or device.tech or "",
+        title=report.title or "",
+        tech=report.tech or "",
         source=SOURCE_SCANNER,
         seen_at=now,
     )
+    snapshot = {
+        "hostname": report_hostname,
+        "ip": report_ip,
+        "ports": list(report.ports or []),
+        "title": report.title or "",
+        "tech": report.tech or "",
+        "auto_label": report.auto_label or "",
+        "classification": report.classification or "",
+        "scope": report_scope or context.get("scope") or "",
+    }
     append_observation(
         db,
         asset,
         context=context,
-        hostname=hostname,
-        ip=ip,
-        snapshot={
-            "hostname": hostname,
-            "ip": ip,
-            "ports": report.ports or device.ports or [],
-            "title": report.title or device.title or "",
-            "tech": report.tech or device.tech or "",
-            "auto_label": report.auto_label or device.auto_label or "",
-            "classification": device.classification or "",
-            "scope": context.get("scope") or device.scope or "",
-        },
+        hostname=report_hostname,
+        ip=report_ip,
+        snapshot=snapshot,
         observed_at=now,
+        observation_key=observation_fingerprint(
+            report_hostname,
+            report_ip,
+            snapshot["scope"],
+            snapshot["ports"],
+        ),
     )
     db.flush()
     return asset
@@ -524,6 +567,7 @@ __all__ = [
     "normalize_identifier",
     "normalize_tag_name",
     "observation_context",
+    "observation_fingerprint",
     "remove_tag",
     "resolve_network_for_ip",
     "sync_linked_devices",

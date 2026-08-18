@@ -77,6 +77,7 @@ PHASE1A_MARKER_COLUMNS = {
 }
 PHASE1B_MARKER_COLUMNS = {
     "devices": frozenset({"asset_id"}),
+    "asset_observations": frozenset({"observation_key"}),
 }
 POST_BASELINE_MARKER_COLUMNS = {
     table: PHASE1A_MARKER_COLUMNS.get(table, frozenset()) | PHASE1B_MARKER_COLUMNS.get(table, frozenset())

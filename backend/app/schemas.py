@@ -370,7 +370,7 @@ class AssetListItem(BaseModel):
     current_addresses: list[str] = []
     classification: str
     description: str = ""
-    lifecycle_state: str
+    lifecycle_state: str | None = None
     disposition: str
     criticality: str
     is_expected: bool
@@ -447,6 +447,7 @@ class AssetObservationOut(BaseModel):
     hostname: str
     ip: str
     snapshot: dict[str, Any] = {}
+    observation_key: str = ""
     provenance: str
     created_at: datetime
 

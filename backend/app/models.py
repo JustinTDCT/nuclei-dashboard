@@ -380,7 +380,7 @@ class Asset(Base):
     __tablename__ = "assets"
     __table_args__ = (
         CheckConstraint(
-            "lifecycle_state IN ('active', 'inactive')",
+            "lifecycle_state IS NULL OR lifecycle_state IN ('active', 'inactive')",
             name="ck_assets_lifecycle_state",
         ),
         CheckConstraint(
@@ -401,7 +401,7 @@ class Asset(Base):
     display_name: Mapped[str] = mapped_column(String(255), default="")
     classification: Mapped[str] = mapped_column(String(80), default="Unknown")
     description: Mapped[str] = mapped_column(Text, default="")
-    lifecycle_state: Mapped[str] = mapped_column(String(20), default=LIFECYCLE_ACTIVE)
+    lifecycle_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
     disposition: Mapped[str] = mapped_column(String(20), default=DISPOSITION_UNREVIEWED)
     criticality: Mapped[str] = mapped_column(String(20), default=CRITICALITY_NORMAL)
     is_expected: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -511,7 +511,12 @@ class AssetService(Base):
 class AssetObservation(Base):
     __tablename__ = "asset_observations"
     __table_args__ = (
-        UniqueConstraint("scan_job_id", "asset_id", name="uq_asset_observations_scan_job_id_asset_id"),
+        UniqueConstraint(
+            "scan_job_id",
+            "asset_id",
+            "observation_key",
+            name="uq_asset_observations_job_asset_key",
+        ),
         Index("ix_asset_observations_asset_id_observed_at", "asset_id", "observed_at"),
         Index("ix_asset_observations_tenant_id_observed_at", "tenant_id", "observed_at"),
     )
@@ -533,6 +538,7 @@ class AssetObservation(Base):
     hostname: Mapped[str] = mapped_column(String(255), default="")
     ip: Mapped[str] = mapped_column(String(80), default="")
     snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    observation_key: Mapped[str] = mapped_column(String(64))
     provenance: Mapped[str] = mapped_column(String(80), default=SOURCE_SCANNER)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

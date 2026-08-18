@@ -108,7 +108,7 @@ export function AssetsPanel({ tenantId }: { tenantId: number }) {
           <span className="font-mono text-xs">{asset.current_addresses.join(", ") || "—"}</span>,
           asset.site_name || (asset.site_id ? `#${asset.site_id}` : "WAN / none"),
           asset.classification || "Unknown",
-          <Badge value={asset.lifecycle_state} />,
+          asset.lifecycle_state ? <Badge value={asset.lifecycle_state} /> : "—",
           <Badge value={asset.disposition} />,
           <Badge value={asset.criticality} />,
           <TagList tags={asset.tags} />,
@@ -362,7 +362,7 @@ function AssetDrawer({
           ) : (
             <div className="text-sm text-slate-300 space-y-1">
               <div>Class: {asset.classification}</div>
-              <div>Lifecycle: {asset.lifecycle_state}</div>
+              <div>Lifecycle: {asset.lifecycle_state || "—"}</div>
               <div>Disposition: {asset.disposition}</div>
               <div>Criticality: {asset.criticality}</div>
               <div>Description: {asset.description || "—"}</div>

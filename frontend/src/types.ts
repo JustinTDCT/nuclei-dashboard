@@ -143,7 +143,7 @@ export interface Asset {
   current_addresses: string[];
   classification: string;
   description: string;
-  lifecycle_state: string;
+  lifecycle_state: string | null;
   disposition: string;
   criticality: string;
   is_expected: boolean;
