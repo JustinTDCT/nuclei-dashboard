@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -22,7 +23,8 @@ from tests.test_phase1d import (
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1D_HEAD = "0006_scan_definition_execution"
-PHASE2A_HEAD = "0007_vulnerability_finding_lifecycle"
+PHASE2A_INITIAL = "0007_vulnerability_finding_lifecycle"
+PHASE2A_HEAD = "0008_phase2a_finding_identity_repair"
 FROZEN = (
     "0001_baseline_current_schema.py",
     "0002_sites_networks.py",
@@ -30,6 +32,7 @@ FROZEN = (
     "0004_asset_observation_integrity.py",
     "0005_asset_correlation_lifecycle.py",
     "0006_scan_definition_execution.py",
+    "0007_vulnerability_finding_lifecycle.py",
 )
 VULN_STAGES = {
     "discovery": True,
@@ -83,6 +86,16 @@ def _finding_payload(template="exposed-panel", name="Exposed panel", severity="h
     }
 
 
+def _post_coverage(client, world, job_id: int, targets, detector_type="nuclei"):
+    posted = client.post(
+        f"/api/agent/jobs/{job_id}/detector-coverage",
+        headers=_agent_headers(world["agent1"]),
+        json={"detector_type": detector_type, "targets": list(targets)},
+    )
+    assert posted.status_code == 200, posted.text
+    return posted.json()
+
+
 def _post_findings(client, world, job_id: int, items=None):
     posted = client.post(
         f"/api/agent/jobs/{job_id}/findings",
@@ -107,6 +120,7 @@ def _run_detected(client, token, world, hostname="asset-a", ip="10.1.0.10", find
     job_id = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token)).json()["id"]
     _start_lan(client, world, job_id)
     _post_device(client, world, job_id, ip=ip, hostname=hostname)
+    _post_coverage(client, world, job_id, [f"https://{ip}"])
     result = _post_findings(
         client,
         world,
@@ -122,6 +136,7 @@ def _run_clean(client, token, world, scan_id: int, hostname="asset-a", ip="10.1.
     job_id = client.post(f"/api/scans/{scan_id}/run", headers=_headers(token)).json()["id"]
     _start_lan(client, world, job_id)
     _post_device(client, world, job_id, ip=ip, hostname=hostname)
+    _post_coverage(client, world, job_id, [f"https://{ip}"])
     done = _complete(client, world, job_id)
     assert done.status_code == 200, done.text
     return job_id
@@ -141,10 +156,11 @@ def test_fresh_db_reaches_phase2a_head(reset_db):
         "asset_findings",
         "asset_finding_history",
         "asset_finding_run_evaluations",
+        "scan_run_detector_coverage",
     }.issubset(tables)
 
 
-def test_0001_through_0006_remain_frozen():
+def test_0001_through_0007_remain_frozen():
     import hashlib
 
     from tests.test_migrations import FROZEN_MIGRATION_HASHES
@@ -164,13 +180,29 @@ def test_downgrade_from_0007_is_refused(reset_db):
 
     from app.migrate import alembic_config, apply_schema
 
-    apply_schema()
+    command.upgrade(alembic_config(), PHASE2A_INITIAL)
     try:
         command.downgrade(alembic_config(), PHASE1D_HEAD)
     except (CommandError, RuntimeError) as exc:
         assert "Refusing to downgrade 0007_vulnerability_finding_lifecycle" in str(exc)
         return
     raise AssertionError("0007 downgrade must refuse")
+
+
+@requires_postgres
+def test_downgrade_from_0008_is_refused(reset_db):
+    from alembic import command
+    from alembic.util import CommandError
+
+    from app.migrate import alembic_config, apply_schema
+
+    apply_schema()
+    try:
+        command.downgrade(alembic_config(), PHASE2A_INITIAL)
+    except (CommandError, RuntimeError) as exc:
+        assert "Refusing to downgrade 0008_phase2a_finding_identity_repair" in str(exc)
+        return
+    raise AssertionError("0008 downgrade must refuse")
 
 
 @requires_postgres
@@ -267,6 +299,19 @@ def test_0006_to_0007_preserves_legacy_findings_and_does_not_fabricate_resolutio
         assert orphan.asset_finding_id is None
         assert orphan.asset_id is None
         assert db.query(AssetFinding).filter(AssetFinding.tenant_id == tenant_id).count() == 1
+        from app.models import Vulnerability, VulnerabilityDetectorMapping
+
+        mapping = (
+            db.query(VulnerabilityDetectorMapping)
+            .filter(
+                VulnerabilityDetectorMapping.detector_type == "nuclei",
+                VulnerabilityDetectorMapping.detector_key == "orphan-template",
+            )
+            .one()
+        )
+        vuln = db.get(Vulnerability, mapping.vulnerability_id)
+        assert vuln.canonical_key == "nuclei:orphan-template"
+        assert db.query(AssetFinding).filter(AssetFinding.vulnerability_id == vuln.id).count() == 0
     finally:
         db.close()
 
@@ -276,6 +321,7 @@ def test_catalog_identity_is_not_fuzzy():
     from app.schemas import FindingReport
 
     assert extract_explicit_cve({"info": {"classification": {"cve-id": ["CVE-2021-44228"]}}}) == "CVE-2021-44228"
+    assert extract_explicit_cve({"info": {"classification": {"cve-id": ["CVE-2020-0001", "CVE-2020-0002"]}}}) is None
     assert extract_explicit_cve({"info": {"name": "Looks like CVE-2021-44228"}}) is None
     assert catalog_identity("nuclei", "exposed-panel", None) == "nuclei:exposed-panel"
     assert catalog_identity("nuclei", "log4j", "CVE-2021-44228") == "cve:CVE-2021-44228"
@@ -507,6 +553,7 @@ def test_snapshot_not_current_definition_and_finalize_is_idempotent(reset_db):
         job_id = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token)).json()["id"]
         _start_lan(client, world, job_id)
         _post_device(client, world, job_id)
+        _post_coverage(client, world, job_id, ["https://10.1.0.10"])
         edited = client.patch(
             f"/api/scans/{scan['id']}",
             headers=_headers(token),
@@ -689,6 +736,12 @@ def test_agent_and_central_use_same_lifecycle_and_legacy_api(reset_db):
             json=[{"ip": "203.0.113.10", "scope": "wan", "hostname": "edge-1"}],
         )
         assert devices.status_code == 200, devices.text
+        coverage = client.post(
+            f"/api/internal/scanner/jobs/{job_id}/detector-coverage",
+            headers=_scanner_headers(),
+            json={"detector_type": "nuclei", "targets": ["https://203.0.113.10"]},
+        )
+        assert coverage.status_code == 200, coverage.text
         findings = client.post(
             f"/api/internal/scanner/jobs/{job_id}/findings",
             headers=_scanner_headers(),
@@ -720,3 +773,407 @@ def test_agent_and_central_use_same_lifecycle_and_legacy_api(reset_db):
         assert detail.status_code == 200
         assert detail.json()["history"]
         assert detail.json()["evidence"]
+
+
+def test_httpx_urls_become_nuclei_coverage_targets():
+    import runner as runtime_runner
+    from unittest.mock import patch
+
+    def _httpx(hosts, log=None, intensity=None):
+        return [{"ip": "10.1.0.11", "url": "https://10.1.0.11"}]
+
+    def _nuclei(targets, **kwargs):
+        captured["targets"] = list(targets)
+        return []
+
+    captured = {}
+    with (
+        patch.object(runtime_runner, "run_naabu", return_value=[{"ip": "10.1.0.10", "port": 22}, {"ip": "10.1.0.11", "port": 80}]),
+        patch.object(runtime_runner, "run_httpx", side_effect=_httpx),
+        patch.object(runtime_runner, "run_nuclei", side_effect=_nuclei),
+    ):
+        result = runtime_runner.run_pipeline(
+            {
+                "scope": "lan",
+                "targets": [{"type": "cidr", "value": "10.1.0.0/24"}],
+                "stages": dict(VULN_STAGES),
+                "intensity": {},
+                "exclusions": [],
+            }
+        )
+    assert captured["targets"] == ["https://10.1.0.11"]
+    assert result["detector_coverage"] == [{"detector_type": "nuclei", "targets": ["https://10.1.0.11"]}]
+
+
+@requires_postgres
+def test_naabu_only_ssh_asset_is_not_cleaned_when_nuclei_scanned_http_asset(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _run_detected(client, token, world, hostname="ssh-only", ip="10.1.0.10")
+        scan, _job, _ = _run_detected(client, token, world, hostname="http-host", ip="10.1.0.11")
+        job_id = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token)).json()["id"]
+        _start_lan(client, world, job_id)
+        _post_device(client, world, job_id, ip="10.1.0.10", hostname="ssh-only")
+        _post_device(client, world, job_id, ip="10.1.0.11", hostname="http-host")
+        _post_coverage(client, world, job_id, ["https://10.1.0.11"])
+        assert _complete(client, world, job_id).status_code == 200
+        from app.database import SessionLocal
+        from app.models import AssetFinding
+
+        db = SessionLocal()
+        try:
+            from app.models import IDENTIFIER_HOSTNAME, AssetIdentifier
+
+            findings = db.query(AssetFinding).all()
+            assert len(findings) == 2
+            by_host = {}
+            for row in findings:
+                hostname = (
+                    db.query(AssetIdentifier.value)
+                    .filter(
+                        AssetIdentifier.asset_id == row.asset_id,
+                        AssetIdentifier.identifier_type == IDENTIFIER_HOSTNAME,
+                    )
+                    .scalar()
+                )
+                by_host[hostname] = row
+            assert by_host["ssh-only"].consecutive_clean_scans == 0
+            assert by_host["ssh-only"].technical_state == "open"
+            assert by_host["http-host"].consecutive_clean_scans == 1
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_clean_uses_supporting_detector_not_first_cve_mapping(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        cve_raw = {"info": {"classification": {"cve-id": ["CVE-2021-44228"]}, "tags": ["cve"]}}
+        _run_detected(
+            client,
+            token,
+            world,
+            hostname="other-host",
+            ip="10.1.0.20",
+            findings=[
+                _finding_payload(
+                    template="template-a",
+                    name="Log4j A",
+                    severity="critical",
+                    tags="cve",
+                    host="https://10.1.0.20",
+                    extra_raw=cve_raw,
+                )
+            ],
+        )
+        scan, _job, _ = _run_detected(
+            client,
+            token,
+            world,
+            hostname="asset-a",
+            ip="10.1.0.10",
+            findings=[
+                _finding_payload(
+                    template="template-b",
+                    name="Log4j B",
+                    severity="critical",
+                    tags="panel",
+                    host="https://10.1.0.10",
+                    extra_raw={"info": {"classification": {"cve-id": ["CVE-2021-44228"]}, "tags": ["panel"]}},
+                )
+            ],
+        )
+        filtered = _lan_scan(
+            client,
+            token,
+            world,
+            name="CVE tags only",
+            network_ids=[world["net1"]["id"]],
+            stage_config={**VULN_STAGES, "nuclei_tags": "cve", "nuclei_severities": "critical,high,medium"},
+        )
+        _run_clean(client, token, world, filtered["id"])
+        from app.database import SessionLocal
+        from app.models import AssetFinding
+
+        db = SessionLocal()
+        try:
+            from app.models import IDENTIFIER_HOSTNAME, AssetIdentifier
+
+            rows = db.query(AssetFinding).all()
+            assert len(rows) == 2
+            asset_a_id = (
+                db.query(AssetIdentifier.asset_id)
+                .filter(AssetIdentifier.identifier_type == IDENTIFIER_HOSTNAME, AssetIdentifier.value == "asset-a")
+                .scalar()
+            )
+            asset_a = next(row for row in rows if row.asset_id == asset_a_id)
+            assert asset_a.consecutive_clean_scans == 0
+            assert asset_a.technical_state == "open"
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_vuln_only_result_does_not_attach_to_stale_dhcp_device(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _run_detected(client, token, world, hostname="old-owner", ip="10.1.0.10")
+        scan = _lan_scan(
+            client,
+            token,
+            world,
+            name="Vuln only",
+            network_ids=[world["net1"]["id"]],
+            stage_config={
+                "discovery": False,
+                "port_mode": "none",
+                "fingerprint": False,
+                "vulnerability": True,
+                "nuclei_severities": "critical,high,medium",
+                "nuclei_tags": "",
+            },
+        )
+        job_id = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token)).json()["id"]
+        _start_lan(client, world, job_id)
+        posted = _post_findings(client, world, job_id, [_finding_payload(host="https://10.1.0.10")])
+        assert posted["added"] == 1
+        assert _complete(client, world, job_id).status_code == 200
+        from app.database import SessionLocal
+        from app.models import AssetFinding, Finding
+
+        db = SessionLocal()
+        try:
+            assert db.query(AssetFinding).count() == 1
+            unlinked = db.query(Finding).filter(Finding.asset_finding_id.is_(None)).one()
+            assert unlinked.host == "https://10.1.0.10"
+            assert unlinked.asset_id is None
+            assert unlinked.device_id is None
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_0006_to_0008_repairs_catalog_orderings_and_multi_cve(reset_db):
+    from alembic import command
+
+    from app.database import SessionLocal, engine
+    from app.migrate import alembic_config
+    from app.models import AssetFinding, Finding, Vulnerability, VulnerabilityDetectorMapping
+
+    command.upgrade(alembic_config(), PHASE1D_HEAD)
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        tenant_id = conn.execute(text("INSERT INTO tenants (name, notes) VALUES ('Repair 2A', '') RETURNING id")).scalar_one()
+        site_id = conn.execute(
+            text("INSERT INTO sites (tenant_id, name, created_at) VALUES (:t, 'HQ', :n) RETURNING id"),
+            {"t": tenant_id, "n": now},
+        ).scalar_one()
+        asset_id = conn.execute(
+            text(
+                """
+                INSERT INTO assets (tenant_id, site_id, display_name, classification, description, lifecycle_state, disposition, criticality, is_expected, created_at, updated_at)
+                VALUES (:t, :s, 'srv', 'Server', '', 'active', 'unreviewed', 'normal', false, :n, :n)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id, "s": site_id, "n": now},
+        ).scalar_one()
+        device_id = conn.execute(
+            text(
+                """
+                INSERT INTO devices (tenant_id, site_id, ip, hostname, scope, status, classification, description, auto_label, title, tech, ports, asset_id)
+                VALUES (:t, :s, '10.1.0.9', 'legacy-host', 'lan', 'known', 'Server', '', '', '', '', '[]'::jsonb, :a)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id, "s": site_id, "a": asset_id},
+        ).scalar_one()
+        scan_id = conn.execute(
+            text(
+                """
+                INSERT INTO scans (tenant_id, name, scope, profile, nuclei_severities, nuclei_tags, subnet_ids, is_enabled)
+                VALUES (:t, 'Old', 'lan', 'discovery_nuclei', 'high', '', '[]'::jsonb, true)
+                RETURNING id
+                """
+            ),
+            {"t": tenant_id},
+        ).scalar_one()
+        job_id = conn.execute(
+            text("INSERT INTO scan_jobs (scan_id, tenant_id, status, hosts_found, findings_count) VALUES (:s, :t, 'done', 1, 5) RETURNING id"),
+            {"s": scan_id, "t": tenant_id},
+        ).scalar_one()
+
+        def _insert_finding(template, raw, found, device=device_id):
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO findings (tenant_id, scan_job_id, device_id, template_id, name, severity, hostname, host, matched_at, tags, found_at, raw_json)
+                    VALUES (:t, :j, :d, :tmpl, :name, 'high', 'legacy-host', '10.1.0.9', '', '', :f, CAST(:raw AS jsonb))
+                    """
+                ),
+                {
+                    "t": tenant_id,
+                    "j": job_id,
+                    "d": device,
+                    "tmpl": template,
+                    "name": template,
+                    "f": found,
+                    "raw": json.dumps(raw),
+                },
+            )
+
+        _insert_finding("order-missing-first", {"info": {"name": "plain"}}, now - timedelta(days=2))
+        _insert_finding(
+            "order-missing-first",
+            {"info": {"classification": {"cve-id": ["CVE-2021-44228"]}}},
+            now - timedelta(days=1),
+        )
+        _insert_finding(
+            "order-cve-first",
+            {"info": {"classification": {"cve-id": ["CVE-2022-0001"]}}},
+            now - timedelta(days=2),
+        )
+        _insert_finding("order-cve-first", {"info": {"name": "later plain"}}, now - timedelta(days=1))
+        _insert_finding(
+            "multi-cve",
+            {"info": {"classification": {"cve-id": ["CVE-2020-0001", "CVE-2020-0002"]}}},
+            now,
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO findings (tenant_id, scan_job_id, device_id, template_id, name, severity, hostname, host, matched_at, tags, found_at, raw_json)
+                VALUES (:t, :j, NULL, 'unlinked-known', 'Unlinked', 'low', 'unknown', '10.9.9.9', '', '', :f, '{}'::jsonb)
+                """
+            ),
+            {"t": tenant_id, "j": job_id, "f": now},
+        )
+
+    command.upgrade(alembic_config(), "head")
+    db = SessionLocal()
+    try:
+        def _mapping(key: str) -> VulnerabilityDetectorMapping:
+            return (
+                db.query(VulnerabilityDetectorMapping)
+                .filter(
+                    VulnerabilityDetectorMapping.detector_type == "nuclei",
+                    VulnerabilityDetectorMapping.detector_key == key,
+                )
+                .one()
+            )
+
+        missing_first = _mapping("order-missing-first")
+        cve_first = _mapping("order-cve-first")
+        multi = _mapping("multi-cve")
+        unlinked = _mapping("unlinked-known")
+        assert db.get(Vulnerability, missing_first.vulnerability_id).canonical_key == "cve:CVE-2021-44228"
+        assert db.get(Vulnerability, cve_first.vulnerability_id).canonical_key == "cve:CVE-2022-0001"
+        assert db.get(Vulnerability, multi.vulnerability_id).canonical_key == "nuclei:multi-cve"
+        assert db.get(Vulnerability, unlinked.vulnerability_id).canonical_key == "nuclei:unlinked-known"
+        assert db.query(AssetFinding).filter(AssetFinding.vulnerability_id == unlinked.vulnerability_id).count() == 0
+        for key, canonical in (
+            ("order-missing-first", "cve:CVE-2021-44228"),
+            ("order-cve-first", "cve:CVE-2022-0001"),
+            ("multi-cve", "nuclei:multi-cve"),
+        ):
+            mapping = _mapping(key)
+            afs = (
+                db.query(AssetFinding)
+                .filter(AssetFinding.vulnerability_id == mapping.vulnerability_id, AssetFinding.asset_id == asset_id)
+                .all()
+            )
+            assert len(afs) == 1
+            assert db.get(Vulnerability, mapping.vulnerability_id).canonical_key == canonical
+            evidence = db.query(Finding).filter(Finding.detector_key == key, Finding.asset_id == asset_id).all()
+            assert evidence
+            assert {row.asset_finding_id for row in evidence} == {afs[0].id}
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_list_and_dashboard_queries_are_bounded_and_severity_filters_before_limit(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        _run_detected(client, token, world)
+        from sqlalchemy import event
+
+        from app.database import SessionLocal, engine
+        from app.models import TECHNICAL_OPEN, TREATMENT_UNADDRESSED, Asset, AssetFinding, Finding, Vulnerability
+
+        db = SessionLocal()
+        try:
+            tenant_id = world["tenant"]["id"]
+            site_id = world["site"]["id"]
+            now = datetime.now(timezone.utc)
+            asset = db.query(Asset).filter(Asset.tenant_id == tenant_id).first()
+            vulns = []
+            for index in range(2100):
+                vuln = Vulnerability(canonical_key=f"nuclei:scale-{index}", title=f"Scale {index}")
+                db.add(vuln)
+                vulns.append(vuln)
+            db.flush()
+            findings = []
+            for index, vuln in enumerate(vulns):
+                severity = "critical" if index < 50 else "high"
+                af = AssetFinding(
+                    tenant_id=tenant_id,
+                    asset_id=asset.id,
+                    vulnerability_id=vuln.id,
+                    technical_state=TECHNICAL_OPEN,
+                    treatment_state=TREATMENT_UNADDRESSED,
+                    first_seen=now,
+                    last_seen=now + timedelta(seconds=index),
+                    consecutive_clean_scans=0,
+                )
+                db.add(af)
+                db.flush()
+                db.add(
+                    Finding(
+                        tenant_id=tenant_id,
+                        asset_id=asset.id,
+                        asset_finding_id=af.id,
+                        detector_type="nuclei",
+                        detector_key=f"scale-{index}",
+                        evidence_key=f"scale:{index}",
+                        template_id=f"scale-{index}",
+                        name=f"Scale {index}",
+                        severity=severity,
+                        hostname="asset-a",
+                        host="https://10.1.0.10",
+                        found_at=now + timedelta(seconds=index),
+                    )
+                )
+                findings.append(af)
+            db.commit()
+        finally:
+            db.close()
+
+        count = {"n": 0}
+
+        def _before(*_args, **_kwargs):
+            count["n"] += 1
+
+        event.listen(engine, "before_cursor_execute", _before)
+        try:
+            listed = client.get(
+                f"/api/tenants/{world['tenant']['id']}/asset-findings",
+                headers=_headers(token),
+                params={"severity": "critical"},
+            )
+            dashboard = client.get("/api/dashboard", headers=_headers(token))
+            summary = client.get(f"/api/tenants/{world['tenant']['id']}/summary", headers=_headers(token))
+        finally:
+            event.remove(engine, "before_cursor_execute", _before)
+        assert listed.status_code == 200, listed.text
+        assert len(listed.json()) == 50
+        assert all(row["severity"] == "critical" for row in listed.json())
+        assert dashboard.status_code == 200
+        assert dashboard.json()["findings"]["critical"] == 50
+        assert dashboard.json()["findings"]["high"] == 2051
+        assert summary.json()["findings"]["critical"] == 50
+        assert count["n"] < 60

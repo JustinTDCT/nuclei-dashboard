@@ -4,7 +4,13 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.auth import require_any
 from app.database import get_db
-from app.finding_lifecycle import display_severity, identity_label, nuclei_mapping_for
+from app.finding_lifecycle import (
+    apply_severity_filter,
+    display_severity,
+    identity_label,
+    load_asset_finding_display,
+    nuclei_mapping_for,
+)
 from app.models import (
     Asset,
     AssetFinding,
@@ -29,9 +35,17 @@ def _require_tenant(db: Session, tenant_id: int) -> Tenant:
     return tenant
 
 
-def _serialize_asset_finding(db: Session, row: AssetFinding) -> AssetFindingOut:
+def _serialize_asset_finding(
+    db: Session,
+    row: AssetFinding,
+    *,
+    display: dict | None = None,
+) -> AssetFindingOut:
     vulnerability = row.vulnerability
-    mapping = nuclei_mapping_for(db, vulnerability.id)
+    info = (display or {}).get(row.id) if display is not None else None
+    mapping = info["mapping"] if info else nuclei_mapping_for(db, vulnerability.id)
+    severity = info["severity"] if info else display_severity(db, row)
+    evidence_count = info["evidence_count"] if info else (len(row.evidence) if row.evidence is not None else 0)
     asset = row.asset
     return AssetFindingOut(
         id=row.id,
@@ -44,7 +58,7 @@ def _serialize_asset_finding(db: Session, row: AssetFinding) -> AssetFindingOut:
         cve_id=vulnerability.cve_id,
         title=vulnerability.title or (mapping.detector_key if mapping else ""),
         identity_label=identity_label(vulnerability, mapping),
-        severity=display_severity(db, row),
+        severity=severity,
         technical_state=row.technical_state,
         treatment_state=row.treatment_state,
         first_seen=row.first_seen,
@@ -52,7 +66,7 @@ def _serialize_asset_finding(db: Session, row: AssetFinding) -> AssetFindingOut:
         resolved_at=row.resolved_at,
         consecutive_clean_scans=row.consecutive_clean_scans,
         reopened_count=row.reopened_count,
-        evidence_count=len(row.evidence) if row.evidence is not None else 0,
+        evidence_count=evidence_count,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -158,7 +172,6 @@ def list_asset_findings(
         .options(
             selectinload(AssetFinding.vulnerability),
             selectinload(AssetFinding.asset).selectinload(Asset.identifiers),
-            selectinload(AssetFinding.evidence),
         )
         .filter(AssetFinding.tenant_id == tenant_id)
     )
@@ -174,11 +187,10 @@ def list_asset_findings(
             query = query.filter(Vulnerability.canonical_key == canonical_key)
         if cve_id:
             query = query.filter(Vulnerability.cve_id == cve_id.upper())
+    query = apply_severity_filter(query, db, severity)
     rows = query.order_by(AssetFinding.last_seen.desc(), AssetFinding.id.desc()).limit(2000).all()
-    items = [_serialize_asset_finding(db, row) for row in rows]
-    if severity:
-        items = [item for item in items if item.severity == severity]
-    return items
+    display = load_asset_finding_display(db, rows)
+    return [_serialize_asset_finding(db, row, display=display) for row in rows]
 
 
 @router.get("/tenants/{tenant_id}/asset-findings/{asset_finding_id}", response_model=AssetFindingDetail)

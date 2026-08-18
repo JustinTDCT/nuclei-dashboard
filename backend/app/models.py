@@ -136,6 +136,26 @@ PHASE2A_EVENT_TYPES = frozenset(
 
 DEFAULT_FINDING_RESOLUTION_CLEAN_SCANS = 2
 
+COVERAGE_KIND_URL = "url"
+COVERAGE_KIND_IP = "ip"
+COVERAGE_KIND_IP_PORT = "ip_port"
+COVERAGE_KIND_FQDN = "fqdn"
+COVERAGE_KIND_CIDR = "cidr"
+COVERAGE_KIND_OTHER = "other"
+COVERAGE_KINDS = frozenset(
+    {
+        COVERAGE_KIND_URL,
+        COVERAGE_KIND_IP,
+        COVERAGE_KIND_IP_PORT,
+        COVERAGE_KIND_FQDN,
+        COVERAGE_KIND_CIDR,
+        COVERAGE_KIND_OTHER,
+    }
+)
+HOST_COVERAGE_KINDS = frozenset(
+    {COVERAGE_KIND_URL, COVERAGE_KIND_IP, COVERAGE_KIND_IP_PORT, COVERAGE_KIND_FQDN}
+)
+
 WAN_TARGET_IP = "ip"
 WAN_TARGET_CIDR = "cidr"
 WAN_TARGET_FQDN = "fqdn"
@@ -446,6 +466,9 @@ class ScanJob(Base):
     scan: Mapped["Scan"] = relationship(back_populates="jobs")
     claimed_agent: Mapped["Agent | None"] = relationship()
     findings: Mapped[list["Finding"]] = relationship(back_populates="job")
+    detector_coverage: Mapped[list["ScanRunDetectorCoverage"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
 
 
 class AuthorizedWanTarget(Base):
@@ -1064,6 +1087,35 @@ class AssetFindingHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     asset_finding: Mapped["AssetFinding"] = relationship(back_populates="history")
+
+
+class ScanRunDetectorCoverage(Base):
+    __tablename__ = "scan_run_detector_coverage"
+    __table_args__ = (
+        UniqueConstraint(
+            "scan_job_id",
+            "detector_type",
+            "target",
+            name="uq_scan_run_detector_coverage_job_detector_target",
+        ),
+        CheckConstraint(
+            "target_kind IN ('url', 'ip', 'ip_port', 'fqdn', 'cidr', 'other')",
+            name="ck_scan_run_detector_coverage_target_kind",
+        ),
+        Index("ix_scan_run_detector_coverage_tenant_id", "tenant_id"),
+        Index("ix_scan_run_detector_coverage_scan_job_id_detector_type", "scan_job_id", "detector_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id", ondelete="CASCADE"), index=True)
+    detector_type: Mapped[str] = mapped_column(String(40))
+    target: Mapped[str] = mapped_column(String(500))
+    normalized_host: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    target_kind: Mapped[str] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    job: Mapped["ScanJob"] = relationship(back_populates="detector_coverage")
 
 
 class AssetFindingRunEvaluation(Base):

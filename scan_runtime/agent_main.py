@@ -41,6 +41,11 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token) -> None
                 pass
         if result["devices"]:
             client.devices(token, job_id, result["devices"])
+        for coverage in result.get("detector_coverage") or []:
+            try:
+                client.detector_coverage(token, job_id, coverage)
+            except ApiError:
+                pass
         if result["findings"]:
             client.findings(token, job_id, result["findings"])
         client.complete(token, job_id, ok=True)

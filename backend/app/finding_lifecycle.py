@@ -7,19 +7,26 @@ clean-scan resolution. Treatment workflows are Phase 2C.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.classify import identity_name, is_ip, normalize_hostname
 from app.correlation import canonical_asset_id
 from app.events import emit_domain_event
 from app.models import (
+    COVERAGE_KIND_CIDR,
+    COVERAGE_KIND_FQDN,
+    COVERAGE_KIND_IP,
+    COVERAGE_KIND_IP_PORT,
+    COVERAGE_KIND_OTHER,
+    COVERAGE_KIND_URL,
     DEFAULT_FINDING_RESOLUTION_CLEAN_SCANS,
     DETECTOR_NUCLEI,
     EVALUATION_CLEAN,
@@ -30,6 +37,7 @@ from app.models import (
     HISTORY_OPENED,
     HISTORY_REOPENED,
     HISTORY_RESOLVED,
+    HOST_COVERAGE_KINDS,
     JOB_DONE,
     JOB_FAILED,
     SOURCE_SCANNER,
@@ -44,6 +52,7 @@ from app.models import (
     Device,
     Finding,
     ScanJob,
+    ScanRunDetectorCoverage,
     Vulnerability,
     VulnerabilityDetectorMapping,
 )
@@ -106,11 +115,19 @@ def _classification_cves(raw: dict[str, Any]) -> list[str]:
     return candidates
 
 
-def extract_explicit_cve(raw: dict[str, Any]) -> str | None:
+def explicit_cves(raw: dict[str, Any]) -> list[str]:
+    seen: list[str] = []
     for item in _classification_cves(raw):
         cve = normalize_cve(item)
-        if cve:
-            return cve
+        if cve and cve not in seen:
+            seen.append(cve)
+    return seen
+
+
+def extract_explicit_cve(raw: dict[str, Any]) -> str | None:
+    cves = explicit_cves(raw)
+    if len(cves) == 1:
+        return cves[0]
     return None
 
 
@@ -177,6 +194,166 @@ def parse_detector_identity(report: FindingReport) -> DetectorIdentity:
     )
 
 
+def parse_coverage_target(target: str) -> tuple[str, str]:
+    raw = (target or "").strip()
+    if not raw:
+        return "", COVERAGE_KIND_OTHER
+    if "://" in raw:
+        host = urlparse(raw).hostname or ""
+        return normalize_hostname(host), COVERAGE_KIND_URL
+    try:
+        network = ipaddress.ip_network(raw, strict=False)
+        if "/" in raw or network.num_addresses > 1:
+            return "", COVERAGE_KIND_CIDR
+        return str(network.network_address), COVERAGE_KIND_IP
+    except ValueError:
+        pass
+    if raw.count(":") == 1:
+        host, _, port = raw.partition(":")
+        if is_ip(host) and port.isdigit():
+            return host, COVERAGE_KIND_IP_PORT
+    if is_ip(raw):
+        return raw, COVERAGE_KIND_IP
+    host = normalize_hostname(raw.split("/")[0])
+    if host and not is_ip(host):
+        return host, COVERAGE_KIND_FQDN
+    return host, COVERAGE_KIND_OTHER
+
+
+def store_detector_coverage(
+    db: Session,
+    job: ScanJob,
+    *,
+    detector_type: str,
+    targets: list[str],
+) -> int:
+    detector = (detector_type or "").strip().lower()
+    if not detector:
+        raise FindingLifecycleError("detector_type is required")
+    if job.tenant_id is None:
+        raise FindingLifecycleError("Run tenant is required")
+    added = 0
+    seen: set[str] = set()
+    for raw in targets:
+        target = (raw or "").strip()
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        existing = (
+            db.query(ScanRunDetectorCoverage.id)
+            .filter(
+                ScanRunDetectorCoverage.scan_job_id == job.id,
+                ScanRunDetectorCoverage.detector_type == detector,
+                ScanRunDetectorCoverage.target == target,
+            )
+            .first()
+        )
+        if existing is not None:
+            continue
+        host, kind = parse_coverage_target(target)
+        db.add(
+            ScanRunDetectorCoverage(
+                tenant_id=job.tenant_id,
+                scan_job_id=job.id,
+                detector_type=detector,
+                target=target,
+                normalized_host=host,
+                target_kind=kind,
+            )
+        )
+        added += 1
+    db.flush()
+    return added
+
+
+def current_run_observations(db: Session, job: ScanJob) -> list[AssetObservation]:
+    return (
+        db.query(AssetObservation)
+        .filter(
+            AssetObservation.scan_job_id == job.id,
+            AssetObservation.tenant_id == job.tenant_id,
+        )
+        .all()
+    )
+
+
+def _observation_identity_tokens(observation: AssetObservation) -> set[str]:
+    tokens: set[str] = set()
+    if observation.ip:
+        tokens.add(observation.ip.strip())
+    hostname = normalize_hostname(observation.hostname or "")
+    if hostname and not is_ip(hostname):
+        tokens.add(hostname)
+    snapshot = observation.snapshot if isinstance(observation.snapshot, dict) else {}
+    for key in ("ip", "hostname", "fqdn"):
+        value = snapshot.get(key)
+        if isinstance(value, str) and value.strip():
+            token = normalize_hostname(value) if key != "ip" else value.strip()
+            if token and (key == "ip" or not is_ip(token)):
+                tokens.add(token)
+    return tokens
+
+
+def _identity_tokens(identity: DetectorIdentity) -> set[str]:
+    tokens: set[str] = set()
+    if identity.ip:
+        tokens.add(identity.ip.strip())
+    hostname = normalize_hostname(identity.hostname or "")
+    if hostname and not is_ip(hostname):
+        tokens.add(hostname)
+    raw_host = (identity.host or identity.matched_at or "").strip()
+    parsed = urlparse(raw_host).hostname if "://" in raw_host else raw_host.split("/")[0].split(":")[0]
+    parsed = normalize_hostname(parsed or "")
+    if parsed:
+        tokens.add(parsed)
+    return {token for token in tokens if token}
+
+
+def resolve_current_run_asset(db: Session, job: ScanJob, identity: DetectorIdentity) -> Asset | None:
+    observations = current_run_observations(db, job)
+    if not observations:
+        return None
+    tokens = _identity_tokens(identity)
+    if not tokens:
+        return None
+    asset_ids: set[int] = set()
+    for observation in observations:
+        if observation.tenant_id != job.tenant_id:
+            continue
+        if tokens.intersection(_observation_identity_tokens(observation)):
+            asset_ids.add(observation.asset_id)
+    if len(asset_ids) != 1:
+        return None
+    asset = db.get(Asset, next(iter(asset_ids)))
+    if asset is None or asset.tenant_id != job.tenant_id:
+        return None
+    canonical_id = canonical_asset_id(db, asset.id)
+    if canonical_id != asset.id:
+        asset = db.get(Asset, canonical_id)
+        if asset is None or asset.tenant_id != job.tenant_id:
+            return None
+    return asset
+
+
+def current_run_device(db: Session, job: ScanJob, identity: DetectorIdentity) -> Device | None:
+    tokens = _identity_tokens(identity)
+    if not tokens:
+        return None
+    devices = (
+        db.query(Device)
+        .filter(Device.last_scan_job_id == job.id, Device.tenant_id == job.tenant_id)
+        .all()
+    )
+    matches: list[Device] = []
+    for device in devices:
+        device_tokens = {part for part in (device.ip or "", normalize_hostname(device.hostname or "")) if part}
+        if tokens.intersection(device_tokens):
+            matches.append(device)
+    if len({row.id for row in matches}) != 1:
+        return None
+    return matches[0]
+
+
 def resolve_trusted_asset(
     db: Session,
     *,
@@ -186,7 +363,11 @@ def resolve_trusted_asset(
 ) -> Asset | None:
     if device is None or device.asset_id is None:
         return None
+    if device.last_scan_job_id != job.id:
+        return None
     if device.tenant_id != tenant_id or device.tenant_id != job.tenant_id:
+        return None
+    if not asset_observed_in_run(db, job, device.asset_id):
         return None
     asset = db.get(Asset, device.asset_id)
     if asset is None or asset.tenant_id != tenant_id:
@@ -224,11 +405,69 @@ def get_or_create_vulnerability(db: Session, identity: DetectorIdentity) -> Vuln
     return row
 
 
+def _known_cves_for_detector(db: Session, identity: DetectorIdentity) -> set[str]:
+    cves: set[str] = set()
+    if identity.cve_id:
+        cves.add(identity.cve_id)
+    rows = (
+        db.query(Finding.raw_json)
+        .filter(
+            Finding.detector_type == identity.detector_type,
+            Finding.detector_key == identity.detector_key,
+        )
+        .all()
+    )
+    for (raw,) in rows:
+        extracted = extract_explicit_cve(raw if isinstance(raw, dict) else {})
+        if extracted:
+            cves.add(extracted)
+    return cves
+
+
+def desired_catalog_identity(db: Session, identity: DetectorIdentity) -> tuple[str, str | None]:
+    cves = _known_cves_for_detector(db, identity)
+    if len(cves) == 1:
+        cve_id = next(iter(cves))
+        return f"cve:{cve_id}", cve_id
+    return catalog_identity(identity.detector_type, identity.detector_key, None), None
+
+
 def get_or_create_mapping(
     db: Session,
     vulnerability: Vulnerability,
     identity: DetectorIdentity,
 ) -> VulnerabilityDetectorMapping:
+    vulnerability, mapping = upsert_detector_catalog(db, identity)
+    if mapping.vulnerability_id != vulnerability.id:
+        raise FindingLifecycleError("Detector mapping already belongs to a different vulnerability")
+    return mapping
+
+
+def upsert_detector_catalog(
+    db: Session,
+    identity: DetectorIdentity,
+) -> tuple[Vulnerability | None, VulnerabilityDetectorMapping | None]:
+    if not identity.detector_type or not identity.detector_key:
+        return None, None
+    canonical_key, cve_id = desired_catalog_identity(db, identity)
+    resolved = DetectorIdentity(
+        detector_type=identity.detector_type,
+        detector_key=identity.detector_key,
+        cve_id=cve_id,
+        canonical_key=canonical_key,
+        title=identity.title,
+        description=identity.description,
+        severity=identity.severity,
+        tags=identity.tags,
+        host=identity.host,
+        matched_at=identity.matched_at,
+        hostname=identity.hostname,
+        ip=identity.ip,
+        raw=identity.raw,
+    )
+    vulnerability = get_or_create_vulnerability(db, resolved)
+    if vulnerability is None:
+        return None, None
     existing = (
         db.query(VulnerabilityDetectorMapping)
         .filter(
@@ -237,24 +476,68 @@ def get_or_create_mapping(
         )
         .first()
     )
-    if existing is not None:
-        if existing.vulnerability_id != vulnerability.id:
-            raise FindingLifecycleError("Detector mapping already belongs to a different vulnerability")
-        if identity.severity:
-            existing.last_severity = identity.severity
-        if identity.tags:
-            existing.last_tags = identity.tags
-        return existing
-    row = VulnerabilityDetectorMapping(
-        vulnerability_id=vulnerability.id,
-        detector_type=identity.detector_type,
-        detector_key=identity.detector_key,
-        last_severity=identity.severity,
-        last_tags=identity.tags,
-    )
-    db.add(row)
+    if existing is None:
+        existing = VulnerabilityDetectorMapping(
+            vulnerability_id=vulnerability.id,
+            detector_type=identity.detector_type,
+            detector_key=identity.detector_key,
+            last_severity=identity.severity,
+            last_tags=identity.tags,
+        )
+        db.add(existing)
+        db.flush()
+        return vulnerability, existing
+    if existing.vulnerability_id != vulnerability.id:
+        retarget_mapping(db, existing, vulnerability)
+    if identity.severity:
+        existing.last_severity = identity.severity
+    if identity.tags:
+        existing.last_tags = identity.tags
     db.flush()
-    return row
+    return vulnerability, existing
+
+
+def retarget_mapping(
+    db: Session,
+    mapping: VulnerabilityDetectorMapping,
+    vulnerability: Vulnerability,
+) -> None:
+    previous_id = mapping.vulnerability_id
+    mapping.vulnerability_id = vulnerability.id
+    db.flush()
+    donors = (
+        db.query(AssetFinding)
+        .filter(AssetFinding.vulnerability_id == previous_id)
+        .all()
+    )
+    for donor in donors:
+        has_support = (
+            db.query(Finding.id)
+            .filter(
+                Finding.asset_finding_id == donor.id,
+                Finding.detector_type == mapping.detector_type,
+                Finding.detector_key == mapping.detector_key,
+            )
+            .first()
+            is not None
+        )
+        if not has_support:
+            continue
+        keeper = (
+            db.query(AssetFinding)
+            .filter(
+                AssetFinding.asset_id == donor.asset_id,
+                AssetFinding.vulnerability_id == vulnerability.id,
+                AssetFinding.id != donor.id,
+            )
+            .first()
+        )
+        if keeper is None:
+            donor.vulnerability_id = vulnerability.id
+            donor.updated_at = utcnow()
+        else:
+            _merge_duplicate_asset_findings(db, keeper=keeper, donor=donor, now=utcnow())
+    db.flush()
 
 
 def _append_history(
@@ -470,31 +753,12 @@ def ingest_findings(
     scope: str,
     reports: list[FindingReport],
 ) -> int:
-    from app.inventory import _find_device, _promote_hostname
-
     job = db.get(ScanJob, job_id)
     if job is None or job.tenant_id != tenant_id:
         raise FindingLifecycleError("Scan run does not belong to this tenant")
     added = 0
     for report in reports:
         identity = parse_detector_identity(report)
-        raw_host = (identity.host or identity.matched_at or "").strip()
-        parsed = urlparse(raw_host).hostname if "://" in raw_host else raw_host.split("/")[0].split(":")[0]
-        parsed = normalize_hostname(parsed or "")
-        try:
-            context = execution_context(db, job)
-            run_scope = context.get("scope") or scope
-            site_id = context.get("site_id") if run_scope == "lan" else None
-        except ExecutionBlocked:
-            run_scope = scope
-            site_id = None
-        device = _find_device(db, tenant_id, run_scope, identity.hostname, identity.ip, site_id=site_id)
-        if device and parsed and not is_ip(parsed):
-            device = _promote_hostname(db, device, parsed, tenant_id, run_scope, site_id=site_id)
-        if device and identity.ip:
-            device.ip = identity.ip
-        if device and device.tenant_id != tenant_id:
-            raise FindingLifecycleError("Cross-tenant device/finding relationship is not allowed")
         key = evidence_identity_key(
             scan_job_id=job.id,
             detector_type=identity.detector_type,
@@ -504,21 +768,24 @@ def ingest_findings(
         )
         if db.query(Finding.id).filter(Finding.evidence_key == key).first() is not None:
             continue
-        asset = resolve_trusted_asset(db, tenant_id=tenant_id, job=job, device=device)
+        vulnerability, _mapping = upsert_detector_catalog(db, identity)
+        device = current_run_device(db, job, identity)
+        if device and device.tenant_id != tenant_id:
+            raise FindingLifecycleError("Cross-tenant device/finding relationship is not allowed")
+        asset = resolve_current_run_asset(db, job, identity)
+        if asset is not None and asset.tenant_id != tenant_id:
+            raise FindingLifecycleError("Cross-tenant asset/finding relationship is not allowed")
         hostname = (device.hostname if device else identity.hostname) or identity.hostname
         asset_finding = None
-        if asset is not None and identity.canonical_key:
-            vulnerability = get_or_create_vulnerability(db, identity)
-            if vulnerability is not None:
-                get_or_create_mapping(db, vulnerability, identity)
-                asset_finding, _ = apply_detection(
-                    db,
-                    asset=asset,
-                    vulnerability=vulnerability,
-                    job=job,
-                    identity=identity,
-                    detected_at=utcnow(),
-                )
+        if asset is not None and vulnerability is not None:
+            asset_finding, _ = apply_detection(
+                db,
+                asset=asset,
+                vulnerability=vulnerability,
+                job=job,
+                identity=identity,
+                detected_at=utcnow(),
+            )
         _evidence, created = _insert_evidence(
             db,
             tenant_id=tenant_id,
@@ -547,6 +814,58 @@ def nuclei_mapping_for(db: Session, vulnerability_id: int) -> VulnerabilityDetec
     )
 
 
+def supporting_detector_keys(db: Session, asset_finding: AssetFinding) -> list[tuple[str, str]]:
+    rows = (
+        db.query(Finding.detector_type, Finding.detector_key)
+        .filter(
+            Finding.asset_finding_id == asset_finding.id,
+            Finding.detector_type != "",
+            Finding.detector_key != "",
+        )
+        .distinct()
+        .all()
+    )
+    return [(detector_type, detector_key) for detector_type, detector_key in rows]
+
+
+def supporting_mappings(db: Session, asset_finding: AssetFinding) -> list[VulnerabilityDetectorMapping]:
+    keys = supporting_detector_keys(db, asset_finding)
+    if not keys:
+        return []
+    mappings: list[VulnerabilityDetectorMapping] = []
+    for detector_type, detector_key in keys:
+        mapping = (
+            db.query(VulnerabilityDetectorMapping)
+            .filter(
+                VulnerabilityDetectorMapping.detector_type == detector_type,
+                VulnerabilityDetectorMapping.detector_key == detector_key,
+            )
+            .first()
+        )
+        if mapping is None:
+            return []
+        mappings.append(mapping)
+    return mappings
+
+
+def latest_supporting_evidence(
+    db: Session,
+    asset_finding: AssetFinding,
+    detector_type: str,
+    detector_key: str,
+) -> Finding | None:
+    return (
+        db.query(Finding)
+        .filter(
+            Finding.asset_finding_id == asset_finding.id,
+            Finding.detector_type == detector_type,
+            Finding.detector_key == detector_key,
+        )
+        .order_by(Finding.found_at.desc(), Finding.id.desc())
+        .first()
+    )
+
+
 def asset_observed_in_run(db: Session, job: ScanJob, asset_id: int) -> bool:
     return (
         db.query(AssetObservation.id)
@@ -558,6 +877,61 @@ def asset_observed_in_run(db: Session, job: ScanJob, asset_id: int) -> bool:
         .first()
         is not None
     )
+
+
+def asset_covered_by_detector(db: Session, job: ScanJob, asset_id: int, detector_type: str) -> bool:
+    coverage = (
+        db.query(ScanRunDetectorCoverage)
+        .filter(
+            ScanRunDetectorCoverage.scan_job_id == job.id,
+            ScanRunDetectorCoverage.tenant_id == job.tenant_id,
+            ScanRunDetectorCoverage.detector_type == detector_type,
+        )
+        .all()
+    )
+    if not coverage:
+        return False
+    observations = (
+        db.query(AssetObservation)
+        .filter(
+            AssetObservation.scan_job_id == job.id,
+            AssetObservation.asset_id == asset_id,
+            AssetObservation.tenant_id == job.tenant_id,
+        )
+        .all()
+    )
+    if not observations:
+        return False
+    tokens: set[str] = set()
+    for observation in observations:
+        tokens.update(_observation_identity_tokens(observation))
+    if not tokens:
+        return False
+    for row in coverage:
+        if row.target_kind not in HOST_COVERAGE_KINDS:
+            continue
+        host = (row.normalized_host or "").strip()
+        if host and host in tokens:
+            return True
+    return False
+
+
+def _mapping_included_in_filters(
+    *,
+    stages: dict[str, Any],
+    severity: str,
+    tags: str,
+) -> bool:
+    selected = set(parse_csv_tokens(str(stages.get("nuclei_severities") or "")))
+    known_severity = (severity or "").strip().lower()
+    if not selected or not known_severity or known_severity not in selected:
+        return False
+    tag_filter = parse_csv_tokens(str(stages.get("nuclei_tags") or ""))
+    if tag_filter:
+        known_tags = set(parse_csv_tokens(tags))
+        if not known_tags or not known_tags.intersection(tag_filter):
+            return False
+    return True
 
 
 def is_finding_applicable_to_run(db: Session, asset_finding: AssetFinding, job: ScanJob) -> bool:
@@ -575,19 +949,18 @@ def is_finding_applicable_to_run(db: Session, asset_finding: AssetFinding, job: 
         return False
     if not asset_observed_in_run(db, job, asset_finding.asset_id):
         return False
-    mapping = nuclei_mapping_for(db, asset_finding.vulnerability_id)
-    if mapping is None:
+    if not asset_covered_by_detector(db, job, asset_finding.asset_id, DETECTOR_NUCLEI):
         return False
-    if mapping.detector_type != DETECTOR_NUCLEI:
+    mappings = supporting_mappings(db, asset_finding)
+    if not mappings:
         return False
-    selected = set(parse_csv_tokens(str(stages.get("nuclei_severities") or "")))
-    known_severity = (mapping.last_severity or "").strip().lower()
-    if not selected or not known_severity or known_severity not in selected:
-        return False
-    tag_filter = parse_csv_tokens(str(stages.get("nuclei_tags") or ""))
-    if tag_filter:
-        known_tags = set(parse_csv_tokens(mapping.last_tags))
-        if not known_tags or not known_tags.intersection(tag_filter):
+    for mapping in mappings:
+        if mapping.detector_type != DETECTOR_NUCLEI:
+            return False
+        evidence = latest_supporting_evidence(db, asset_finding, mapping.detector_type, mapping.detector_key)
+        severity = (evidence.severity if evidence else mapping.last_severity) or ""
+        tags = (evidence.tags if evidence else mapping.last_tags) or ""
+        if not _mapping_included_in_filters(stages=stages, severity=severity, tags=tags):
             return False
     return True
 
@@ -763,6 +1136,43 @@ def complete_scan_run(db: Session, job: ScanJob, *, ok: bool, error: str | None 
     return job
 
 
+def latest_evidence_subquery(db: Session):
+    return (
+        db.query(
+            Finding.asset_finding_id.label("asset_finding_id"),
+            Finding.severity.label("severity"),
+            Finding.detector_type.label("detector_type"),
+            Finding.detector_key.label("detector_key"),
+        )
+        .distinct(Finding.asset_finding_id)
+        .filter(Finding.asset_finding_id.isnot(None))
+        .order_by(Finding.asset_finding_id, Finding.found_at.desc(), Finding.id.desc())
+        .subquery()
+    )
+
+
+def display_severity_sql(latest, mapping):
+    return func.lower(func.coalesce(latest.c.severity, mapping.last_severity, "info"))
+
+
+def apply_severity_filter(query, db: Session, severity: str | None):
+    if not severity:
+        return query
+    latest = latest_evidence_subquery(db)
+    mapping = VulnerabilityDetectorMapping
+    return (
+        query.outerjoin(latest, latest.c.asset_finding_id == AssetFinding.id)
+        .outerjoin(
+            mapping,
+            and_(
+                mapping.detector_type == latest.c.detector_type,
+                mapping.detector_key == latest.c.detector_key,
+            ),
+        )
+        .filter(display_severity_sql(latest, mapping) == severity.strip().lower())
+    )
+
+
 def display_severity(db: Session, asset_finding: AssetFinding) -> str:
     latest = (
         db.query(Finding)
@@ -772,20 +1182,105 @@ def display_severity(db: Session, asset_finding: AssetFinding) -> str:
     )
     if latest and latest.severity:
         return latest.severity
+    if latest and latest.detector_type and latest.detector_key:
+        mapping = (
+            db.query(VulnerabilityDetectorMapping)
+            .filter(
+                VulnerabilityDetectorMapping.detector_type == latest.detector_type,
+                VulnerabilityDetectorMapping.detector_key == latest.detector_key,
+            )
+            .first()
+        )
+        if mapping and mapping.last_severity:
+            return mapping.last_severity
     mapping = nuclei_mapping_for(db, asset_finding.vulnerability_id)
     if mapping and mapping.last_severity:
         return mapping.last_severity
     return "info"
 
 
+def load_asset_finding_display(db: Session, rows: list[AssetFinding]) -> dict[int, dict[str, Any]]:
+    ids = [row.id for row in rows]
+    empty: dict[int, dict[str, Any]] = {
+        row.id: {"severity": "info", "mapping": None, "evidence_count": 0} for row in rows
+    }
+    if not ids:
+        return empty
+    latest_rows = (
+        db.query(Finding)
+        .distinct(Finding.asset_finding_id)
+        .filter(Finding.asset_finding_id.in_(ids))
+        .order_by(Finding.asset_finding_id, Finding.found_at.desc(), Finding.id.desc())
+        .all()
+    )
+    latest_by_af = {row.asset_finding_id: row for row in latest_rows if row.asset_finding_id is not None}
+    mapping_keys = {
+        (row.detector_type, row.detector_key)
+        for row in latest_rows
+        if row.detector_type and row.detector_key
+    }
+    mappings = []
+    if mapping_keys:
+        mappings = (
+            db.query(VulnerabilityDetectorMapping)
+            .filter(
+                or_(
+                    *[
+                        and_(
+                            VulnerabilityDetectorMapping.detector_type == detector_type,
+                            VulnerabilityDetectorMapping.detector_key == detector_key,
+                        )
+                        for detector_type, detector_key in mapping_keys
+                    ]
+                )
+            )
+            .all()
+        )
+    mapping_by_key = {(row.detector_type, row.detector_key): row for row in mappings}
+    counts = dict(
+        db.query(Finding.asset_finding_id, func.count(Finding.id))
+        .filter(Finding.asset_finding_id.in_(ids))
+        .group_by(Finding.asset_finding_id)
+        .all()
+    )
+    display = empty
+    for asset_finding in rows:
+        latest = latest_by_af.get(asset_finding.id)
+        mapping = None
+        if latest is not None:
+            mapping = mapping_by_key.get((latest.detector_type, latest.detector_key))
+        severity = (latest.severity if latest and latest.severity else "") or (
+            mapping.last_severity if mapping else ""
+        ) or "info"
+        display[asset_finding.id] = {
+            "severity": severity,
+            "mapping": mapping,
+            "evidence_count": int(counts.get(asset_finding.id) or 0),
+        }
+    return display
+
+
 def open_finding_severity_counts(db: Session, tenant_id: int | None = None) -> dict[str, int]:
-    query = db.query(AssetFinding).filter(AssetFinding.technical_state == TECHNICAL_OPEN)
+    latest = latest_evidence_subquery(db)
+    mapping = VulnerabilityDetectorMapping
+    query = (
+        db.query(display_severity_sql(latest, mapping), func.count(AssetFinding.id))
+        .select_from(AssetFinding)
+        .outerjoin(latest, latest.c.asset_finding_id == AssetFinding.id)
+        .outerjoin(
+            mapping,
+            and_(
+                mapping.detector_type == latest.c.detector_type,
+                mapping.detector_key == latest.c.detector_key,
+            ),
+        )
+        .filter(AssetFinding.technical_state == TECHNICAL_OPEN)
+    )
     if tenant_id is not None:
         query = query.filter(AssetFinding.tenant_id == tenant_id)
     counts = {key: 0 for key in ("critical", "high", "medium", "low", "info")}
-    for row in query.all():
-        severity = display_severity(db, row)
-        counts[severity] = counts.get(severity, 0) + 1
+    for severity, total in query.group_by(display_severity_sql(latest, mapping)).all():
+        counts[str(severity or "info")] = counts.get(str(severity or "info"), 0) + int(total)
     return counts
 
 
@@ -896,18 +1391,25 @@ def _merge_duplicate_asset_findings(
 __all__ = [
     "FindingLifecycleError",
     "apply_detection",
+    "apply_severity_filter",
+    "asset_covered_by_detector",
     "asset_observed_in_run",
     "catalog_identity",
     "complete_scan_run",
     "display_severity",
     "evidence_identity_key",
+    "explicit_cves",
     "extract_explicit_cve",
     "finalize_run_lifecycle",
     "identity_label",
     "ingest_findings",
     "is_finding_applicable_to_run",
+    "load_asset_finding_display",
     "merge_asset_findings",
     "parse_detector_identity",
     "resolution_threshold",
+    "resolve_current_run_asset",
     "resolve_trusted_asset",
+    "store_detector_coverage",
+    "upsert_detector_catalog",
 ]

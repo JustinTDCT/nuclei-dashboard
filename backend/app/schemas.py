@@ -494,6 +494,19 @@ class FindingReport(BaseModel):
     raw: dict[str, Any] = {}
 
 
+class DetectorCoverageIn(BaseModel):
+    detector_type: str = "nuclei"
+    targets: list[str] = []
+
+    @field_validator("detector_type")
+    @classmethod
+    def _detector_type(cls, value: str) -> str:
+        token = (value or "").strip().lower()
+        if not token:
+            raise ValueError("detector_type is required")
+        return token
+
+
 class TagOut(BaseModel):
     id: int
     tenant_id: int

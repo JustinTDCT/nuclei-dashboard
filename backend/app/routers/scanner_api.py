@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.finding_lifecycle import FindingLifecycleError, complete_scan_run
+from app.finding_lifecycle import FindingLifecycleError, complete_scan_run, store_detector_coverage
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError
@@ -14,7 +14,7 @@ from app.scan_dispatch import CENTRAL_WORKER
 from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_wan_start
 from app.scan_snapshot import merge_provenance
-from app.schemas import DeviceReport, FindingReport
+from app.schemas import DetectorCoverageIn, DeviceReport, FindingReport
 
 router = APIRouter(prefix="/internal/scanner", tags=["scanner"])
 
@@ -102,6 +102,19 @@ def post_devices(
     job.hosts_found = db.query(Device).filter(Device.last_scan_job_id == job.id).count()
     db.commit()
     return {"ok": True, "new_devices": created, "hosts_found": job.hosts_found}
+
+
+@router.post("/jobs/{job_id}/detector-coverage")
+def post_detector_coverage(
+    job_id: int,
+    body: DetectorCoverageIn,
+    _: None = Depends(require_scanner),
+    db: Session = Depends(get_db),
+):
+    job = _owned(db, job_id)
+    added = store_detector_coverage(db, job, detector_type=body.detector_type, targets=body.targets)
+    db.commit()
+    return {"ok": True, "added": added}
 
 
 @router.post("/jobs/{job_id}/findings")

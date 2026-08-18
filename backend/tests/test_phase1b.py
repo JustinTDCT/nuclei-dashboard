@@ -17,7 +17,7 @@ PHASE1A_REVISION = "0002_sites_networks"
 PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1D_HEAD = "0006_scan_definition_execution"
-PHASE2A_HEAD = "0007_vulnerability_finding_lifecycle"
+PHASE2A_HEAD = "0008_phase2a_finding_identity_repair"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",

@@ -88,6 +88,14 @@ class CentralClient:
             "POST", f"/api/agent/jobs/{job_id}/findings", headers=_auth(token), json=findings
         ).json()
 
+    def detector_coverage(self, token: str, job_id: int, payload: dict[str, Any]) -> dict:
+        return self._request(
+            "POST",
+            f"/api/agent/jobs/{job_id}/detector-coverage",
+            headers=_auth(token),
+            json=payload,
+        ).json()
+
     def provenance(self, token: str, job_id: int, payload: dict[str, Any]) -> dict:
         return self._request(
             "POST", f"/api/agent/jobs/{job_id}/provenance", headers=_auth(token), json=payload
@@ -133,6 +141,9 @@ class ScannerClient:
 
     def findings(self, job_id: int, findings: list[dict]) -> dict:
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/findings", json=findings).json()
+
+    def detector_coverage(self, job_id: int, payload: dict[str, Any]) -> dict:
+        return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/detector-coverage", json=payload).json()
 
     def provenance(self, job_id: int, payload: dict[str, Any]) -> dict:
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/provenance", json=payload).json()

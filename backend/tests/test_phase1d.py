@@ -17,7 +17,7 @@ from tests.conftest import requires_postgres
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1D_HEAD = "0006_scan_definition_execution"
-PHASE2A_HEAD = "0007_vulnerability_finding_lifecycle"
+PHASE2A_HEAD = "0008_phase2a_finding_identity_repair"
 RUNTIME_ROOT = BACKEND_ROOT.parent / "scan_runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))

@@ -80,6 +80,7 @@ POST_BASELINE_TABLES = frozenset(
         "asset_findings",
         "asset_finding_history",
         "asset_finding_run_evaluations",
+        "scan_run_detector_coverage",
     }
 )
 PHASE1A_MARKER_COLUMNS = {

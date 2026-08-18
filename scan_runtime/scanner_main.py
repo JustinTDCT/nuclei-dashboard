@@ -29,6 +29,11 @@ def main() -> None:
                             pass
                     if result["devices"]:
                         client.devices(job_id, result["devices"])
+                    for coverage in result.get("detector_coverage") or []:
+                        try:
+                            client.detector_coverage(job_id, coverage)
+                        except ApiError:
+                            pass
                     if result["findings"]:
                         client.findings(job_id, result["findings"])
                     client.complete(job_id, ok=True)

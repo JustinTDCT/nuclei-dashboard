@@ -132,6 +132,7 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
     attach_hostnames(devices, log=log)
     enrich_identities(devices, log=log)
     findings: list[dict[str, Any]] = []
+    nuclei_targets: list[str] = []
     if stages.get("vulnerability"):
         nuclei_targets = [h["url"] for h in http_info if h.get("url")]
         if not nuclei_targets:
@@ -149,7 +150,15 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
     finalize_devices(devices)
     named = sum(1 for d in devices if usable_hostname(d.get("hostname") or ""))
     _log(f"Hostnames resolved on agent: {named}/{len(devices)}", log)
-    return {"devices": devices, "findings": findings, "provenance": collect_tool_versions(log=log)}
+    coverage = []
+    if stages.get("vulnerability"):
+        coverage.append({"detector_type": "nuclei", "targets": nuclei_targets})
+    return {
+        "devices": devices,
+        "findings": findings,
+        "provenance": collect_tool_versions(log=log),
+        "detector_coverage": coverage,
+    }
 
 
 def resolve_execution_targets(job: dict[str, Any], log: LogFn | None = None) -> list[dict[str, str]]:

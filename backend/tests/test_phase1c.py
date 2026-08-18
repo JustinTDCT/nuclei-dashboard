@@ -17,7 +17,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1B_HEAD = "0004_asset_observation_integrity"
 PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1D_HEAD = "0006_scan_definition_execution"
-PHASE2A_HEAD = "0007_vulnerability_finding_lifecycle"
+PHASE2A_HEAD = "0008_phase2a_finding_identity_repair"
 PHASE1C_TABLES = {"asset_correlation_decisions", "domain_events"}
 FROZEN = (
     "0001_baseline_current_schema.py",
@@ -1276,6 +1276,7 @@ def test_phase_boundary_no_later_engines(reset_db):
     tables = _tables(engine)
     assert "asset_findings" in tables
     assert "vulnerabilities" in tables
+    assert "scan_run_detector_coverage" in tables
     assert "policies" not in tables
     assert "alert_policies" not in tables
     assert "scan_definitions" not in tables
