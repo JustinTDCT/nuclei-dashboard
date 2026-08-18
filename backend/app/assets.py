@@ -1,8 +1,7 @@
 """Asset current-state projection and historical observation writing.
 
-Phase 1B does not correlate Assets. Incoming scanner reports still use the
-legacy Device resolver. Each Device maps to at most one Asset via
-Device.asset_id. Matching by IP/hostname/MAC across Assets is Phase 1C.
+Phase 1C: Asset correlation is authoritative. Device rows are a
+compatibility projection written after the correlation decision.
 """
 
 from __future__ import annotations
@@ -18,11 +17,20 @@ from app.classify import is_placeholder_name, normalize_hostname
 from app.locality import compatibility_site_for_tenant
 from app.models import (
     CRITICALITIES,
+    DECISION_LINKED_EXISTING,
     DISPOSITIONS,
+    DISPOSITION_UNREVIEWED,
+    IDENTIFIER_DEVICE_ID,
+    IDENTIFIER_FQDN,
     IDENTIFIER_HOSTNAME,
     IDENTIFIER_MAC,
+    IDENTIFIER_SERIAL,
+    IDENTIFIER_TLS_NAME,
     IDENTIFIER_TYPES,
+    IDENTIFIER_VALIDITY_ACTIVE,
+    IDENTIFIER_VALIDITY_INCORRECT,
     LIFECYCLE_ACTIVE,
+    LIFECYCLE_INACTIVE,
     LIFECYCLE_STATES,
     SOURCE_LEGACY_MIGRATION,
     SOURCE_MANUAL,
@@ -54,23 +62,38 @@ def is_placeholder_hostname(value: str, ip: str = "") -> bool:
     return is_placeholder_name(value, ip)
 
 
-def observation_fingerprint(hostname: str, ip: str, scope: str, ports) -> str:
+def observation_fingerprint(
+    hostname: str,
+    ip: str,
+    scope: str,
+    ports,
+    *,
+    mac: str = "",
+    serial: str = "",
+    device_identifier: str = "",
+) -> str:
     host = normalize_hostname(hostname)
     if is_placeholder_hostname(host, ip):
         host = ""
-    payload = json.dumps(
-        {
-            "hostname": host,
-            "ip": (ip or "").strip(),
-            "ports": [
-                {"port": port, "protocol": protocol}
-                for port, protocol, _, _ in sorted(_iter_ports(ports), key=lambda row: (row[0], row[1]))
-            ],
-            "scope": (scope or "").strip().lower(),
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    extras = {
+        "mac": normalize_identifier(IDENTIFIER_MAC, mac) if mac else "",
+        "serial": normalize_identifier(IDENTIFIER_SERIAL, serial) if serial else "",
+        "device_identifier": normalize_identifier(IDENTIFIER_DEVICE_ID, device_identifier)
+        if device_identifier
+        else "",
+    }
+    payload_obj = {
+        "hostname": host,
+        "ip": (ip or "").strip(),
+        "ports": [
+            {"port": port, "protocol": protocol}
+            for port, protocol, _, _ in sorted(_iter_ports(ports), key=lambda row: (row[0], row[1]))
+        ],
+        "scope": (scope or "").strip().lower(),
+    }
+    if any(extras.values()):
+        payload_obj.update(extras)
+    payload = json.dumps(payload_obj, separators=(",", ":"), sort_keys=True)
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -228,12 +251,15 @@ def upsert_identifier(
             value=raw,
             normalized_value=normalized,
             source=source,
+            validity=IDENTIFIER_VALIDITY_ACTIVE,
             first_seen=seen_at,
             last_seen=seen_at,
         )
         db.add(row)
         db.flush()
         return row
+    if row.validity == IDENTIFIER_VALIDITY_INCORRECT:
+        return None
     row.value = raw
     row.last_seen = seen_at
     if not row.first_seen:
@@ -431,54 +457,55 @@ def append_observation(
     return row
 
 
-def apply_device_report(db: Session, device: Device, report: DeviceReport, job_id: int) -> Asset:
-    """Write Asset facts after the legacy Device resolver has finished.
-
-    Does not search other Assets and does not merge by IP/hostname/MAC.
-    """
-    report_ip = (report.ip or "").strip()
-    report_hostname = (report.hostname or "").strip()
-    report_scope = (report.scope or "").strip()
-    context = observation_context(db, job_id, report_ip, report_scope or device.scope)
-    asset = ensure_asset_for_device(db, device, context)
-    snapshot = {
-        "hostname": report_hostname,
-        "ip": report_ip,
+def _report_snapshot(report: DeviceReport, scope: str) -> dict:
+    return {
+        "hostname": (report.hostname or "").strip(),
+        "ip": (report.ip or "").strip(),
         "ports": list(report.ports or []),
         "title": report.title or "",
         "tech": report.tech or "",
         "auto_label": report.auto_label or "",
         "classification": report.classification or "",
-        "scope": report_scope or context.get("scope") or "",
+        "scope": scope,
+        "mac": report.mac or "",
+        "serial": report.serial or "",
+        "device_identifier": report.device_identifier or "",
+        "fqdn": report.fqdn or "",
+        "tls_name": report.tls_name or "",
+        "dns_name": report.dns_name or "",
     }
-    observation_key = observation_fingerprint(
-        report_hostname,
-        report_ip,
-        snapshot["scope"],
-        snapshot["ports"],
-    )
-    if find_observation(db, asset, scan_job_id=job_id, observation_key=observation_key) is not None:
-        return asset
-    now = utcnow()
-    if not asset.is_expected:
-        if asset.first_seen is None:
-            asset.first_seen = now
-        asset.last_seen = now
-        if asset.lifecycle_state is None:
-            asset.lifecycle_state = LIFECYCLE_ACTIVE
-    name = display_name_for(device.hostname, device.ip, asset.display_name)
-    if name:
-        asset.display_name = name
-    if device.classification and (not asset.classification or asset.classification == "Unknown"):
-        asset.classification = device.classification
-    if device.description and not asset.description:
-        asset.description = device.description
-    if context.get("site_id") and asset.site_id is None and (device.scope or context.get("scope")) == "lan":
-        asset.site_id = context["site_id"]
-    asset.updated_at = now
 
+
+def _write_observation_facts(
+    db: Session,
+    asset: Asset,
+    report: DeviceReport,
+    context: dict,
+    *,
+    observed_at: datetime,
+    observation_key: str,
+    snapshot: dict,
+) -> None:
+    report_ip = (report.ip or "").strip()
+    report_hostname = (report.hostname or "").strip()
     if report_hostname and not is_placeholder_hostname(report_hostname, report_ip):
-        upsert_identifier(db, asset, IDENTIFIER_HOSTNAME, report_hostname, source=SOURCE_SCANNER, seen_at=now)
+        upsert_identifier(db, asset, IDENTIFIER_HOSTNAME, report_hostname, source=SOURCE_SCANNER, seen_at=observed_at)
+        if "." in report_hostname:
+            upsert_identifier(db, asset, IDENTIFIER_FQDN, report_hostname, source=SOURCE_SCANNER, seen_at=observed_at)
+    if report.mac:
+        upsert_identifier(db, asset, IDENTIFIER_MAC, report.mac, source=SOURCE_SCANNER, seen_at=observed_at)
+    if report.serial:
+        upsert_identifier(db, asset, IDENTIFIER_SERIAL, report.serial, source=SOURCE_SCANNER, seen_at=observed_at)
+    if report.device_identifier:
+        upsert_identifier(
+            db, asset, IDENTIFIER_DEVICE_ID, report.device_identifier, source=SOURCE_SCANNER, seen_at=observed_at
+        )
+    if report.fqdn:
+        upsert_identifier(db, asset, IDENTIFIER_FQDN, report.fqdn, source=SOURCE_SCANNER, seen_at=observed_at)
+    if report.tls_name:
+        upsert_identifier(db, asset, IDENTIFIER_TLS_NAME, report.tls_name, source=SOURCE_SCANNER, seen_at=observed_at)
+    if report.dns_name:
+        upsert_identifier(db, asset, "dns_name", report.dns_name, source=SOURCE_SCANNER, seen_at=observed_at)
     address = upsert_address(
         db,
         asset,
@@ -486,7 +513,7 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
         site_id=context.get("site_id"),
         network_id=context.get("network_id"),
         source=SOURCE_SCANNER,
-        seen_at=now,
+        seen_at=observed_at,
     )
     upsert_services(
         db,
@@ -497,7 +524,7 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
         title=report.title or "",
         tech=report.tech or "",
         source=SOURCE_SCANNER,
-        seen_at=now,
+        seen_at=observed_at,
     )
     append_observation(
         db,
@@ -506,10 +533,166 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
         hostname=report_hostname,
         ip=report_ip,
         snapshot=snapshot,
-        observed_at=now,
+        observed_at=observed_at,
         observation_key=observation_key,
     )
+
+
+def _apply_observation_lifecycle(
+    db: Session,
+    asset: Asset,
+    *,
+    observed_at: datetime,
+    observation_key: str,
+    classification: str,
+    site_id: int | None,
+    scope: str,
+) -> None:
+    from app.events import emit_new_asset, emit_previously_inactive_returned
+
+    first_observation = asset.first_seen is None
+    was_inactive = asset.lifecycle_state == LIFECYCLE_INACTIVE
+    if first_observation:
+        asset.first_seen = observed_at
+    asset.last_seen = observed_at
+    asset.lifecycle_state = LIFECYCLE_ACTIVE
+    if site_id and asset.site_id is None and scope == "lan":
+        asset.site_id = site_id
+    if classification and (not asset.classification or asset.classification == "Unknown"):
+        asset.classification = classification
+    asset.updated_at = observed_at
+    if first_observation:
+        emit_new_asset(db, asset)
+    if was_inactive:
+        emit_previously_inactive_returned(db, asset, observation_key=observation_key)
+
+
+def create_discovered_asset(
+    db: Session,
+    *,
+    tenant_id: int,
+    site_id: int | None,
+    report: DeviceReport,
+    scope: str,
+    observed_at: datetime,
+) -> Asset:
+    from app.events import emit_new_asset
+
+    if scope == "lan" and site_id is None:
+        site_id = fallback_lan_site(db, tenant_id).id
+    if scope == "wan":
+        site_id = None
+    asset = Asset(
+        tenant_id=tenant_id,
+        site_id=site_id,
+        display_name=display_name_for(report.hostname, report.ip),
+        classification=report.classification or "Unknown",
+        description="",
+        lifecycle_state=LIFECYCLE_ACTIVE,
+        disposition=DISPOSITION_UNREVIEWED,
+        criticality="normal",
+        is_expected=False,
+        first_seen=observed_at,
+        last_seen=observed_at,
+        updated_at=observed_at,
+    )
+    db.add(asset)
     db.flush()
+    emit_new_asset(db, asset)
+    return asset
+
+
+def ingest_device_report(
+    db: Session,
+    tenant_id: int,
+    report: DeviceReport,
+    job_id: int,
+) -> tuple[Asset, bool]:
+    """Correlate then persist observation facts. Returns (asset, retry)."""
+    from app.correlation import (
+        canonical_asset_id,
+        correlate,
+        find_correlation_decision,
+        observation_key_for_report,
+        persist_correlation_decision,
+        post_correlation_asset_policy_hook,
+        signals_from_report,
+    )
+
+    report_ip = (report.ip or "").strip()
+    report_scope = (report.scope or "").strip()
+    context = observation_context(db, job_id, report_ip, report_scope)
+    scope = context.get("scope") or report_scope
+    snapshot = _report_snapshot(report, scope)
+    observation_key = observation_key_for_report(report, scope)
+    existing_decision = find_correlation_decision(db, scan_job_id=job_id, observation_key=observation_key)
+    if existing_decision is not None:
+        asset_id = existing_decision.selected_asset_id
+        if asset_id is None:
+            raise RuntimeError("Stored correlation decision is missing selected_asset_id")
+        asset = db.get(Asset, canonical_asset_id(db, asset_id))
+        if asset is None:
+            raise RuntimeError("Stored correlation decision references a missing Asset")
+        return asset, True
+
+    signals = signals_from_report(tenant_id, report, context)
+    result = correlate(db, signals)
+    now = utcnow()
+    if result.decision == DECISION_LINKED_EXISTING and result.selected_asset_id:
+        asset = db.get(Asset, canonical_asset_id(db, result.selected_asset_id))
+        if asset is None:
+            asset = create_discovered_asset(
+                db, tenant_id=tenant_id, site_id=context.get("site_id"), report=report, scope=scope, observed_at=now
+            )
+            result.selected_asset_id = asset.id
+            result.decision = "created_new"
+        else:
+            _apply_observation_lifecycle(
+                db,
+                asset,
+                observed_at=now,
+                observation_key=observation_key,
+                classification=report.classification or "",
+                site_id=context.get("site_id"),
+                scope=scope,
+            )
+    else:
+        asset = create_discovered_asset(
+            db, tenant_id=tenant_id, site_id=context.get("site_id"), report=report, scope=scope, observed_at=now
+        )
+        result.selected_asset_id = asset.id
+    name = display_name_for(report.hostname, report.ip, asset.display_name)
+    if name:
+        asset.display_name = name
+    _write_observation_facts(
+        db,
+        asset,
+        report,
+        context,
+        observed_at=now,
+        observation_key=observation_key,
+        snapshot=snapshot,
+    )
+    persist_correlation_decision(
+        db,
+        tenant_id=tenant_id,
+        site_id=context.get("site_id"),
+        scan_job_id=job_id,
+        observation_key=observation_key,
+        source_device_id=None,
+        result=result,
+    )
+    post_correlation_asset_policy_hook(db, asset, result, context)
+    db.flush()
+    return asset, False
+
+
+def apply_device_report(db: Session, device: Device, report: DeviceReport, job_id: int) -> Asset:
+    """Compatibility wrapper. Correlation is authoritative."""
+    asset, _retry = ingest_device_report(db, device.tenant_id, report, job_id)
+    device.asset_id = asset.id
+    if asset.site_id and device.scope == "lan":
+        device.site_id = asset.site_id
     return asset
 
 
@@ -578,6 +761,7 @@ __all__ = [
     "SOURCE_MANUAL",
     "SOURCE_SCANNER",
     "apply_device_report",
+    "ingest_device_report",
     "assign_tag",
     "display_name_for",
     "ensure_asset_for_device",

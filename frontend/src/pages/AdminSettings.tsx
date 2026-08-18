@@ -14,6 +14,7 @@ const empty: Settings = {
   smtp_from: "",
   smtp_tls: true,
   stale_days: 14,
+  asset_inactive_days: 30,
   default_nuclei_severities: "critical,high,medium",
   default_timezone: "UTC",
 };
@@ -87,6 +88,11 @@ export function AdminSettings() {
       </section>
       <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-2 gap-3">
         <Field label="Stale after (days)" value={String(form.stale_days)} onChange={(v) => setForm({ ...form, stale_days: Number(v) || 14 })} />
+        <Field
+          label="Asset inactive after (days)"
+          value={String(form.asset_inactive_days ?? 30)}
+          onChange={(v) => setForm({ ...form, asset_inactive_days: Number(v) || 30 })}
+        />
         <Field
           label="Default Nuclei severities"
           value={form.default_nuclei_severities}

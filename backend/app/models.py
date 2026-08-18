@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -67,6 +68,31 @@ SOURCE_SCANNER = "scanner"
 SOURCE_LEGACY_MIGRATION = "legacy_migration"
 SOURCE_MANUAL = "manual"
 ASSET_SOURCES = frozenset({SOURCE_SCANNER, SOURCE_LEGACY_MIGRATION, SOURCE_MANUAL})
+
+IDENTIFIER_VALIDITY_ACTIVE = "active"
+IDENTIFIER_VALIDITY_INCORRECT = "incorrect"
+IDENTIFIER_VALIDITIES = frozenset({IDENTIFIER_VALIDITY_ACTIVE, IDENTIFIER_VALIDITY_INCORRECT})
+
+DECISION_LINKED_EXISTING = "linked_existing"
+DECISION_CREATED_NEW = "created_new"
+DECISION_AMBIGUOUS = "ambiguous"
+CORRELATION_DECISIONS = frozenset(
+    {DECISION_LINKED_EXISTING, DECISION_CREATED_NEW, DECISION_AMBIGUOUS}
+)
+
+CONFIDENCE_HIGH = "high"
+CONFIDENCE_MEDIUM = "medium"
+CONFIDENCE_LOW = "low"
+CORRELATION_CONFIDENCES = frozenset({CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, CONFIDENCE_LOW})
+
+EVENT_NEW_ASSET = "new_asset"
+EVENT_ASSET_BECAME_INACTIVE = "asset_became_inactive"
+EVENT_PREVIOUSLY_INACTIVE_RETURNED = "previously_inactive_asset_returned"
+PHASE1C_EVENT_TYPES = frozenset(
+    {EVENT_NEW_ASSET, EVENT_ASSET_BECAME_INACTIVE, EVENT_PREVIOUSLY_INACTIVE_RETURNED}
+)
+
+CORRELATION_ALGORITHM_VERSION = "1c.1"
 
 tag_assets = Table(
     "asset_tags",
@@ -272,10 +298,21 @@ class ScanJob(Base):
 
 class Device(Base):
     __tablename__ = "devices"
-    __table_args__ = (UniqueConstraint("tenant_id", "hostname", "scope", name="uq_device_tenant_hostname_scope"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "hostname",
+            "scope",
+            "site_id",
+            "asset_id",
+            name="uq_device_tenant_hostname_scope",
+        ),
+        Index("ix_devices_tenant_id_site_id_scope", "tenant_id", "site_id", "scope"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
     ip: Mapped[str] = mapped_column(String(80), index=True)
     hostname: Mapped[str] = mapped_column(String(255), default="")
     scope: Mapped[str] = mapped_column(String(10))
@@ -294,6 +331,7 @@ class Device(Base):
     )
 
     tenant: Mapped["Tenant"] = relationship(back_populates="devices")
+    site: Mapped["Site | None"] = relationship()
     asset: Mapped["Asset | None"] = relationship(back_populates="devices")
     findings: Mapped[list["Finding"]] = relationship(back_populates="device")
 
@@ -393,11 +431,16 @@ class Asset(Base):
         ),
         Index("ix_assets_tenant_id_last_seen", "tenant_id", "last_seen"),
         Index("ix_assets_tenant_id_site_id", "tenant_id", "site_id"),
+        Index("ix_assets_merged_into_asset_id", "merged_into_asset_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    merged_into_asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
+    )
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     display_name: Mapped[str] = mapped_column(String(255), default="")
     classification: Mapped[str] = mapped_column(String(80), default="Unknown")
     description: Mapped[str] = mapped_column(Text, default="")
@@ -412,6 +455,9 @@ class Asset(Base):
 
     tenant: Mapped["Tenant"] = relationship(back_populates="assets")
     site: Mapped["Site | None"] = relationship(back_populates="assets")
+    merged_into: Mapped["Asset | None"] = relationship(
+        remote_side="Asset.id", foreign_keys=[merged_into_asset_id]
+    )
     devices: Mapped[list["Device"]] = relationship(back_populates="asset")
     identifiers: Mapped[list["AssetIdentifier"]] = relationship(
         back_populates="asset", cascade="all, delete-orphan"
@@ -421,6 +467,10 @@ class Asset(Base):
     observations: Mapped[list["AssetObservation"]] = relationship(
         back_populates="asset", cascade="all, delete-orphan"
     )
+    correlation_decisions: Mapped[list["AssetCorrelationDecision"]] = relationship(
+        back_populates="selected_asset"
+    )
+    domain_events: Mapped[list["DomainEvent"]] = relationship(back_populates="asset")
     tags: Mapped[list["Tag"]] = relationship(secondary=tag_assets, back_populates="assets")
 
 
@@ -437,7 +487,18 @@ class AssetIdentifier(Base):
             "identifier_type IN ('mac', 'hostname', 'fqdn', 'dns_name', 'tls_name', 'serial', 'device_id', 'other')",
             name="ck_asset_identifiers_type",
         ),
+        CheckConstraint(
+            "validity IN ('active', 'incorrect')",
+            name="ck_asset_identifiers_validity",
+        ),
         Index("ix_asset_identifiers_tenant_type_value", "tenant_id", "identifier_type", "normalized_value"),
+        Index(
+            "ix_asset_identifiers_active_lookup",
+            "tenant_id",
+            "identifier_type",
+            "normalized_value",
+            postgresql_where=text("validity = 'active'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -447,8 +508,15 @@ class AssetIdentifier(Base):
     value: Mapped[str] = mapped_column(String(255))
     normalized_value: Mapped[str] = mapped_column(String(255))
     source: Mapped[str] = mapped_column(String(40), default=SOURCE_SCANNER)
+    validity: Mapped[str] = mapped_column(String(20), default=IDENTIFIER_VALIDITY_ACTIVE)
     first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    corrected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    corrected_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    correction_reason: Mapped[str] = mapped_column(Text, default="")
+    replacement_identifier_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_identifiers.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     asset: Mapped["Asset"] = relationship(back_populates="identifiers")
@@ -543,3 +611,69 @@ class AssetObservation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     asset: Mapped["Asset"] = relationship(back_populates="observations")
+
+
+class AssetCorrelationDecision(Base):
+    __tablename__ = "asset_correlation_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "scan_job_id",
+            "observation_key",
+            name="uq_asset_correlation_decisions_job_key",
+        ),
+        CheckConstraint(
+            "decision IN ('linked_existing', 'created_new', 'ambiguous')",
+            name="ck_asset_correlation_decisions_decision",
+        ),
+        CheckConstraint(
+            "confidence IN ('high', 'medium', 'low')",
+            name="ck_asset_correlation_decisions_confidence",
+        ),
+        Index("ix_asset_correlation_decisions_tenant_id_created_at", "tenant_id", "created_at"),
+        Index("ix_asset_correlation_decisions_selected_asset_id", "selected_asset_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    scan_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scan_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    observation_key: Mapped[str] = mapped_column(String(64))
+    source_device_id: Mapped[int | None] = mapped_column(
+        ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+    selected_asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL"), nullable=True
+    )
+    decision: Mapped[str] = mapped_column(String(32))
+    confidence: Mapped[str] = mapped_column(String(16))
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    algorithm_version: Mapped[str] = mapped_column(String(32), default=CORRELATION_ALGORITHM_VERSION)
+    evidence: Mapped[dict] = mapped_column(JSONB, default=dict)
+    candidates: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    selected_asset: Mapped["Asset | None"] = relationship(back_populates="correlation_decisions")
+
+
+class DomainEvent(Base):
+    __tablename__ = "domain_events"
+    __table_args__ = (
+        UniqueConstraint("idempotence_key", name="uq_domain_events_idempotence_key"),
+        Index("ix_domain_events_tenant_id_event_type_occurred_at", "tenant_id", "event_type", "occurred_at"),
+        Index("ix_domain_events_asset_id_occurred_at", "asset_id", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(40), default=SOURCE_SCANNER)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    idempotence_key: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    asset: Mapped["Asset | None"] = relationship(back_populates="domain_events")

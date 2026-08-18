@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.jobs import create_job, due_scans
+from app.lifecycle import mark_inactive_assets
 from app.locality import LanScanInvalidError
 from app.models import Device, ScanJob
 from app.settings_store import get_settings
@@ -81,5 +82,6 @@ def start_scheduler() -> None:
         return
     scheduler.add_job(tick_schedules, "interval", seconds=30, id="schedules", replace_existing=True)
     scheduler.add_job(mark_stale_devices, "interval", minutes=30, id="stale", replace_existing=True)
+    scheduler.add_job(mark_inactive_assets, "interval", minutes=30, id="asset-inactive", replace_existing=True)
     scheduler.add_job(expire_stuck_jobs, "interval", minutes=5, id="stuck-jobs", replace_existing=True)
     scheduler.start()

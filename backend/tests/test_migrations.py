@@ -13,6 +13,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_schema.py"
 PHASE1A_REVISION = "0002_sites_networks"
 PHASE1B_HEAD = "0004_asset_observation_integrity"
+PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
@@ -41,7 +42,7 @@ def test_fresh_database_reaches_head(reset_db):
 
     assert "users" not in _tables(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE1B_HEAD
+    assert revision == head_revision() == current_revision() == PHASE1C_HEAD
     expected = {
         "alembic_version",
         "users",
@@ -61,7 +62,11 @@ def test_fresh_database_reaches_head(reset_db):
     }
     assert expected.issubset(_tables(engine))
     assert PHASE1B_TABLES.issubset(_tables(engine))
+    assert {"asset_correlation_decisions", "domain_events"}.issubset(_tables(engine))
     assert "asset_id" in _columns(engine, "devices")
+    assert "site_id" in _columns(engine, "devices")
+    assert "merged_into_asset_id" in _columns(engine, "assets")
+    assert "validity" in _columns(engine, "asset_identifiers")
 
 
 @requires_postgres
@@ -150,7 +155,7 @@ def test_existing_schema_adoption_preserves_data(reset_db):
         }
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE1B_HEAD
+    assert revision == head_revision() == current_revision() == PHASE1C_HEAD
 
     db = SessionLocal()
     try:
@@ -308,7 +313,7 @@ def test_legacy_compatibility_restores_missing_columns_without_dropping_rows(res
         conn.execute(text("ALTER TABLE devices DROP COLUMN IF EXISTS description"))
 
     revision = apply_schema()
-    assert revision == PHASE1B_HEAD
+    assert revision == PHASE1C_HEAD
     assert "hostname" in _columns(engine, "findings")
     assert "description" in _columns(engine, "devices")
 
@@ -435,3 +440,7 @@ def test_phase1a_and_baseline_revisions_remain_frozen():
     assert "from app.database import Base" not in phase1b_fix
     assert "import app.models" not in phase1b_fix
     assert 'down_revision: str | None = "0003_assets_observations"' in phase1b_fix
+    phase1c = (BACKEND_ROOT / "alembic" / "versions" / "0005_asset_correlation_lifecycle.py").read_text()
+    assert "from app.database import Base" not in phase1c
+    assert "import app.models" not in phase1c
+    assert 'down_revision: str | None = "0004_asset_observation_integrity"' in phase1c

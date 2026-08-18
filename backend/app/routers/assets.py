@@ -20,16 +20,27 @@ from app.assets import (
 from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
+from app.identity_ops import (
+    IdentityError,
+    correct_identifier,
+    identity_http_error,
+    merge_assets,
+    move_asset_site,
+    reassociate_observations,
+    split_observations_to_new_asset,
+)
 from app.locality import get_site, get_tenant
 from app.models import (
     IDENTIFIER_HOSTNAME,
     IDENTIFIER_MAC,
     Asset,
     AssetAddress,
+    AssetCorrelationDecision,
     AssetIdentifier,
     AssetObservation,
     AssetService,
     Device,
+    DomainEvent,
     Finding,
     Tag,
     User,
@@ -40,11 +51,18 @@ from app.schemas import (
     AssetAddressOut,
     AssetCreate,
     AssetDetail,
+    AssetIdentifierCorrectIn,
     AssetIdentifierOut,
     AssetListItem,
+    AssetMergeIn,
+    AssetMoveSiteIn,
     AssetObservationOut,
+    AssetReassociateIn,
     AssetServiceOut,
+    AssetSplitIn,
     AssetUpdate,
+    CorrelationDecisionOut,
+    DomainEventOut,
     HistoryPage,
     TagAssignIn,
     TagIn,
@@ -64,7 +82,11 @@ def _get_asset(db: Session, asset_id: int, tenant_id: int | None = None) -> Asse
 
 
 def _current_hostname(asset: Asset) -> str | None:
-    hostnames = [row for row in asset.identifiers if row.identifier_type == IDENTIFIER_HOSTNAME]
+    hostnames = [
+        row
+        for row in asset.identifiers
+        if row.identifier_type == IDENTIFIER_HOSTNAME and getattr(row, "validity", "active") == "active"
+    ]
     hostnames.sort(key=lambda row: row.last_seen or row.created_at, reverse=True)
     if hostnames:
         return hostnames[0].value
@@ -95,6 +117,7 @@ def _serialize_list_item(asset: Asset, findings_count: int = 0) -> AssetListItem
         tenant_id=asset.tenant_id,
         site_id=asset.site_id,
         site_name=asset.site.name if asset.site else None,
+        merged_into_asset_id=asset.merged_into_asset_id,
         display_name=asset.display_name,
         hostname=_current_hostname(asset),
         current_addresses=_current_addresses(asset),
@@ -154,6 +177,7 @@ def list_assets(
     lifecycle_state: str | None = None,
     criticality: str | None = None,
     expected: bool | None = None,
+    include_merged: bool = False,
     _: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -168,6 +192,8 @@ def list_assets(
         )
         .filter(Asset.tenant_id == tenant_id)
     )
+    if not include_merged:
+        query = query.filter(Asset.merged_into_asset_id.is_(None))
     if site_id is not None:
         get_site(db, site_id, tenant_id=tenant_id)
         query = query.filter(Asset.site_id == site_id)
@@ -369,6 +395,25 @@ def get_asset(asset_id: int, _: User = Depends(require_any), db: Session = Depen
     item.services = [AssetServiceOut.model_validate(row) for row in asset.services]
     item.device_ids = device_ids
     item.findings = [_finding_out(finding) for finding in findings]
+    latest = (
+        db.query(AssetCorrelationDecision)
+        .filter(AssetCorrelationDecision.selected_asset_id == asset.id)
+        .order_by(AssetCorrelationDecision.created_at.desc())
+        .first()
+    )
+    item.latest_correlation = CorrelationDecisionOut.model_validate(latest) if latest else None
+    if latest and latest.decision == "ambiguous":
+        item.possible_matches = latest.candidates or []
+    item.recent_events = [
+        DomainEventOut.model_validate(row)
+        for row in (
+            db.query(DomainEvent)
+            .filter(DomainEvent.asset_id == asset.id)
+            .order_by(DomainEvent.occurred_at.desc())
+            .limit(20)
+            .all()
+        )
+    ]
     return item
 
 
@@ -575,6 +620,155 @@ def list_services(
         limit,
         offset,
     )
+
+
+@router.get("/assets/{asset_id}/correlation", response_model=HistoryPage)
+def list_correlation(
+    asset_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _: User = Depends(require_any),
+    db: Session = Depends(get_db),
+):
+    asset = _get_asset(db, asset_id)
+    return _page(
+        db.query(AssetCorrelationDecision).filter(AssetCorrelationDecision.selected_asset_id == asset.id),
+        AssetCorrelationDecision.created_at.desc(),
+        CorrelationDecisionOut,
+        limit,
+        offset,
+    )
+
+
+@router.get("/assets/{asset_id}/events", response_model=HistoryPage)
+def list_events(
+    asset_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _: User = Depends(require_any),
+    db: Session = Depends(get_db),
+):
+    asset = _get_asset(db, asset_id)
+    return _page(
+        db.query(DomainEvent).filter(DomainEvent.asset_id == asset.id),
+        DomainEvent.occurred_at.desc(),
+        DomainEventOut,
+        limit,
+        offset,
+    )
+
+
+@router.post("/assets/{asset_id}/merge", response_model=AssetDetail)
+def merge_asset(
+    asset_id: int,
+    body: AssetMergeIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    target = _get_asset(db, asset_id)
+    try:
+        merge_assets(
+            db,
+            target=target,
+            source_ids=body.source_asset_ids,
+            actor=user,
+            reason=body.reason,
+        )
+    except IdentityError as exc:
+        raise identity_http_error(exc) from exc
+    db.commit()
+    return get_asset(target.id, user, db)
+
+
+@router.post("/assets/{asset_id}/split", response_model=AssetDetail)
+def split_asset(
+    asset_id: int,
+    body: AssetSplitIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    source = _get_asset(db, asset_id)
+    try:
+        target = split_observations_to_new_asset(
+            db,
+            source=source,
+            observation_ids=body.observation_ids,
+            actor=user,
+            reason=body.reason,
+        )
+    except IdentityError as exc:
+        raise identity_http_error(exc) from exc
+    db.commit()
+    return get_asset(target.id, user, db)
+
+
+@router.post("/assets/{asset_id}/observations/{observation_id}/reassociate", response_model=AssetDetail)
+def reassociate_observation(
+    asset_id: int,
+    observation_id: int,
+    body: AssetReassociateIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    source = _get_asset(db, asset_id)
+    target = _get_asset(db, body.target_asset_id)
+    try:
+        reassociate_observations(
+            db,
+            source=source,
+            target=target,
+            observation_ids=[observation_id],
+            actor=user,
+            reason=body.reason,
+        )
+    except IdentityError as exc:
+        raise identity_http_error(exc) from exc
+    db.commit()
+    return get_asset(target.id, user, db)
+
+
+@router.post("/assets/{asset_id}/identifiers/{identifier_id}/correct", response_model=AssetDetail)
+def correct_asset_identifier(
+    asset_id: int,
+    identifier_id: int,
+    body: AssetIdentifierCorrectIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    asset = _get_asset(db, asset_id)
+    identifier = db.get(AssetIdentifier, identifier_id)
+    if identifier is None or identifier.asset_id != asset.id:
+        raise HTTPException(status_code=404, detail="Identifier not found")
+    try:
+        correct_identifier(
+            db,
+            asset=asset,
+            identifier=identifier,
+            actor=user,
+            reason=body.reason,
+            replacement_value=body.replacement_value,
+            replacement_type=body.replacement_type,
+        )
+    except IdentityError as exc:
+        raise identity_http_error(exc) from exc
+    db.commit()
+    return get_asset(asset.id, user, db)
+
+
+@router.post("/assets/{asset_id}/move-site", response_model=AssetDetail)
+def move_site(
+    asset_id: int,
+    body: AssetMoveSiteIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    asset = _get_asset(db, asset_id)
+    try:
+        move_asset_site(db, asset=asset, site_id=body.site_id, actor=user, reason=body.reason)
+    except IdentityError as exc:
+        raise identity_http_error(exc) from exc
+    db.commit()
+    return get_asset(asset.id, user, db)
 
 
 @router.get("/assets/{asset_id}/observations", response_model=HistoryPage)

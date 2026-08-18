@@ -138,6 +138,7 @@ export interface Asset {
   tenant_id: number;
   site_id: number | null;
   site_name?: string | null;
+  merged_into_asset_id?: number | null;
   display_name: string;
   hostname?: string | null;
   current_addresses: string[];
@@ -162,8 +163,12 @@ export interface AssetIdentifier {
   value: string;
   normalized_value: string;
   source: string;
+  validity?: string;
   first_seen: string | null;
   last_seen: string | null;
+  corrected_at?: string | null;
+  correction_reason?: string;
+  replacement_identifier_id?: number | null;
   created_at: string;
 }
 
@@ -216,12 +221,49 @@ export interface AssetObservation {
   created_at: string;
 }
 
+export interface CorrelationDecision {
+  id: number;
+  tenant_id: number;
+  site_id: number | null;
+  scan_job_id: number | null;
+  observation_key: string;
+  selected_asset_id: number | null;
+  decision: string;
+  confidence: string;
+  score: number;
+  algorithm_version: string;
+  evidence: { label: string; contribution: number; polarity?: string }[];
+  candidates: {
+    asset_id: number;
+    display_name: string;
+    score: number;
+    confidence: string;
+    evidence?: { label: string; contribution: number }[];
+  }[];
+  created_at: string;
+}
+
+export interface DomainEvent {
+  id: number;
+  event_type: string;
+  tenant_id: number;
+  site_id: number | null;
+  asset_id: number | null;
+  occurred_at: string;
+  source: string;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface AssetDetail extends Asset {
   identifiers: AssetIdentifier[];
   addresses: AssetAddress[];
   services: AssetService[];
   device_ids: number[];
   findings: Finding[];
+  latest_correlation?: CorrelationDecision | null;
+  recent_events?: DomainEvent[];
+  possible_matches?: CorrelationDecision["candidates"];
 }
 
 export interface HistoryPage<T> {
@@ -274,6 +316,7 @@ export interface Settings {
   smtp_from: string;
   smtp_tls: boolean;
   stale_days: number;
+  asset_inactive_days: number;
   default_nuclei_severities: string;
   default_timezone: string;
 }

@@ -222,6 +222,7 @@ class ScanJobOut(BaseModel):
 class DeviceOut(BaseModel):
     id: int
     tenant_id: int
+    site_id: int | None = None
     ip: str
     hostname: str = ""
     scope: str
@@ -294,6 +295,7 @@ class SettingsOut(BaseModel):
     smtp_from: str = ""
     smtp_tls: bool = True
     stale_days: int = 14
+    asset_inactive_days: int = 30
     default_nuclei_severities: str = "critical,high,medium"
     default_timezone: str = "UTC"
 
@@ -329,6 +331,12 @@ class DeviceReport(BaseModel):
     title: str = ""
     tech: str = ""
     auto_label: str = ""
+    mac: str = ""
+    serial: str = ""
+    device_identifier: str = ""
+    fqdn: str = ""
+    tls_name: str = ""
+    dns_name: str = ""
 
 
 class FindingReport(BaseModel):
@@ -365,6 +373,7 @@ class AssetListItem(BaseModel):
     tenant_id: int
     site_id: int | None
     site_name: str | None = None
+    merged_into_asset_id: int | None = None
     display_name: str
     hostname: str | None = None
     current_addresses: list[str] = []
@@ -391,8 +400,12 @@ class AssetIdentifierOut(BaseModel):
     value: str
     normalized_value: str
     source: str
+    validity: str = "active"
     first_seen: datetime | None
     last_seen: datetime | None
+    corrected_at: datetime | None = None
+    correction_reason: str = ""
+    replacement_identifier_id: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -454,12 +467,89 @@ class AssetObservationOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CorrelationEvidenceItem(BaseModel):
+    label: str
+    contribution: int
+    polarity: str = "plus"
+
+
+class CorrelationCandidateOut(BaseModel):
+    asset_id: int
+    display_name: str
+    score: int
+    confidence: str
+    blocked: bool = False
+    block_reason: str = ""
+    evidence: list[CorrelationEvidenceItem] = []
+
+
+class CorrelationDecisionOut(BaseModel):
+    id: int
+    tenant_id: int
+    site_id: int | None
+    scan_job_id: int | None
+    observation_key: str
+    selected_asset_id: int | None
+    decision: str
+    confidence: str
+    score: int
+    algorithm_version: str
+    evidence: list[Any] = []
+    candidates: list[Any] = []
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DomainEventOut(BaseModel):
+    id: int
+    event_type: str
+    tenant_id: int
+    site_id: int | None
+    asset_id: int | None
+    occurred_at: datetime
+    source: str
+    details: dict[str, Any] = {}
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class AssetDetail(AssetListItem):
     identifiers: list[AssetIdentifierOut] = []
     addresses: list[AssetAddressOut] = []
     services: list[AssetServiceOut] = []
     device_ids: list[int] = []
     findings: list[FindingOut] = []
+    latest_correlation: CorrelationDecisionOut | None = None
+    recent_events: list[DomainEventOut] = []
+    possible_matches: list[Any] = []
+
+
+class AssetMergeIn(BaseModel):
+    source_asset_ids: list[int]
+    reason: str = ""
+
+
+class AssetSplitIn(BaseModel):
+    observation_ids: list[int]
+    reason: str = ""
+
+
+class AssetReassociateIn(BaseModel):
+    target_asset_id: int
+    reason: str = ""
+
+
+class AssetIdentifierCorrectIn(BaseModel):
+    reason: str = ""
+    replacement_value: str = ""
+    replacement_type: str | None = None
+
+
+class AssetMoveSiteIn(BaseModel):
+    site_id: int
+    reason: str = ""
 
 
 class AssetCreate(BaseModel):

@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from app.alerts import create_alert
-from app.assets import apply_device_report
+from app.assets import ingest_device_report, observation_context
 from app.classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
 from app.models import Alert, Device, Finding
 from app.schemas import DEVICE_CLASSES, DeviceReport, FindingReport
@@ -41,49 +41,111 @@ def _is_placeholder(device: Device) -> bool:
     return is_placeholder_name(device.hostname or "", device.ip or "")
 
 
-def _find_by_hostname(db: Session, tenant_id: int, scope: str, hostname: str) -> Device | None:
+def _find_by_hostname(
+    db: Session,
+    tenant_id: int,
+    scope: str,
+    hostname: str,
+    *,
+    site_id: int | None = None,
+    asset_id: int | None = None,
+) -> Device | None:
     if not hostname:
         return None
-    return (
-        db.query(Device)
-        .filter(Device.tenant_id == tenant_id, Device.hostname == hostname, Device.scope == scope)
-        .first()
+    query = db.query(Device).filter(
+        Device.tenant_id == tenant_id,
+        Device.hostname == hostname,
+        Device.scope == scope,
     )
+    if site_id is None:
+        query = query.filter(Device.site_id.is_(None))
+    else:
+        query = query.filter(Device.site_id == site_id)
+    if asset_id is not None:
+        query = query.filter(Device.asset_id == asset_id)
+    return query.order_by(Device.last_seen.desc()).first()
 
 
-def _find_placeholder_by_ip(db: Session, tenant_id: int, scope: str, ip: str) -> Device | None:
+def _find_placeholder_by_ip(
+    db: Session,
+    tenant_id: int,
+    scope: str,
+    ip: str,
+    *,
+    site_id: int | None = None,
+    asset_id: int | None = None,
+) -> Device | None:
     if not ip:
         return None
-    rows = (
-        db.query(Device)
-        .filter(Device.tenant_id == tenant_id, Device.ip == ip, Device.scope == scope)
-        .order_by(Device.last_seen.desc())
-        .all()
+    query = db.query(Device).filter(
+        Device.tenant_id == tenant_id,
+        Device.ip == ip,
+        Device.scope == scope,
     )
+    if site_id is None:
+        query = query.filter(Device.site_id.is_(None))
+    else:
+        query = query.filter(Device.site_id == site_id)
+    if asset_id is not None:
+        query = query.filter(Device.asset_id == asset_id)
+    rows = query.order_by(Device.last_seen.desc()).all()
     for row in rows:
         if _is_placeholder(row):
             return row
     return None
 
 
-def _find_device(db: Session, tenant_id: int, scope: str, hostname: str, ip: str) -> Device | None:
-    if hostname and not is_placeholder_name(hostname, ip):
-        found = _find_by_hostname(db, tenant_id, scope, hostname)
-        if found:
-            return found
-        return _find_placeholder_by_ip(db, tenant_id, scope, ip)
-    if ip:
-        return (
+def _find_device(
+    db: Session,
+    tenant_id: int,
+    scope: str,
+    hostname: str,
+    ip: str,
+    *,
+    site_id: int | None = None,
+    asset_id: int | None = None,
+) -> Device | None:
+    if asset_id is not None:
+        existing = (
             db.query(Device)
-            .filter(Device.tenant_id == tenant_id, Device.ip == ip, Device.scope == scope)
+            .filter(
+                Device.tenant_id == tenant_id,
+                Device.asset_id == asset_id,
+                Device.scope == scope,
+            )
             .order_by(Device.last_seen.desc())
-            .first()
+            .all()
         )
+        if site_id is None:
+            scoped = [row for row in existing if row.site_id is None]
+        else:
+            scoped = [row for row in existing if row.site_id == site_id]
+        if scoped:
+            return scoped[0]
+        if existing:
+            return existing[0]
+    if hostname and not is_placeholder_name(hostname, ip):
+        found = _find_by_hostname(db, tenant_id, scope, hostname, site_id=site_id, asset_id=asset_id)
+        if found and (asset_id is None or found.asset_id in {None, asset_id}):
+            return found
+        return _find_placeholder_by_ip(db, tenant_id, scope, ip, site_id=site_id, asset_id=asset_id)
+    if ip:
+        query = db.query(Device).filter(Device.tenant_id == tenant_id, Device.ip == ip, Device.scope == scope)
+        if site_id is None:
+            query = query.filter(Device.site_id.is_(None))
+        else:
+            query = query.filter(Device.site_id == site_id)
+        if asset_id is not None:
+            query = query.filter(Device.asset_id == asset_id)
+        return query.order_by(Device.last_seen.desc()).first()
     return None
 
 
 def _merge_into(db: Session, keeper: Device, donor: Device) -> Device:
+    """Merge compatibility rows only when they already share Asset identity."""
     if donor.id == keeper.id:
+        return keeper
+    if keeper.asset_id and donor.asset_id and keeper.asset_id != donor.asset_id:
         return keeper
     if donor.ip and (not keeper.ip or (donor.last_seen or donor.first_seen) >= (keeper.last_seen or keeper.first_seen)):
         keeper.ip = donor.ip
@@ -103,6 +165,8 @@ def _merge_into(db: Session, keeper: Device, donor: Device) -> Device:
         keeper.first_seen = donor.first_seen
     if keeper.asset_id is None and donor.asset_id is not None:
         keeper.asset_id = donor.asset_id
+    if keeper.site_id is None and donor.site_id is not None:
+        keeper.site_id = donor.site_id
     db.query(Finding).filter(Finding.device_id == donor.id).update({Finding.device_id: keeper.id}, synchronize_session=False)
     db.query(Alert).filter(Alert.device_id == donor.id).update({Alert.device_id: keeper.id}, synchronize_session=False)
     db.delete(donor)
@@ -110,69 +174,84 @@ def _merge_into(db: Session, keeper: Device, donor: Device) -> Device:
     return keeper
 
 
-def _promote_hostname(db: Session, device: Device, hostname: str, tenant_id: int, scope: str) -> Device:
+def _promote_hostname(
+    db: Session,
+    device: Device,
+    hostname: str,
+    tenant_id: int,
+    scope: str,
+    *,
+    site_id: int | None = None,
+) -> Device:
     if not hostname or device.hostname == hostname:
         return device
     if not _is_placeholder(device) and not is_ip(device.hostname or ""):
         return device
-    other = _find_by_hostname(db, tenant_id, scope, hostname)
+    other = _find_by_hostname(db, tenant_id, scope, hostname, site_id=site_id, asset_id=device.asset_id)
     if other and other.id != device.id:
+        if other.asset_id and device.asset_id and other.asset_id != device.asset_id:
+            return device
         return _merge_into(db, other, device)
     device.hostname = hostname
     return device
 
 
-def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[DeviceReport]) -> tuple[int, list[Device]]:
-    created: list[Device] = []
-    for report in reports:
-        hostname = identity_name(report.hostname, report.ip)
-        ip = (report.ip or "").strip()
-        device = _find_device(db, tenant_id, report.scope, hostname, ip)
-        if device is None:
-            device = _find_by_hostname(db, tenant_id, report.scope, hostname)
-        if device is None:
-            device = Device(
-                tenant_id=tenant_id,
-                ip=ip,
-                hostname=hostname,
-                scope=report.scope,
-                status="new",
-                classification="Unknown",
-                description="",
-                title=report.title,
-                tech=clean_tech(report.tech),
-                auto_label=_label_for(report),
-                ports=report.ports,
-                first_seen=_now(),
-                last_seen=_now(),
-                last_scan_job_id=job_id,
-            )
-            _apply_class(device, report)
-            db.add(device)
-            db.flush()
-            apply_device_report(db, device, report, job_id)
-            created.append(device)
-            create_alert(
-                db,
-                alert_type="new_device",
-                title=f"New {report.scope.upper()} device: {hostname}",
-                body=(
-                    f"A new device was discovered on tenant #{tenant_id}.\n"
-                    f"Hostname: {hostname}\nIP: {ip}\n"
-                    f"Scope: {report.scope}\nClass: {device.classification}\n"
-                    f"Label: {device.auto_label or '-'}\nPorts: {report.ports}"
-                ),
-                tenant_id=tenant_id,
-                device_id=device.id,
-            )
-            db.flush()
-            continue
-
+def _project_device(
+    db: Session,
+    *,
+    tenant_id: int,
+    job_id: int,
+    report: DeviceReport,
+    asset,
+    retry: bool,
+) -> tuple[Device, bool]:
+    hostname = identity_name(report.hostname, report.ip)
+    ip = (report.ip or "").strip()
+    context = observation_context(db, job_id, ip, report.scope)
+    site_id = asset.site_id if report.scope == "lan" else None
+    if report.scope == "lan" and context.get("site_id"):
+        site_id = context.get("site_id")
+    device = _find_device(
+        db,
+        tenant_id,
+        report.scope,
+        hostname,
+        ip,
+        site_id=site_id,
+        asset_id=asset.id,
+    )
+    created = False
+    if device is None:
+        device = Device(
+            tenant_id=tenant_id,
+            site_id=site_id,
+            ip=ip,
+            hostname=hostname,
+            scope=report.scope,
+            status="new",
+            classification=asset.classification or "Unknown",
+            description=asset.description or "",
+            title=report.title,
+            tech=clean_tech(report.tech),
+            auto_label=_label_for(report),
+            ports=report.ports,
+            first_seen=_now(),
+            last_seen=_now(),
+            last_scan_job_id=job_id,
+            asset_id=asset.id,
+        )
+        _apply_class(device, report)
+        db.add(device)
+        db.flush()
+        created = True
+    elif not retry:
         previous_job = device.last_scan_job_id
         if not is_placeholder_name(hostname, ip):
-            device = _promote_hostname(db, device, hostname, tenant_id, report.scope)
+            device = _promote_hostname(db, device, hostname, tenant_id, report.scope, site_id=site_id)
         if ip:
             device.ip = ip
+        device.site_id = site_id
+        device.asset_id = asset.id
         device.last_seen = _now()
         device.last_scan_job_id = job_id
         if report.ports:
@@ -189,8 +268,43 @@ def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[Devic
             device.status = "known"
         elif device.status == "new" and previous_job and previous_job != job_id:
             device.status = "known"
-        apply_device_report(db, device, report, job_id)
-        db.flush()
+    else:
+        device.asset_id = asset.id
+        if site_id and device.site_id is None:
+            device.site_id = site_id
+    db.flush()
+    return device, created
+
+
+def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[DeviceReport]) -> tuple[int, list[Device]]:
+    created: list[Device] = []
+    for report in reports:
+        asset, retry = ingest_device_report(db, tenant_id, report, job_id)
+        device, created_device = _project_device(
+            db,
+            tenant_id=tenant_id,
+            job_id=job_id,
+            report=report,
+            asset=asset,
+            retry=retry,
+        )
+        if created_device:
+            created.append(device)
+            hostname = identity_name(report.hostname, report.ip)
+            create_alert(
+                db,
+                alert_type="new_device",
+                title=f"New {report.scope.upper()} device: {hostname}",
+                body=(
+                    f"A new device was discovered on tenant #{tenant_id}.\n"
+                    f"Hostname: {hostname}\nIP: {(report.ip or '').strip()}\n"
+                    f"Scope: {report.scope}\nClass: {device.classification}\n"
+                    f"Label: {device.auto_label or '-'}\nPorts: {report.ports}"
+                ),
+                tenant_id=tenant_id,
+                device_id=device.id,
+            )
+            db.flush()
     return len(created), created
 
 
@@ -221,9 +335,11 @@ def store_findings(
         parsed = normalize_hostname(parsed or "")
         ip = host_to_ip(report.host or report.matched_at) or ""
         hostname = identity_name(parsed, ip)
-        device = _find_device(db, tenant_id, scope, hostname, ip)
+        context = observation_context(db, job_id, ip, scope)
+        site_id = context.get("site_id") if scope == "lan" else None
+        device = _find_device(db, tenant_id, scope, hostname, ip, site_id=site_id)
         if device and parsed and not is_ip(parsed):
-            device = _promote_hostname(db, device, parsed, tenant_id, scope)
+            device = _promote_hostname(db, device, parsed, tenant_id, scope, site_id=site_id)
         if device and ip:
             device.ip = ip
         raw = report.raw or {}

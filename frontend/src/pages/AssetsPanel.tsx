@@ -7,6 +7,7 @@ import type {
   Asset,
   AssetDetail,
   AssetObservation,
+  DomainEvent,
   HistoryPage,
   Site,
   Tag,
@@ -221,7 +222,9 @@ function ExpectedForm({
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-lg font-semibold">Create expected asset</h2>
-        <p className="text-sm text-slate-400">Saved as Expected / Not Yet Observed. Scanner results will not auto-merge with this record.</p>
+        <p className="text-sm text-slate-400">
+          Saved as Expected / Not Yet Observed. A later scan correlates only when evidence is confident (not IP alone).
+        </p>
         <div>
           <label>Site</label>
           <select className="w-full" value={form.site_id} onChange={(e) => setForm({ ...form, site_id: e.target.value })} required>
@@ -285,11 +288,22 @@ function AssetDrawer({
   onChanged: () => void;
 }) {
   const [observations, setObservations] = useState<AssetObservation[]>([]);
+  const [events, setEvents] = useState<DomainEvent[]>(asset.recent_events || []);
   const [classification, setClassification] = useState(asset.classification);
   const [description, setDescription] = useState(asset.description);
   const [criticality, setCriticality] = useState(asset.criticality);
   const [disposition, setDisposition] = useState(asset.disposition);
   const [tagName, setTagName] = useState("");
+  const [mergeIds, setMergeIds] = useState("");
+  const [splitIds, setSplitIds] = useState("");
+  const [moveSiteId, setMoveSiteId] = useState("");
+  const [correctId, setCorrectId] = useState("");
+  const [correctReason, setCorrectReason] = useState("");
+  const [correctReplacement, setCorrectReplacement] = useState("");
+  const [reassignObs, setReassignObs] = useState("");
+  const [reassignTarget, setReassignTarget] = useState("");
+  const [confirmAction, setConfirmAction] = useState("");
+  const [actionError, setActionError] = useState("");
 
   useEffect(() => {
     setClassification(asset.classification);
@@ -299,6 +313,7 @@ function AssetDrawer({
     api<HistoryPage<AssetObservation>>(`/api/assets/${asset.id}/observations?limit=50`).then((page) =>
       setObservations(page.items)
     );
+    api<HistoryPage<DomainEvent>>(`/api/assets/${asset.id}/events?limit=20`).then((page) => setEvents(page.items));
   }, [asset.id, asset.classification, asset.description, asset.criticality, asset.disposition]);
 
   async function saveMeta() {
@@ -317,6 +332,7 @@ function AssetDrawer({
             <h2 className="text-lg font-semibold">{asset.display_name}</h2>
             <p className="text-slate-400 text-sm">{asset.site_name || "No site"} · {asset.current_addresses.join(", ") || "No address"}</p>
             {asset.is_not_yet_observed && <Badge value="expected" />}
+            {asset.merged_into_asset_id && <Badge value={`merged into #${asset.merged_into_asset_id}`} />}
           </div>
           <button className="text-slate-400" onClick={onClose}>
             Close
@@ -401,11 +417,41 @@ function AssetDrawer({
           )}
         </section>
 
+        {asset.latest_correlation && (
+          <section className="space-y-2">
+            <h3 className="text-sm uppercase tracking-wide text-slate-400">Correlation</h3>
+            <div className="text-sm text-slate-300">
+              Confidence: <Badge value={asset.latest_correlation.confidence} /> · Decision: {asset.latest_correlation.decision} ·
+              Score {asset.latest_correlation.score}
+            </div>
+            <ul className="text-sm text-slate-300 list-disc pl-5">
+              {(asset.latest_correlation.evidence || []).map((item, idx) => (
+                <li key={idx}>
+                  {item.polarity === "minus" ? "−" : "+"} {item.label}
+                </li>
+              ))}
+            </ul>
+            {asset.latest_correlation.decision === "ambiguous" && (
+              <div className="text-sm">
+                <div className="text-amber-300 mb-1">Possible matches — not auto-selected</div>
+                <Table
+                  headers={["Asset", "Score", "Confidence"]}
+                  rows={(asset.possible_matches || asset.latest_correlation.candidates || []).map((row) => [
+                    `${row.display_name} #${row.asset_id}`,
+                    String(row.score),
+                    row.confidence,
+                  ])}
+                />
+              </div>
+            )}
+          </section>
+        )}
+
         <section>
           <h3 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Identifiers</h3>
           <Table
-            headers={["Type", "Value", "Source"]}
-            rows={asset.identifiers.map((row) => [row.identifier_type, row.value, row.source])}
+            headers={["Type", "Value", "Source", "State"]}
+            rows={asset.identifiers.map((row) => [row.identifier_type, row.value, row.source, row.validity || "active"])}
           />
         </section>
         <section>
@@ -429,6 +475,108 @@ function AssetDrawer({
             rows={observations.map((row) => [formatUtc(row.observed_at, timezone), row.source, row.scope || "—", row.hostname || "—", row.ip || "—"])}
           />
         </section>
+        <section>
+          <h3 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Lifecycle events</h3>
+          <Table
+            headers={["When", "Event"]}
+            rows={events.map((row) => [formatUtc(row.occurred_at, timezone), row.event_type])}
+          />
+        </section>
+
+        {write && !asset.merged_into_asset_id && (
+          <section className="space-y-3 border border-slate-800 rounded-xl p-3">
+            <h3 className="text-sm uppercase tracking-wide text-slate-400">Identity corrections</h3>
+            <p className="text-xs text-slate-500">History is preserved. Confirm before merge, split, or identifier correction.</p>
+            {actionError && <div className="text-rose-300 text-sm">{actionError}</div>}
+            <div className="grid gap-2">
+              <Field label="Merge source asset IDs (comma)" value={mergeIds} onChange={setMergeIds} required={false} />
+              <button
+                type="button"
+                className="text-cyan-400 text-sm text-left"
+                onClick={() => setConfirmAction("merge")}
+              >
+                Merge into this asset
+              </button>
+              <Field label="Split observation IDs (comma)" value={splitIds} onChange={setSplitIds} required={false} />
+              <button type="button" className="text-cyan-400 text-sm text-left" onClick={() => setConfirmAction("split")}>
+                Split selected observations into a new asset
+              </button>
+              <Field label="Identifier ID to mark incorrect" value={correctId} onChange={setCorrectId} required={false} />
+              <Field label="Correction reason" value={correctReason} onChange={setCorrectReason} required={false} />
+              <Field label="Replacement identifier (optional)" value={correctReplacement} onChange={setCorrectReplacement} required={false} />
+              <button type="button" className="text-cyan-400 text-sm text-left" onClick={() => setConfirmAction("correct")}>
+                Mark identifier incorrect
+              </button>
+              <Field label="Move to site ID" value={moveSiteId} onChange={setMoveSiteId} required={false} />
+              <button type="button" className="text-cyan-400 text-sm text-left" onClick={() => setConfirmAction("move")}>
+                Move asset to another site
+              </button>
+              <Field label="Reassign observation ID" value={reassignObs} onChange={setReassignObs} required={false} />
+              <Field label="Reassign to asset ID" value={reassignTarget} onChange={setReassignTarget} required={false} />
+              <button type="button" className="text-cyan-400 text-sm text-left" onClick={() => setConfirmAction("reassign")}>
+                Reassign observation
+              </button>
+            </div>
+            {confirmAction && (
+              <div className="bg-slate-900 border border-amber-700 rounded-md p-3 text-sm space-y-2">
+                <div>Confirm {confirmAction}? Historical evidence is kept; this does not physically delete records.</div>
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    className="bg-cyan-600 text-slate-950 font-medium rounded-md px-3 py-1"
+                    onClick={async () => {
+                      setActionError("");
+                      try {
+                        if (confirmAction === "merge") {
+                          await api(`/api/assets/${asset.id}/merge`, {
+                            method: "POST",
+                            body: JSON.stringify({
+                              source_asset_ids: mergeIds.split(",").map((v) => Number(v.trim())).filter(Boolean),
+                              reason: "manual merge",
+                            }),
+                          });
+                        } else if (confirmAction === "split") {
+                          await api(`/api/assets/${asset.id}/split`, {
+                            method: "POST",
+                            body: JSON.stringify({
+                              observation_ids: splitIds.split(",").map((v) => Number(v.trim())).filter(Boolean),
+                              reason: "manual split",
+                            }),
+                          });
+                        } else if (confirmAction === "correct") {
+                          await api(`/api/assets/${asset.id}/identifiers/${Number(correctId)}/correct`, {
+                            method: "POST",
+                            body: JSON.stringify({ reason: correctReason, replacement_value: correctReplacement }),
+                          });
+                        } else if (confirmAction === "move") {
+                          await api(`/api/assets/${asset.id}/move-site`, {
+                            method: "POST",
+                            body: JSON.stringify({ site_id: Number(moveSiteId), reason: "manual site move" }),
+                          });
+                        } else if (confirmAction === "reassign") {
+                          await api(`/api/assets/${asset.id}/observations/${Number(reassignObs)}/reassociate`, {
+                            method: "POST",
+                            body: JSON.stringify({ target_asset_id: Number(reassignTarget), reason: "manual reassignment" }),
+                          });
+                        }
+                        setConfirmAction("");
+                        onChanged();
+                      } catch (err) {
+                        setActionError(err instanceof Error ? err.message : "Failed");
+                      }
+                    }}
+                  >
+                    Confirm
+                  </button>
+                  <button type="button" className="text-slate-400" onClick={() => setConfirmAction("")}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
         <section>
           <h3 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Existing findings</h3>
           <Table

@@ -51,6 +51,12 @@ def ensure_columns() -> None:
 
 
 def _migrate_device_identity() -> None:
+    inspector = inspect(engine)
+    device_cols = {c["name"] for c in inspector.get_columns("devices")}
+    if "site_id" in device_cols:
+        # Phase 1C+ Device locality is owned by Alembic. Do not collapse
+        # same-hostname Devices across Sites or Assets.
+        return
     with engine.begin() as conn:
         conn.execute(text("UPDATE devices SET hostname = ip WHERE hostname IS NULL OR btrim(hostname) = ''"))
         conn.execute(text("UPDATE devices SET hostname = lower(rtrim(hostname, '.')) WHERE hostname IS NOT NULL"))

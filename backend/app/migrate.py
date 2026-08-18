@@ -69,6 +69,8 @@ POST_BASELINE_TABLES = frozenset(
         "asset_tags",
         "site_tags",
         "network_tags",
+        "asset_correlation_decisions",
+        "domain_events",
     }
 )
 PHASE1A_MARKER_COLUMNS = {
@@ -79,9 +81,20 @@ PHASE1B_MARKER_COLUMNS = {
     "devices": frozenset({"asset_id"}),
     "asset_observations": frozenset({"observation_key"}),
 }
+PHASE1C_MARKER_COLUMNS = {
+    "devices": frozenset({"site_id"}),
+    "assets": frozenset({"merged_into_asset_id"}),
+    "asset_identifiers": frozenset({"validity"}),
+}
 POST_BASELINE_MARKER_COLUMNS = {
-    table: PHASE1A_MARKER_COLUMNS.get(table, frozenset()) | PHASE1B_MARKER_COLUMNS.get(table, frozenset())
-    for table in set(PHASE1A_MARKER_COLUMNS) | set(PHASE1B_MARKER_COLUMNS)
+    table: (
+        PHASE1A_MARKER_COLUMNS.get(table, frozenset())
+        | PHASE1B_MARKER_COLUMNS.get(table, frozenset())
+        | PHASE1C_MARKER_COLUMNS.get(table, frozenset())
+    )
+    for table in set(PHASE1A_MARKER_COLUMNS)
+    | set(PHASE1B_MARKER_COLUMNS)
+    | set(PHASE1C_MARKER_COLUMNS)
 }
 MANAGED_TABLES = PHASE0_TABLES | POST_BASELINE_TABLES
 

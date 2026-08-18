@@ -15,6 +15,7 @@ from tests.conftest import requires_postgres
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1A_REVISION = "0002_sites_networks"
 PHASE1B_HEAD = "0004_asset_observation_integrity"
+PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
@@ -242,7 +243,7 @@ def test_upgrade_0002_to_0003_preserves_phase1a_data(reset_db):
     command.upgrade(alembic_config(), PHASE1A_REVISION)
     ids = _insert_phase1a_representative(engine)
     command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE1B_HEAD
+    assert current_revision() == head_revision() == PHASE1C_HEAD
     assert PHASE1B_TABLES.issubset(_tables(engine))
 
     db = SessionLocal()
@@ -309,12 +310,12 @@ def test_downgrade_from_0004_is_refused(reset_db):
     from alembic import command
     from alembic.util import CommandError
 
-    from app.migrate import alembic_config, apply_schema
+    from app.migrate import alembic_config
 
-    apply_schema()
+    command.upgrade(alembic_config(), PHASE1B_HEAD)
     try:
         command.downgrade(alembic_config(), "0003_assets_observations")
-    except (NotImplementedError, CommandError) as exc:
+    except (NotImplementedError, CommandError, RuntimeError) as exc:
         assert "Refusing to downgrade 0004_asset_observation_integrity" in str(exc)
     else:
         raise AssertionError("0004 downgrade must refuse instead of reversing observation integrity")
@@ -786,21 +787,8 @@ def test_asset_list_avoids_nplus_one_and_no_phase1c(reset_db):
             event.remove(engine, "before_cursor_execute", before_cursor)
     assert len(statements) < 20
 
-    source = (BACKEND_ROOT / "app" / "assets.py").read_text()
-    forbidden = (
-        "merge_assets",
-        "split_asset",
-        "correlation_confidence",
-        "previously_inactive_asset_returned",
-        "reactivate_asset",
-    )
-    for name in forbidden:
-        assert name not in source
     inventory = (BACKEND_ROOT / "app" / "inventory.py").read_text()
     assert "search all Assets" not in inventory
-    routers = (BACKEND_ROOT / "app" / "routers" / "assets.py").read_text()
-    assert "/merge" not in routers
-    assert "/split" not in routers
 
 
 @requires_postgres
@@ -906,7 +894,7 @@ def test_upgrade_0003_to_0004_fixes_lifecycle_and_placeholder_hostnames(reset_db
         )
 
     command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE1B_HEAD
+    assert current_revision() == head_revision() == PHASE1C_HEAD
 
     db = SessionLocal()
     try:

@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0004_asset_observation_integrity` (after frozen `0001_baseline`, `0002_sites_networks`, and `0003_assets_observations`).
+Current head revision: `0005_asset_correlation_lifecycle` (after frozen `0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, and `0004_asset_observation_integrity`).
 
-`0001_baseline`, `0002_sites_networks`, and `0003_assets_observations` are immutable. Phase 1B corrective schema lives in `0004_asset_observation_integrity`.
+`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, and `0004_asset_observation_integrity` are immutable. Phase 1C schema lives in `0005_asset_correlation_lifecycle`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -28,6 +28,8 @@ Current head revision: `0004_asset_observation_integrity` (after frozen `0001_ba
 `alembic downgrade` from `0003_assets_observations` is **refused**. It would destroy Asset, identifier, address, service, observation, and tag history.
 
 `alembic downgrade` from `0004_asset_observation_integrity` is **refused**. It would restore over-coarse observation idempotence and undo expected-lifecycle / identifier hygiene.
+
+`alembic downgrade` from `0005_asset_correlation_lifecycle` is **refused**. It would destroy correlation decisions, domain events, merge lineage, and identifier correction history.
 
 ### Fresh install
 
@@ -57,7 +59,7 @@ alembic upgrade head
 Startup **fails closed** and refuses to stamp or upgrade when:
 
 - some Phase 0 tables exist but the complete Phase 0 set does not, or
-- any Phase 1A/1B table or marker column is present and `alembic_version` is missing (including a database that only has `sites`/`networks`, `assets`, or `devices.asset_id`).
+- any Phase 1A/1B/1C table or marker column is present and `alembic_version` is missing (including a database that only has `sites`/`networks`, `assets`, `devices.asset_id`, `devices.site_id`, `assets.merged_into_asset_id`, or `asset_identifiers.validity`).
 
 Do not guess. Inspect the database and repair or restore it before retrying.
 
@@ -116,7 +118,21 @@ Observation snapshots record only the facts in that `DeviceReport`. Empty `repor
 
 Agent and central scanner `/jobs/{id}/devices` posts can be retried. Observation idempotence is `(scan_job_id, asset_id, observation_key)`, where `observation_key` is a SHA-256 fingerprint of the normalized report hostname/IP/scope/ports. The same exact report is a no-op: no second observation and no Asset/identifier/address/service timestamp advance. A different IP or port set for the same Asset in the same job is a new observation. Hostname/IP are not Asset identity keys.
 
-Expected Assets can be created manually (`is_expected`, `first_seen`/`last_seen` NULL, `lifecycle_state` NULL). Discovery does not auto-attach to them in Phase 1B.
+Expected Assets can be created manually (`is_expected`, `first_seen`/`last_seen` NULL, `lifecycle_state` NULL).
+
+## Phase 1C correlation and lifecycle
+
+`0005_asset_correlation_lifecycle` makes Asset correlation authoritative. Incoming DeviceReports are normalized, scored against a bounded candidate set (indexed identifiers/addresses, never every Tenant Asset), then either linked, left ambiguous, or used to create a new Asset. Device rows are a compatibility projection written after that decision. The legacy Tenant+hostname+scope Device unique constraint now includes `site_id` and `asset_id` so two LAN systems with the same hostname at different Sites stay distinct.
+
+Hard rules: Tenant mismatch is impossible; LAN auto-match is Site-local; IP alone cannot auto-match; placeholder hostnames contribute no hostname evidence; identifiers marked `incorrect` are ignored; WAN↔LAN joins require a strong unique identifier.
+
+Exact scanner retries reuse the stored `AssetCorrelationDecision` (`scan_job_id`, `observation_key`) and do not duplicate observations, decisions, or events.
+
+Manual operations (`asset.merge`, `asset.split`, `asset.identifier_correct`, `asset.move_site`, `asset.observation_reassociate`) are audited. Merged Assets are retained with `merged_into_asset_id`.
+
+`asset_inactive_days` is a new Admin setting and is intentionally separate from Device `stale_days`. Expected / not-yet-observed Assets do not become inactive. Domain events persist `new_asset`, `asset_became_inactive`, and `previously_inactive_asset_returned` only. Alert email/webhook/Teams routing remains Phase 3B.
+
+`post_correlation_asset_policy_hook` is the Phase 3A seam. Phase 1C never auto-approves by observation count or age.
 
 `0004_asset_observation_integrity` is a corrective revision after the already-shipped `0003`. It adds `observation_key`, allows NULL lifecycle for expected Assets, and removes hostname identifiers that are only IP/placeholder values.
 
