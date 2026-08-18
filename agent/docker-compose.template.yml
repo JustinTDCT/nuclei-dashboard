@@ -1,0 +1,22 @@
+# Generated per agent by the dashboard. This file is a reference template.
+# The live file downloaded from the UI includes the agent UUID and enrollment secret.
+
+services:
+  nuclei-agent:
+    image: nuclei-dashboard-agent:latest
+    command: ["python", "agent_main.py"]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CENTRAL_URL: https://10.150.10.155:8118
+      AGENT_UUID: 00000000-0000-0000-0000-000000000000
+      ENROLLMENT_SECRET: replace-me
+      TLS_VERIFY: "0"
+      SCAN_DRY_RUN: "0"
+    volumes:
+      - agent-keys:/data
+      - nuclei-templates:/root/nuclei-templates
+
+volumes:
+  agent-keys:
+  nuclei-templates:

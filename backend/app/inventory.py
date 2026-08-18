@@ -1,0 +1,266 @@
+from datetime import datetime, timezone
+from ipaddress import ip_address
+from urllib.parse import urlparse
+
+from sqlalchemy.orm import Session
+
+from app.alerts import create_alert
+from app.classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
+from app.models import Alert, Device, Finding
+from app.schemas import DEVICE_CLASSES, DeviceReport, FindingReport
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _suggested_class(report: DeviceReport) -> str:
+    suggested = (report.classification or "").strip()
+    if suggested in DEVICE_CLASSES and suggested not in ("", "Unknown", "Other"):
+        return suggested
+    guessed = infer_class(report.hostname, report.ports, report.title, report.tech)
+    if guessed not in ("", "Unknown", "Other"):
+        return guessed
+    return ""
+
+
+def _apply_class(device: Device, report: DeviceReport) -> None:
+    suggested = _suggested_class(report)
+    if suggested and device.classification in ("", "Unknown"):
+        device.classification = suggested
+
+
+def _label_for(report: DeviceReport) -> str:
+    return (report.auto_label or "").strip() or infer_label(
+        report.hostname, report.ports, report.title, report.tech
+    )
+
+
+def _is_placeholder(device: Device) -> bool:
+    return is_placeholder_name(device.hostname or "", device.ip or "")
+
+
+def _find_by_hostname(db: Session, tenant_id: int, scope: str, hostname: str) -> Device | None:
+    if not hostname:
+        return None
+    return (
+        db.query(Device)
+        .filter(Device.tenant_id == tenant_id, Device.hostname == hostname, Device.scope == scope)
+        .first()
+    )
+
+
+def _find_placeholder_by_ip(db: Session, tenant_id: int, scope: str, ip: str) -> Device | None:
+    if not ip:
+        return None
+    rows = (
+        db.query(Device)
+        .filter(Device.tenant_id == tenant_id, Device.ip == ip, Device.scope == scope)
+        .order_by(Device.last_seen.desc())
+        .all()
+    )
+    for row in rows:
+        if _is_placeholder(row):
+            return row
+    return None
+
+
+def _find_device(db: Session, tenant_id: int, scope: str, hostname: str, ip: str) -> Device | None:
+    if hostname and not is_placeholder_name(hostname, ip):
+        found = _find_by_hostname(db, tenant_id, scope, hostname)
+        if found:
+            return found
+        return _find_placeholder_by_ip(db, tenant_id, scope, ip)
+    if ip:
+        return (
+            db.query(Device)
+            .filter(Device.tenant_id == tenant_id, Device.ip == ip, Device.scope == scope)
+            .order_by(Device.last_seen.desc())
+            .first()
+        )
+    return None
+
+
+def _merge_into(db: Session, keeper: Device, donor: Device) -> Device:
+    if donor.id == keeper.id:
+        return keeper
+    if donor.ip and (not keeper.ip or (donor.last_seen or donor.first_seen) >= (keeper.last_seen or keeper.first_seen)):
+        keeper.ip = donor.ip
+    if donor.ports:
+        keeper.ports = sorted({*(keeper.ports or []), *(donor.ports or [])})
+    if donor.title and not keeper.title:
+        keeper.title = donor.title
+    if donor.tech and not keeper.tech:
+        keeper.tech = donor.tech
+    if donor.auto_label and not keeper.auto_label:
+        keeper.auto_label = donor.auto_label
+    if donor.description and not keeper.description:
+        keeper.description = donor.description
+    if keeper.classification in ("", "Unknown") and donor.classification not in ("", "Unknown", "Other"):
+        keeper.classification = donor.classification
+    if donor.first_seen and (not keeper.first_seen or donor.first_seen < keeper.first_seen):
+        keeper.first_seen = donor.first_seen
+    db.query(Finding).filter(Finding.device_id == donor.id).update({Finding.device_id: keeper.id}, synchronize_session=False)
+    db.query(Alert).filter(Alert.device_id == donor.id).update({Alert.device_id: keeper.id}, synchronize_session=False)
+    db.delete(donor)
+    db.flush()
+    return keeper
+
+
+def _promote_hostname(db: Session, device: Device, hostname: str, tenant_id: int, scope: str) -> Device:
+    if not hostname or device.hostname == hostname:
+        return device
+    if not _is_placeholder(device) and not is_ip(device.hostname or ""):
+        return device
+    other = _find_by_hostname(db, tenant_id, scope, hostname)
+    if other and other.id != device.id:
+        return _merge_into(db, other, device)
+    device.hostname = hostname
+    return device
+
+
+def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[DeviceReport]) -> tuple[int, list[Device]]:
+    created: list[Device] = []
+    for report in reports:
+        hostname = identity_name(report.hostname, report.ip)
+        ip = (report.ip or "").strip()
+        device = _find_device(db, tenant_id, report.scope, hostname, ip)
+        if device is None:
+            device = _find_by_hostname(db, tenant_id, report.scope, hostname)
+        if device is None:
+            device = Device(
+                tenant_id=tenant_id,
+                ip=ip,
+                hostname=hostname,
+                scope=report.scope,
+                status="new",
+                classification="Unknown",
+                description="",
+                title=report.title,
+                tech=clean_tech(report.tech),
+                auto_label=_label_for(report),
+                ports=report.ports,
+                first_seen=_now(),
+                last_seen=_now(),
+                last_scan_job_id=job_id,
+            )
+            _apply_class(device, report)
+            db.add(device)
+            db.flush()
+            created.append(device)
+            create_alert(
+                db,
+                alert_type="new_device",
+                title=f"New {report.scope.upper()} device: {hostname}",
+                body=(
+                    f"A new device was discovered on tenant #{tenant_id}.\n"
+                    f"Hostname: {hostname}\nIP: {ip}\n"
+                    f"Scope: {report.scope}\nClass: {device.classification}\n"
+                    f"Label: {device.auto_label or '-'}\nPorts: {report.ports}"
+                ),
+                tenant_id=tenant_id,
+                device_id=device.id,
+            )
+            db.flush()
+            continue
+
+        previous_job = device.last_scan_job_id
+        if not is_placeholder_name(hostname, ip):
+            device = _promote_hostname(db, device, hostname, tenant_id, report.scope)
+        if ip:
+            device.ip = ip
+        device.last_seen = _now()
+        device.last_scan_job_id = job_id
+        if report.ports:
+            device.ports = report.ports
+        if report.title:
+            device.title = report.title
+        if report.tech:
+            device.tech = clean_tech(report.tech)
+        label = _label_for(report)
+        if label:
+            device.auto_label = label
+        _apply_class(device, report)
+        if device.status == "stale":
+            device.status = "known"
+        elif device.status == "new" and previous_job and previous_job != job_id:
+            device.status = "known"
+        db.flush()
+    return len(created), created
+
+
+def host_to_ip(host: str) -> str | None:
+    value = host.strip()
+    if not value:
+        return None
+    if "://" in value:
+        value = urlparse(value).hostname or value
+    value = value.split("/")[0].split(":")[0]
+    try:
+        return str(ip_address(value))
+    except ValueError:
+        return None
+
+
+def store_findings(
+    db: Session,
+    tenant_id: int,
+    job_id: int,
+    scope: str,
+    reports: list[FindingReport],
+) -> int:
+    count = 0
+    for report in reports:
+        raw_host = (report.host or report.matched_at or "").strip()
+        parsed = urlparse(raw_host).hostname if "://" in raw_host else raw_host.split("/")[0].split(":")[0]
+        parsed = normalize_hostname(parsed or "")
+        ip = host_to_ip(report.host or report.matched_at) or ""
+        hostname = identity_name(parsed, ip)
+        device = _find_device(db, tenant_id, scope, hostname, ip)
+        if device and parsed and not is_ip(parsed):
+            device = _promote_hostname(db, device, parsed, tenant_id, scope)
+        if device and ip:
+            device.ip = ip
+        raw = report.raw or {}
+        finding = Finding(
+            tenant_id=tenant_id,
+            scan_job_id=job_id,
+            device_id=device.id if device else None,
+            hostname=(device.hostname if device else hostname) or hostname,
+            template_id=report.template_id or raw.get("template-id") or "",
+            name=report.name or (raw.get("info") or {}).get("name") or "",
+            severity=(report.severity or (raw.get("info") or {}).get("severity") or "info").lower(),
+            host=report.host or raw.get("host") or "",
+            matched_at=report.matched_at or raw.get("matched-at") or "",
+            tags=report.tags
+            or ",".join((raw.get("info") or {}).get("tags") or []),
+            raw_json=raw,
+        )
+        db.add(finding)
+        count += 1
+    db.flush()
+    return count
+
+
+def refresh_discovery_metadata(db: Session) -> int:
+    updated = 0
+    for device in db.query(Device).all():
+        changed = False
+        if device.classification in ("", "Unknown"):
+            guessed = infer_class(device.hostname or "", device.ports, device.title or "", device.tech or "")
+            if guessed not in ("", "Unknown", "Other"):
+                device.classification = guessed
+                changed = True
+        label = infer_label(device.hostname or "", device.ports, device.title or "", device.tech or "")
+        if label != (device.auto_label or ""):
+            device.auto_label = label
+            changed = True
+        cleaned = clean_tech(device.tech or "")
+        if cleaned != (device.tech or ""):
+            device.tech = cleaned
+            changed = True
+        if changed:
+            updated += 1
+    if updated:
+        db.commit()
+    return updated

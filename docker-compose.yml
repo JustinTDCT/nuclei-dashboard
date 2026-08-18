@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nuclei}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-nuclei}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nuclei} -d ${POSTGRES_DB:-nuclei}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    pull_policy: build
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nuclei}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-nuclei}
+      SECRET_KEY: ${SECRET_KEY:-change-this-to-a-long-random-string}
+      SCANNER_TOKEN: ${SCANNER_TOKEN:-change-this-scanner-token}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
+      PUBLIC_URL: ${PUBLIC_URL:-https://10.150.10.155:8118}
+      AGENT_IMAGE: ${AGENT_IMAGE:-nuclei-dashboard-agent:latest}
+      AGENT_TLS_VERIFY: ${AGENT_TLS_VERIFY:-0}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    build: ./frontend
+    pull_policy: build
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  scanner:
+    build: ./scan_runtime
+    image: nuclei-dashboard-agent:latest
+    pull_policy: build
+    command: ["python", "scanner_main.py"]
+    environment:
+      CENTRAL_URL: http://api:8000
+      SCANNER_TOKEN: ${SCANNER_TOKEN:-change-this-scanner-token}
+      SCAN_DRY_RUN: ${SCAN_DRY_RUN:-0}
+    volumes:
+      - nuclei-templates:/root/nuclei-templates
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # LAN site agent. Not started by default.
+  # On the LAN host: sudo docker compose --profile lan-agent up -d nuclei-agent
+  nuclei-agent:
+    profiles: ["lan-agent"]
+    image: nuclei-dashboard-agent:latest
+    pull_policy: build
+    build: ./scan_runtime
+    command: ["python", "agent_main.py"]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      CENTRAL_URL: ${AGENT_CENTRAL_URL:-${PUBLIC_URL:-https://10.150.10.155:8118}}
+      AGENT_UUID: ${AGENT_UUID:-}
+      ENROLLMENT_SECRET: ${ENROLLMENT_SECRET:-}
+      TLS_VERIFY: ${AGENT_TLS_VERIFY:-0}
+      SCAN_DRY_RUN: "0"
+    volumes:
+      - agent-keys:/data
+      - nuclei-templates:/root/nuclei-templates
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8118:8118"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-https://10.150.10.155:8118}
+      CADDY_GLOBAL_OPTIONS: ${CADDY_GLOBAL_OPTIONS:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
+  nuclei-templates:
+  agent-keys:

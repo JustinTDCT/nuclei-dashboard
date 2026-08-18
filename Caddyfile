@@ -1,0 +1,13 @@
+{
+	auto_https off
+	servers {
+		protocols h1 h2
+	}
+}
+
+https://:8118 {
+	tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+	encode gzip
+	reverse_proxy /api* api:8000
+	reverse_proxy web:80
+}

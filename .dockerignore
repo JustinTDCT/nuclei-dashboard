@@ -1,0 +1,10 @@
+.git
+.cursor
+**/.venv
+**/__pycache__
+**/node_modules
+**/dist
+**/.env
+frontend/dist
+backend/.venv
+*.md
