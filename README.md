@@ -32,11 +32,14 @@ Agent TLS verification is **on** by default. Publicly trusted certificates need 
 ## Typical workflow
 
 1. Create a tenant (client)
-2. Add WAN and/or LAN CIDRs
-3. Create a site agent, download its compose (or `.env` + `agent/docker-compose.yml`), and start it on the remote LAN with `--build`
-4. Approve the agent once it appears as `pending approval`
-5. Create a scan (manual or interval) and run it
-6. Review devices (new / known / stale), findings, and alerts
+2. Create one or more Sites (physical localities). Optional: set a Site timezone override
+3. Add LAN Networks under a Site (overlapping RFC1918 ranges are valid across Sites)
+4. Create Agents for a Site, authorize them on the Networks they may scan, and choose Any Available or Preferred + Failover
+5. Add WAN targets under the tenant Subnets tab
+6. Download agent compose (or `.env` + `agent/docker-compose.yml`) and start it on the remote LAN with `--build`
+7. Approve the agent once it appears as `pending approval`
+8. Create a scan (manual or interval) and run it
+9. Review devices (new / known / stale), findings, and alerts
 
 New devices and impersonation attempts create in-app alerts and email staff when SMTP is configured under Admin → Settings.
 
@@ -74,7 +77,7 @@ Set `SCAN_DRY_RUN=1` on the scanner (or agent) to emit sample results without to
 | Role   | Access |
 |--------|--------|
 | Admin  | System settings, users, everything a user can do |
-| User   | Tenants, subnets, agents, scans, classification, acknowledge alerts |
+| User   | Tenants, sites, networks, WAN targets, agents, scans, classification, acknowledge alerts |
 | Viewer | Read-only inventory, findings, agent status. Cannot download enrollment secrets or agent compose/env |
 
 ## Local UI development

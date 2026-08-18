@@ -22,12 +22,44 @@ export interface Subnet {
   name: string;
   cidr: string;
   scope: "wan" | "lan";
+  site_id?: number | null;
+  network_id?: number | null;
   created_at: string;
+}
+
+export interface Site {
+  id: number;
+  tenant_id: number;
+  name: string;
+  timezone: string | null;
+  archived_at: string | null;
+  is_archived: boolean;
+  created_at: string;
+  effective_timezone: string;
+  network_count: number;
+  agent_count: number;
+}
+
+export interface Network {
+  id: number;
+  tenant_id: number;
+  site_id: number;
+  name: string;
+  cidr: string;
+  dispatch_mode: "any_available" | "preferred_failover";
+  preferred_agent_id: number | null;
+  archived_at: string | null;
+  is_archived: boolean;
+  created_at: string;
+  subnet_id: number | null;
+  authorized_agent_ids: number[];
 }
 
 export interface Agent {
   id: number;
   tenant_id: number;
+  site_id: number;
+  site_name?: string | null;
   name: string;
   uuid: string;
   status: string;
@@ -135,6 +167,7 @@ export interface Settings {
   smtp_tls: boolean;
   stale_days: number;
   default_nuclei_severities: string;
+  default_timezone: string;
 }
 
 export interface Dashboard {

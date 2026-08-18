@@ -14,8 +14,10 @@ from app.routers import (
     auth,
     devices,
     findings,
+    networks,
     scans,
     scanner_api,
+    sites,
     subnets,
     tenants,
     users,
@@ -53,6 +55,8 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/auth")
 app.include_router(users.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
+app.include_router(sites.router, prefix="/api")
+app.include_router(networks.router, prefix="/api")
 app.include_router(subnets.router, prefix="/api")
 app.include_router(agents.router, prefix="/api")
 app.include_router(scans.router, prefix="/api")

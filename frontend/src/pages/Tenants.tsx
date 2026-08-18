@@ -34,7 +34,7 @@ export function Tenants() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Tenants</h1>
-        <p className="text-slate-400 text-sm">Clients you manage. Each tenant has WAN/LAN subnets, agents, and scans.</p>
+        <p className="text-slate-400 text-sm">Clients you manage. Each tenant has sites, LAN networks, WAN targets, agents, and scans.</p>
       </div>
       {canWrite(user?.role) && (
         <form onSubmit={onCreate} className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-[1fr_2fr_auto] gap-3 items-end">

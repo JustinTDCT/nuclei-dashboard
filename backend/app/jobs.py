@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.locality import lan_cidrs_for_scan
 from app.models import Scan, ScanJob, Subnet
 
 
@@ -20,10 +21,13 @@ def create_job(db: Session, scan: Scan) -> ScanJob:
 def job_payload(db: Session, job: ScanJob) -> dict:
     scan = job.scan
     subnet_ids = scan.subnet_ids or []
-    q = db.query(Subnet).filter(Subnet.tenant_id == scan.tenant_id, Subnet.scope == scan.scope)
-    if subnet_ids:
-        q = q.filter(Subnet.id.in_(subnet_ids))
-    cidrs = [s.cidr for s in q.all()]
+    if scan.scope == "lan":
+        cidrs = lan_cidrs_for_scan(db, scan.tenant_id, scan.agent, subnet_ids) if scan.agent else []
+    else:
+        q = db.query(Subnet).filter(Subnet.tenant_id == scan.tenant_id, Subnet.scope == "wan")
+        if subnet_ids:
+            q = q.filter(Subnet.id.in_(subnet_ids))
+        cidrs = [s.cidr for s in q.all()]
     return {
         "job_id": job.id,
         "scan_id": scan.id,

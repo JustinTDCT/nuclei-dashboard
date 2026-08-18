@@ -4,32 +4,25 @@ from sqlalchemy.orm import Session
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.jobs import create_job, has_active_job
-from app.models import Agent, Scan, ScanJob, Subnet, Tenant, User
+from app.locality import get_agent, get_tenant, validate_lan_scan
+from app.models import Scan, ScanJob, Subnet, User
 from app.schemas import ScanIn, ScanJobOut, ScanOut
 
 router = APIRouter(tags=["scans"])
 
 
-def _tenant(db: Session, tenant_id: int) -> Tenant:
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
-
-
 def _validate_scan(db: Session, tenant_id: int, body: ScanIn) -> None:
-    if body.scope == "lan" and not body.agent_id:
-        raise HTTPException(status_code=400, detail="LAN scans require an agent")
+    if body.scope == "lan":
+        validate_lan_scan(db, tenant_id, body.agent_id, body.subnet_ids)
+        return
     if body.agent_id:
-        agent = db.query(Agent).filter(Agent.id == body.agent_id, Agent.tenant_id == tenant_id).first()
-        if not agent:
-            raise HTTPException(status_code=400, detail="Agent not found for tenant")
+        get_agent(db, body.agent_id, tenant_id=tenant_id)
     if body.subnet_ids:
         count = (
             db.query(Subnet)
             .filter(
                 Subnet.tenant_id == tenant_id,
-                Subnet.scope == body.scope,
+                Subnet.scope == "wan",
                 Subnet.id.in_(body.subnet_ids),
             )
             .count()
@@ -47,13 +40,13 @@ def job_out(job: ScanJob) -> ScanJobOut:
 
 @router.get("/tenants/{tenant_id}/scans", response_model=list[ScanOut])
 def list_scans(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    _tenant(db, tenant_id)
+    get_tenant(db, tenant_id)
     return db.query(Scan).filter(Scan.tenant_id == tenant_id).order_by(Scan.name).all()
 
 
 @router.post("/tenants/{tenant_id}/scans", response_model=ScanOut)
 def create_scan(tenant_id: int, body: ScanIn, _: User = Depends(require_user), db: Session = Depends(get_db)):
-    _tenant(db, tenant_id)
+    get_tenant(db, tenant_id)
     _validate_scan(db, tenant_id, body)
     scan = Scan(tenant_id=tenant_id, **body.model_dump())
     db.add(scan)
@@ -97,7 +90,7 @@ def run_scan(scan_id: int, _: User = Depends(require_user), db: Session = Depend
 
 @router.get("/tenants/{tenant_id}/jobs", response_model=list[ScanJobOut])
 def list_jobs(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    _tenant(db, tenant_id)
+    get_tenant(db, tenant_id)
     jobs = (
         db.query(ScanJob)
         .filter(ScanJob.tenant_id == tenant_id)

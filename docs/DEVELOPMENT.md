@@ -17,9 +17,13 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current baseline revision: `0001_baseline`.
+Current head revision: `0002_sites_networks` (after frozen `0001_baseline`).
+
+`0001_baseline` is immutable. Phase 1A schema lives only in `0002_sites_networks`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
+
+`alembic downgrade` from `0002_sites_networks` is **refused**. It would destroy Site, Network, authorization, and audit rows. Restore from backup instead of pretending a destructive downgrade is safe.
 
 ### Fresh install
 
@@ -57,6 +61,22 @@ pytest
 ```
 
 Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or use `TEST_DATABASE_URL` if you set it.
+
+## Phase 1A locality and WAN compatibility
+
+`0002_sites_networks` introduces Site, Network, Network-Agent authorization, dispatch configuration, and a minimal append-only `audit_logs` table.
+
+Existing databases are upgraded in place:
+
+- Each tenant that already has LAN subnets or agents receives one deterministic compatibility Site named **Imported Site**. Topology is not guessed.
+- LAN subnet rows become Networks on that Site. The original `subnets` row remains as an ID-stable companion (`subnets.network_id`) so existing `scans.subnet_ids` keep working.
+- Every Agent on that tenant is assigned to Imported Site.
+- Every Agent on that Site is authorized for every imported LAN Network (preserving the previous “any tenant agent may scan tenant LAN subnets” behavior).
+- WAN subnet rows are **not** converted into Networks. WAN scans keep using `subnets` with `scope=wan`.
+
+This companion `subnets` mapping for LAN is an intentional compatibility shim. Remove it when Phase 1D replaces scan targeting with Scan Definition scope and authorized WAN targets.
+
+Archived Sites/Networks are soft-deleted (`archived_at`). Do not physically delete them in the normal technician workflow.
 
 ## TLS verification
 

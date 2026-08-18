@@ -6,22 +6,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.compose_gen import agent_compose, agent_env
 from app.database import get_db
-from app.settings_store import central_url
+from app.locality import drop_cross_site_authorizations, get_agent, get_site, get_tenant, require_active_site
 from app.models import Agent, Tenant, User
-from app.schemas import AgentCreate, AgentOut
+from app.schemas import AgentCreate, AgentOut, AgentUpdate
+from app.settings_store import central_url
 
 router = APIRouter(tags=["agents"])
 ONLINE_SECONDS = 90
-
-
-def _tenant(db: Session, tenant_id: int) -> Tenant:
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
 
 
 def _online(agent: Agent) -> bool:
@@ -36,11 +31,39 @@ def _online(agent: Agent) -> bool:
 def serialize(agent: Agent, include_secret: bool = False) -> AgentOut:
     out = AgentOut.model_validate(agent)
     out.online = _online(agent)
+    out.site_name = agent.site.name if agent.site else None
     if include_secret and agent.status in ("pending_enrollment", "pending_approval"):
         out.enrollment_secret = agent.enrollment_secret
     else:
         out.enrollment_secret = None
     return out
+
+
+def _create_agent_row(db: Session, tenant: Tenant, site, name: str, user: User) -> Agent:
+    require_active_site(site)
+    if site.tenant_id != tenant.id:
+        raise HTTPException(status_code=400, detail="Site does not belong to this tenant")
+    agent = Agent(
+        tenant_id=tenant.id,
+        site_id=site.id,
+        name=name,
+        uuid=str(uuid.uuid4()),
+        enrollment_secret=secrets.token_urlsafe(32),
+        status="pending_enrollment",
+    )
+    db.add(agent)
+    db.flush()
+    record_audit(
+        db,
+        actor=user,
+        action="agent.create",
+        object_type="agent",
+        object_id=agent.id,
+        tenant_id=tenant.id,
+        site_id=site.id,
+        details={"name": agent.name, "uuid": agent.uuid},
+    )
+    return agent
 
 
 @router.get("/agents", response_model=list[AgentOut])
@@ -50,29 +73,84 @@ def list_all_agents(_: User = Depends(require_any), db: Session = Depends(get_db
 
 @router.get("/tenants/{tenant_id}/agents", response_model=list[AgentOut])
 def list_agents(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    _tenant(db, tenant_id)
+    get_tenant(db, tenant_id)
     return [
         serialize(a)
         for a in db.query(Agent).filter(Agent.tenant_id == tenant_id).order_by(Agent.name).all()
     ]
 
 
+@router.get("/sites/{site_id}/agents", response_model=list[AgentOut])
+def list_site_agents(site_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+    site = get_site(db, site_id)
+    return [
+        serialize(a)
+        for a in db.query(Agent).filter(Agent.site_id == site.id).order_by(Agent.name).all()
+    ]
+
+
 @router.post("/tenants/{tenant_id}/agents", response_model=AgentOut)
 def create_agent(
-    tenant_id: int, body: AgentCreate, _: User = Depends(require_user), db: Session = Depends(get_db)
+    tenant_id: int, body: AgentCreate, user: User = Depends(require_user), db: Session = Depends(get_db)
 ):
-    _tenant(db, tenant_id)
-    agent = Agent(
-        tenant_id=tenant_id,
-        name=body.name,
-        uuid=str(uuid.uuid4()),
-        enrollment_secret=secrets.token_urlsafe(32),
-        status="pending_enrollment",
-    )
-    db.add(agent)
+    tenant = get_tenant(db, tenant_id)
+    site = get_site(db, body.site_id, tenant_id=tenant_id)
+    agent = _create_agent_row(db, tenant, site, body.name, user)
     db.commit()
     db.refresh(agent)
     return serialize(agent, include_secret=True)
+
+
+@router.post("/sites/{site_id}/agents", response_model=AgentOut)
+def create_site_agent(
+    site_id: int, body: AgentCreate, user: User = Depends(require_user), db: Session = Depends(get_db)
+):
+    site = get_site(db, site_id)
+    if body.site_id != site.id:
+        raise HTTPException(status_code=400, detail="site_id does not match the path")
+    tenant = get_tenant(db, site.tenant_id)
+    agent = _create_agent_row(db, tenant, site, body.name, user)
+    db.commit()
+    db.refresh(agent)
+    return serialize(agent, include_secret=True)
+
+
+@router.patch("/agents/{agent_id}", response_model=AgentOut)
+def update_agent(
+    agent_id: int, body: AgentUpdate, user: User = Depends(require_user), db: Session = Depends(get_db)
+):
+    agent = get_agent(db, agent_id)
+    before = {"name": agent.name, "site_id": agent.site_id}
+    if body.name is not None:
+        agent.name = body.name
+    if body.site_id is not None and body.site_id != agent.site_id:
+        site = require_active_site(get_site(db, body.site_id, tenant_id=agent.tenant_id))
+        agent.site_id = site.id
+        drop_cross_site_authorizations(db, agent)
+        record_audit(
+            db,
+            actor=user,
+            action="agent.move_site",
+            object_type="agent",
+            object_id=agent.id,
+            tenant_id=agent.tenant_id,
+            site_id=site.id,
+            details={"before": before, "after": {"name": agent.name, "site_id": agent.site_id}},
+        )
+    elif body.name is not None:
+        record_audit(
+            db,
+            actor=user,
+            action="agent.update",
+            object_type="agent",
+            object_id=agent.id,
+            tenant_id=agent.tenant_id,
+            site_id=agent.site_id,
+            details={"before": before, "after": {"name": agent.name, "site_id": agent.site_id}},
+        )
+    db.commit()
+    db.refresh(agent)
+    return serialize(agent)
 
 
 @router.post("/agents/{agent_id}/approve", response_model=AgentOut)

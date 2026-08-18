@@ -56,11 +56,18 @@ def test_admin_and_user_can_download_deployment_material(reset_db):
         )
         assert tenant.status_code == 200, tenant.text
         tenant_id = tenant.json()["id"]
+        site = client.post(
+            f"/api/tenants/{tenant_id}/sites",
+            headers=_headers(user),
+            json={"name": "HQ"},
+        )
+        assert site.status_code == 200, site.text
+        site_id = site.json()["id"]
 
         created = client.post(
             f"/api/tenants/{tenant_id}/agents",
             headers=_headers(user),
-            json={"name": "Site A"},
+            json={"name": "Site A", "site_id": site_id},
         )
         assert created.status_code == 200, created.text
         agent = created.json()
@@ -94,10 +101,16 @@ def test_viewer_cannot_retrieve_enrollment_secret_or_deployment_material(reset_d
             json={"name": "Viewer Tenant", "notes": ""},
         )
         tenant_id = tenant.json()["id"]
+        site = client.post(
+            f"/api/tenants/{tenant_id}/sites",
+            headers=_headers(admin),
+            json={"name": "HQ"},
+        )
+        site_id = site.json()["id"]
         created = client.post(
             f"/api/tenants/{tenant_id}/agents",
             headers=_headers(admin),
-            json={"name": "Site B"},
+            json={"name": "Site B", "site_id": site_id},
         )
         agent = created.json()
         secret = agent["enrollment_secret"]
@@ -128,6 +141,6 @@ def test_viewer_cannot_retrieve_enrollment_secret_or_deployment_material(reset_d
         create_as_viewer = client.post(
             f"/api/tenants/{tenant_id}/agents",
             headers=_headers(viewer),
-            json={"name": "Should Fail"},
+            json={"name": "Should Fail", "site_id": site_id},
         )
         assert create_as_viewer.status_code == 403

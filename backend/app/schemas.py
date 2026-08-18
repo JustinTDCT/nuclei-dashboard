@@ -75,6 +75,7 @@ class SubnetIn(BaseModel):
     name: str
     cidr: str
     scope: str = Field(pattern="^(wan|lan)$")
+    site_id: int | None = None
 
 
 class SubnetOut(BaseModel):
@@ -83,18 +84,76 @@ class SubnetOut(BaseModel):
     name: str
     cidr: str
     scope: str
+    site_id: int | None = None
+    network_id: int | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
+class SiteIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    timezone: str | None = None
+
+
+class SiteOut(BaseModel):
+    id: int
+    tenant_id: int
+    name: str
+    timezone: str | None
+    archived_at: datetime | None
+    is_archived: bool = False
+    created_at: datetime
+    effective_timezone: str = "UTC"
+    network_count: int = 0
+    agent_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class NetworkIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    cidr: str
+    dispatch_mode: str = Field(default="any_available", pattern="^(any_available|preferred_failover)$")
+    preferred_agent_id: int | None = None
+
+
+class NetworkOut(BaseModel):
+    id: int
+    tenant_id: int
+    site_id: int
+    name: str
+    cidr: str
+    dispatch_mode: str
+    preferred_agent_id: int | None
+    archived_at: datetime | None
+    is_archived: bool = False
+    created_at: datetime
+    subnet_id: int | None = None
+    authorized_agent_ids: list[int] = []
+
+    model_config = {"from_attributes": True}
+
+
+class NetworkAuthorizationIn(BaseModel):
+    agent_ids: list[int]
+
+
 class AgentCreate(BaseModel):
     name: str
+    site_id: int
+
+
+class AgentUpdate(BaseModel):
+    name: str | None = None
+    site_id: int | None = None
 
 
 class AgentOut(BaseModel):
     id: int
     tenant_id: int
+    site_id: int
+    site_name: str | None = None
     name: str
     uuid: str
     status: str
@@ -233,6 +292,11 @@ class SettingsOut(BaseModel):
     smtp_tls: bool = True
     stale_days: int = 14
     default_nuclei_severities: str = "critical,high,medium"
+    default_timezone: str = "UTC"
+
+
+class DisplaySettingsOut(BaseModel):
+    default_timezone: str = "UTC"
 
 
 class SettingsIn(SettingsOut):

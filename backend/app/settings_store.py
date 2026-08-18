@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import Setting
 from app.schemas import SettingsOut
+from app.timezones import FALLBACK_TIMEZONE, coerce_timezone
 
 DEFAULTS = SettingsOut().model_dump()
 
@@ -24,6 +25,7 @@ def get_settings(db: Session) -> dict:
         elif parsed.scheme == "http":
             data["central_port"] = 80
         data["central_tls"] = parsed.scheme != "http"
+    data["default_timezone"] = coerce_timezone(data.get("default_timezone") or FALLBACK_TIMEZONE)
     return data
 
 

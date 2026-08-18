@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.auth import require_admin, require_any
 from app.database import get_db
 from app.models import Agent, Alert, Device, Finding, ScanJob, Tenant, User
-from app.schemas import SettingsIn, SettingsOut
+from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
 from app.settings_store import get_settings, save_settings
+from app.timezones import list_iana_timezones, validate_iana_timezone
 
 router = APIRouter(tags=["admin"])
 
@@ -19,8 +21,33 @@ def read_settings(_: User = Depends(require_admin), db: Session = Depends(get_db
 
 
 @router.put("/admin/settings", response_model=SettingsOut)
-def write_settings(body: SettingsIn, _: User = Depends(require_admin), db: Session = Depends(get_db)):
-    return SettingsOut(**save_settings(db, body.model_dump()))
+def write_settings(body: SettingsIn, user: User = Depends(require_admin), db: Session = Depends(get_db)):
+    timezone = validate_iana_timezone(body.default_timezone)
+    current = get_settings(db)
+    payload = body.model_dump()
+    payload["default_timezone"] = timezone
+    saved = save_settings(db, payload)
+    if current.get("default_timezone") != timezone:
+        record_audit(
+            db,
+            actor=user,
+            action="settings.timezone_change",
+            object_type="settings",
+            object_id=None,
+            details={"before": current.get("default_timezone"), "after": timezone},
+            commit=True,
+        )
+    return SettingsOut(**saved)
+
+
+@router.get("/display-settings", response_model=DisplaySettingsOut)
+def display_settings(_: User = Depends(require_any), db: Session = Depends(get_db)):
+    return DisplaySettingsOut(default_timezone=get_settings(db).get("default_timezone") or "UTC")
+
+
+@router.get("/timezones")
+def timezones(_: User = Depends(require_any)):
+    return {"timezones": list_iana_timezones()}
 
 
 @router.get("/dashboard")

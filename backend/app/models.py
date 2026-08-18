@@ -2,6 +2,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -14,6 +15,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+DISPATCH_ANY_AVAILABLE = "any_available"
+DISPATCH_PREFERRED_FAILOVER = "preferred_failover"
+COMPATIBILITY_SITE_NAME = "Imported Site"
 
 
 class User(Base):
@@ -37,11 +42,71 @@ class Tenant(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     subnets: Mapped[list["Subnet"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    sites: Mapped[list["Site"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     agents: Mapped[list["Agent"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     scans: Mapped[list["Scan"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     devices: Mapped[list["Device"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     findings: Mapped[list["Finding"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+
+
+class Site(Base):
+    __tablename__ = "sites"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_sites_tenant_id_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    timezone: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="sites")
+    networks: Mapped[list["Network"]] = relationship(back_populates="site", cascade="all, delete-orphan")
+    agents: Mapped[list["Agent"]] = relationship(back_populates="site")
+
+
+class Network(Base):
+    __tablename__ = "networks"
+    __table_args__ = (
+        UniqueConstraint("site_id", "name", name="uq_networks_site_id_name"),
+        CheckConstraint(
+            "dispatch_mode IN ('any_available', 'preferred_failover')",
+            name="ck_networks_dispatch_mode",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    cidr: Mapped[str] = mapped_column(String(80))
+    dispatch_mode: Mapped[str] = mapped_column(String(32), default=DISPATCH_ANY_AVAILABLE)
+    preferred_agent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), nullable=True
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    tenant: Mapped["Tenant"] = relationship()
+    site: Mapped["Site"] = relationship(back_populates="networks")
+    preferred_agent: Mapped["Agent | None"] = relationship(foreign_keys=[preferred_agent_id])
+    agent_links: Mapped[list["NetworkAgent"]] = relationship(
+        back_populates="network", cascade="all, delete-orphan"
+    )
+
+
+class NetworkAgent(Base):
+    __tablename__ = "network_agents"
+    __table_args__ = (UniqueConstraint("network_id", "agent_id", name="uq_network_agents_network_id_agent_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    network_id: Mapped[int] = mapped_column(ForeignKey("networks.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    network: Mapped["Network"] = relationship(back_populates="agent_links")
+    agent: Mapped["Agent"] = relationship(back_populates="network_links")
 
 
 class Subnet(Base):
@@ -52,9 +117,15 @@ class Subnet(Base):
     name: Mapped[str] = mapped_column(String(200))
     cidr: Mapped[str] = mapped_column(String(80))
     scope: Mapped[str] = mapped_column(String(10))  # wan, lan
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    network_id: Mapped[int | None] = mapped_column(
+        ForeignKey("networks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     tenant: Mapped["Tenant"] = relationship(back_populates="subnets")
+    site: Mapped["Site | None"] = relationship()
+    network: Mapped["Network | None"] = relationship()
 
 
 class Agent(Base):
@@ -62,6 +133,7 @@ class Agent(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(200))
     uuid: Mapped[str] = mapped_column(String(36), unique=True, index=True)
     enrollment_secret: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -76,7 +148,11 @@ class Agent(Base):
     approved_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship(back_populates="agents")
+    site: Mapped["Site"] = relationship(back_populates="agents")
     scans: Mapped[list["Scan"]] = relationship(back_populates="agent")
+    network_links: Mapped[list["NetworkAgent"]] = relationship(
+        back_populates="agent", cascade="all, delete-orphan"
+    )
 
 
 class Scan(Base):
@@ -189,3 +265,18 @@ class Setting(Base):
 
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    actor_username: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    object_type: Mapped[str] = mapped_column(String(40), index=True)
+    object_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id", ondelete="SET NULL"), nullable=True, index=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

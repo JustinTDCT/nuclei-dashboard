@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
+import { TimezoneField } from "./SitesPanel";
 import type { Settings } from "../types";
 
 const empty: Settings = {
@@ -14,6 +15,7 @@ const empty: Settings = {
   smtp_tls: true,
   stale_days: 14,
   default_nuclei_severities: "critical,high,medium",
+  default_timezone: "UTC",
 };
 
 export function AdminSettings() {
@@ -90,6 +92,14 @@ export function AdminSettings() {
           value={form.default_nuclei_severities}
           onChange={(v) => setForm({ ...form, default_nuclei_severities: v })}
         />
+        <TimezoneField
+          label="Global default timezone"
+          value={form.default_timezone || "UTC"}
+          onChange={(v) => setForm({ ...form, default_timezone: v || "UTC" })}
+        />
+        <div className="text-sm text-slate-400 mt-6">
+          Timestamps stay in UTC. The UI displays them in this timezone unless a Site overrides it.
+        </div>
       </section>
       {error && <div className="text-rose-300 text-sm">{error}</div>}
       {saved && <div className="text-emerald-300 text-sm">Saved.</div>}

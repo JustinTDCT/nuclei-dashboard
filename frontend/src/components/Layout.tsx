@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "../auth";
+import { TimezoneProvider } from "../timezone";
 
 const link = ({ isActive }: { isActive: boolean }) =>
   `block px-3 py-2 rounded-md text-sm ${isActive ? "bg-slate-800 text-white" : "text-slate-300 hover:bg-slate-800/70"}`;
@@ -44,7 +45,9 @@ export function Layout() {
         </div>
       </aside>
       <main className="p-8 overflow-auto">
-        <Outlet />
+        <TimezoneProvider>
+          <Outlet />
+        </TimezoneProvider>
       </main>
     </div>
   );

@@ -4,9 +4,11 @@ import { api, download } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import { Alerts } from "./Alerts";
-import type { Agent, Device, DeviceDetail, Finding, Scan, ScanJob, Subnet, Tenant, TenantSummary } from "../types";
+import { formatUtc, useTimezone } from "../timezone";
+import type { Agent, Device, DeviceDetail, Finding, Network, Scan, ScanJob, Site, Subnet, Tenant, TenantSummary } from "../types";
+import { SitesPanel } from "./SitesPanel";
 
-type Tab = "overview" | "subnets" | "agents" | "scans" | "devices" | "findings" | "alerts";
+type Tab = "overview" | "sites" | "subnets" | "agents" | "scans" | "devices" | "findings" | "alerts";
 
 export function TenantDetail() {
   const { id } = useParams();
@@ -20,7 +22,7 @@ export function TenantDetail() {
 
   if (!tenant) return <div className="text-slate-400">Loading…</div>;
 
-  const tabs: Tab[] = ["overview", "subnets", "agents", "scans", "devices", "findings", "alerts"];
+  const tabs: Tab[] = ["overview", "sites", "subnets", "agents", "scans", "devices", "findings", "alerts"];
 
   return (
     <div className="space-y-6">
@@ -43,6 +45,7 @@ export function TenantDetail() {
         ))}
       </div>
       {tab === "overview" && <Overview tenantId={tenantId} />}
+      {tab === "sites" && <SitesPanel tenantId={tenantId} />}
       {tab === "subnets" && <Subnets tenantId={tenantId} />}
       {tab === "agents" && <Agents tenantId={tenantId} />}
       {tab === "scans" && <Scans tenantId={tenantId} />}
@@ -94,7 +97,7 @@ function Subnets({ tenantId }: { tenantId: number }) {
   const [rows, setRows] = useState<Subnet[]>([]);
   const [name, setName] = useState("");
   const [cidr, setCidr] = useState("");
-  const [scope, setScope] = useState<"wan" | "lan">("lan");
+  const [scope, setScope] = useState<"wan" | "lan">("wan");
   const [error, setError] = useState("");
 
   function load() {
@@ -120,18 +123,20 @@ function Subnets({ tenantId }: { tenantId: number }) {
 
   return (
     <div className="space-y-4">
+      <p className="text-sm text-slate-400">
+        WAN targets stay here. LAN CIDRs are Networks under the Sites tab so overlapping private ranges can exist at different sites.
+      </p>
       {write && (
         <form onSubmit={onCreate} className="grid md:grid-cols-4 gap-3 items-end bg-slate-900 border border-slate-800 rounded-xl p-4">
           <Field label="Name" value={name} onChange={setName} />
-          <Field label="CIDR" value={cidr} onChange={setCidr} placeholder="10.0.0.0/24" />
+          <Field label="CIDR" value={cidr} onChange={setCidr} placeholder="203.0.113.0/24" />
           <div>
             <label>Scope</label>
             <select className="w-full" value={scope} onChange={(e) => setScope(e.target.value as "wan" | "lan")}>
-              <option value="lan">LAN (site agent)</option>
               <option value="wan">WAN (central scanner)</option>
             </select>
           </div>
-          <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2">Add subnet</button>
+          <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2">Add WAN target</button>
         </form>
       )}
       {error && <div className="text-rose-300 text-sm">{error}</div>}
@@ -141,12 +146,12 @@ function Subnets({ tenantId }: { tenantId: number }) {
           s.name,
           <span className="font-mono">{s.cidr}</span>,
           <Badge value={s.scope} />,
-          write ? (
+          write && s.scope === "wan" ? (
             <button className="text-rose-300 text-sm" onClick={() => api(`/api/subnets/${s.id}`, { method: "DELETE" }).then(load)}>
               Delete
             </button>
           ) : (
-            ""
+            s.scope === "lan" ? "Managed under Sites" : ""
           ),
         ])}
       />
@@ -158,11 +163,18 @@ function Agents({ tenantId }: { tenantId: number }) {
   const { user } = useAuth();
   const write = canWrite(user?.role);
   const [rows, setRows] = useState<Agent[]>([]);
+  const [sites, setSites] = useState<Site[]>([]);
   const [name, setName] = useState("");
+  const [siteId, setSiteId] = useState("");
   const [created, setCreated] = useState<Agent | null>(null);
+  const { defaultTimezone } = useTimezone();
 
   function load() {
     api<Agent[]>(`/api/tenants/${tenantId}/agents`).then(setRows);
+    api<Site[]>(`/api/tenants/${tenantId}/sites`).then((rows) => {
+      setSites(rows);
+      setSiteId((current) => current || (rows[0] ? String(rows[0].id) : ""));
+    });
   }
   useEffect(() => {
     load();
@@ -174,7 +186,7 @@ function Agents({ tenantId }: { tenantId: number }) {
     e.preventDefault();
     const agent = await api<Agent>(`/api/tenants/${tenantId}/agents`, {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, site_id: Number(siteId) }),
     });
     setName("");
     setCreated(agent);
@@ -186,8 +198,19 @@ function Agents({ tenantId }: { tenantId: number }) {
       {write && (
         <form onSubmit={onCreate} className="flex gap-3 items-end bg-slate-900 border border-slate-800 rounded-xl p-4">
           <div className="flex-1">
-            <label>Site name</label>
-            <input className="w-full" value={name} onChange={(e) => setName(e.target.value)} required placeholder="HQ LAN" />
+            <label>Agent name</label>
+            <input className="w-full" value={name} onChange={(e) => setName(e.target.value)} required placeholder="Agent-HQ-01" />
+          </div>
+          <div>
+            <label>Site</label>
+            <select className="w-full" value={siteId} onChange={(e) => setSiteId(e.target.value)} required>
+              <option value="">Select site</option>
+              {sites.map((site) => (
+                <option key={site.id} value={site.id}>
+                  {site.name}
+                </option>
+              ))}
+            </select>
           </div>
           <button className="bg-cyan-600 text-slate-950 font-medium rounded-md px-4 py-2">Create agent</button>
         </form>
@@ -214,16 +237,17 @@ function Agents({ tenantId }: { tenantId: number }) {
         </div>
       )}
       <Table
-        headers={["Name", "Status", "Online", "Host", "Last seen", ""]}
+        headers={["Name", "Site", "Status", "Online", "Host", "Last seen", ""]}
         rows={rows.map((a) => [
           <div>
             <div>{a.name}</div>
             <div className="font-mono text-[11px] text-slate-500">{a.uuid}</div>
           </div>,
+          a.site_name || a.site_id,
           <Badge value={a.status} />,
           <Badge value={a.online ? "online" : "offline"} />,
           a.hostname || "—",
-          a.last_heartbeat ? new Date(a.last_heartbeat).toLocaleString() : "—",
+          formatUtc(a.last_heartbeat, defaultTimezone),
           <div className="flex flex-col items-end gap-1 text-sm">
             {write && (
               <>
@@ -258,7 +282,10 @@ function Scans({ tenantId }: { tenantId: number }) {
   const [scans, setScans] = useState<Scan[]>([]);
   const [jobs, setJobs] = useState<ScanJob[]>([]);
   const [subnets, setSubnets] = useState<Subnet[]>([]);
+  const [networks, setNetworks] = useState<Network[]>([]);
+  const [sites, setSites] = useState<Site[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const { defaultTimezone } = useTimezone();
   const [form, setForm] = useState({
     name: "",
     scope: "lan" as "lan" | "wan",
@@ -272,6 +299,8 @@ function Scans({ tenantId }: { tenantId: number }) {
     api<Scan[]>(`/api/tenants/${tenantId}/scans`).then(setScans);
     api<ScanJob[]>(`/api/tenants/${tenantId}/jobs`).then(setJobs);
     api<Subnet[]>(`/api/tenants/${tenantId}/subnets`).then(setSubnets);
+    api<Network[]>(`/api/tenants/${tenantId}/networks`).then(setNetworks);
+    api<Site[]>(`/api/tenants/${tenantId}/sites`).then(setSites);
     api<Agent[]>(`/api/tenants/${tenantId}/agents`).then(setAgents);
   }
   useEffect(() => {
@@ -280,10 +309,17 @@ function Scans({ tenantId }: { tenantId: number }) {
     return () => clearInterval(id);
   }, [tenantId]);
 
-  const scopedSubnets = useMemo(
-    () => subnets.filter((s) => s.scope === form.scope),
-    [subnets, form.scope]
-  );
+  const selectedAgent = agents.find((a) => String(a.id) === form.agent_id);
+  const scopedTargets = useMemo(() => {
+    if (form.scope === "wan") return subnets.filter((s) => s.scope === "wan");
+    return networks.filter(
+      (n) =>
+        !n.is_archived &&
+        selectedAgent &&
+        n.site_id === selectedAgent.site_id &&
+        n.authorized_agent_ids.includes(selectedAgent.id)
+    );
+  }, [form.scope, subnets, networks, selectedAgent]);
 
   async function onCreate(e: FormEvent) {
     e.preventDefault();
@@ -318,7 +354,7 @@ function Scans({ tenantId }: { tenantId: number }) {
           {form.scope === "lan" && (
             <div>
               <label>Agent</label>
-              <select className="w-full" value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: e.target.value })} required>
+              <select className="w-full" value={form.agent_id} onChange={(e) => setForm({ ...form, agent_id: e.target.value, subnet_ids: [] })} required>
                 <option value="">Select agent</option>
                 {agents.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -340,25 +376,33 @@ function Scans({ tenantId }: { tenantId: number }) {
             <input className="w-full" value={form.interval_minutes} onChange={(e) => setForm({ ...form, interval_minutes: e.target.value })} />
           </div>
           <div className="md:col-span-3">
-            <label>Subnets (leave empty for all {form.scope.toUpperCase()})</label>
+            <label>
+              {form.scope === "lan"
+                ? "Networks the selected agent is authorized for (empty = all authorized on its site)"
+                : "WAN targets (leave empty for all WAN)"}
+            </label>
             <div className="flex flex-wrap gap-3 mt-1">
-              {scopedSubnets.map((s) => (
-                <label key={s.id} className="flex items-center gap-2 text-sm text-slate-300 normal-case tracking-normal">
-                  <input
-                    type="checkbox"
-                    checked={form.subnet_ids.includes(s.id)}
-                    onChange={(e) =>
-                      setForm({
-                        ...form,
-                        subnet_ids: e.target.checked
-                          ? [...form.subnet_ids, s.id]
-                          : form.subnet_ids.filter((id) => id !== s.id),
-                      })
-                    }
-                  />
-                  {s.name} ({s.cidr})
-                </label>
-              ))}
+              {scopedTargets.map((s) => {
+                const id = form.scope === "lan" ? ((s as Network).subnet_id || s.id) : s.id;
+                const siteName = form.scope === "lan" ? sites.find((site) => site.id === (s as Network).site_id)?.name : null;
+                return (
+                  <label key={id} className="flex items-center gap-2 text-sm text-slate-300 normal-case tracking-normal">
+                    <input
+                      type="checkbox"
+                      checked={form.subnet_ids.includes(id)}
+                      onChange={(e) =>
+                        setForm({
+                          ...form,
+                          subnet_ids: e.target.checked
+                            ? [...form.subnet_ids, id]
+                            : form.subnet_ids.filter((existing) => existing !== id),
+                        })
+                      }
+                    />
+                    {s.name} ({s.cidr}){siteName ? ` · ${siteName}` : ""}
+                  </label>
+                );
+              })}
             </div>
           </div>
           <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2">Create scan</button>
@@ -393,7 +437,7 @@ function Scans({ tenantId }: { tenantId: number }) {
             <Badge value={j.status} />,
             j.hosts_found,
             j.findings_count,
-            new Date(j.created_at).toLocaleString(),
+            formatUtc(j.created_at, defaultTimezone),
           ])}
         />
       </div>

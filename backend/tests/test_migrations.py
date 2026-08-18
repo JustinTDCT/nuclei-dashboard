@@ -11,6 +11,14 @@ from tests.conftest import requires_postgres
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_schema.py"
+PHASE1A_HEAD = "0002_sites_networks"
+PHASE1B_TABLES = {
+    "assets",
+    "asset_identifiers",
+    "asset_addresses",
+    "asset_services",
+    "asset_observations",
+}
 
 
 def _tables(engine) -> set[str]:
@@ -28,12 +36,16 @@ def test_fresh_database_reaches_head(reset_db):
 
     assert "users" not in _tables(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == "0001_baseline"
+    assert revision == head_revision() == current_revision() == PHASE1A_HEAD
     expected = {
         "alembic_version",
         "users",
         "tenants",
         "subnets",
+        "sites",
+        "networks",
+        "network_agents",
+        "audit_logs",
         "agents",
         "scans",
         "scan_jobs",
@@ -43,77 +55,96 @@ def test_fresh_database_reaches_head(reset_db):
         "settings",
     }
     assert expected.issubset(_tables(engine))
-    assert "sites" not in _tables(engine)
-    assert "assets" not in _tables(engine)
+    assert PHASE1B_TABLES.isdisjoint(_tables(engine))
 
 
 @requires_postgres
 def test_existing_schema_adoption_preserves_data(reset_db):
-    from app.database import Base, SessionLocal, engine, ensure_columns
-    from app.migrate import apply_schema, current_revision, head_revision
+    from alembic import command
+
+    from app.database import SessionLocal, engine, ensure_columns
+    from app.migrate import alembic_config, apply_schema, current_revision, head_revision
     from app.models import Agent, Device, Finding, Tenant, User
 
-    Base.metadata.create_all(bind=engine)
+    command.upgrade(alembic_config(), "0001_baseline")
     ensure_columns()
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
     assert "alembic_version" not in _tables(engine)
+    assert "sites" not in _tables(engine)
 
-    db = SessionLocal()
-    try:
-        user = User(
-            username="keep-admin",
-            email="keep@localhost",
-            password_hash="not-a-real-hash",
-            role="admin",
-            is_active=True,
-        )
-        tenant = Tenant(name="Keep Tenant", notes="representative")
-        db.add_all([user, tenant])
-        db.flush()
-        agent = Agent(
-            tenant_id=tenant.id,
-            name="Keep Agent",
-            uuid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-            enrollment_secret="keep-enrollment-secret",
-            status="pending_enrollment",
-        )
-        device = Device(
-            tenant_id=tenant.id,
-            ip="10.1.2.3",
-            hostname="keep-host",
-            scope="lan",
-            status="known",
-            classification="Server",
-            description="must survive",
-            ports=[{"port": 443, "protocol": "tcp"}],
-        )
-        db.add_all([agent, device])
-        db.flush()
-        finding = Finding(
-            tenant_id=tenant.id,
-            device_id=device.id,
-            template_id="keep-template",
-            name="Keep finding",
-            severity="high",
-            hostname="keep-host",
-            host="10.1.2.3",
-            matched_at="https://10.1.2.3",
-            found_at=datetime.now(timezone.utc),
-            raw_json={"id": "keep"},
-        )
-        db.add(finding)
-        db.commit()
+    with engine.begin() as conn:
+        user_id = conn.execute(
+            text(
+                """
+                INSERT INTO users (username, email, password_hash, role, is_active)
+                VALUES ('keep-admin', 'keep@localhost', 'not-a-real-hash', 'admin', true)
+                RETURNING id
+                """
+            )
+        ).scalar_one()
+        tenant_id = conn.execute(
+            text("INSERT INTO tenants (name, notes) VALUES ('Keep Tenant', 'representative') RETURNING id")
+        ).scalar_one()
+        agent_id = conn.execute(
+            text(
+                """
+                INSERT INTO agents (tenant_id, name, uuid, enrollment_secret, status)
+                VALUES (:tid, 'Keep Agent', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+                        'keep-enrollment-secret', 'pending_enrollment')
+                RETURNING id
+                """
+            ),
+            {"tid": tenant_id},
+        ).scalar_one()
+        device_id = conn.execute(
+            text(
+                """
+                INSERT INTO devices (
+                    tenant_id, ip, hostname, scope, status, classification, description,
+                    auto_label, title, tech, ports
+                )
+                VALUES (
+                    :tid, '10.1.2.3', 'keep-host', 'lan', 'known', 'Server', 'must survive',
+                    '', '', '', CAST(:ports AS jsonb)
+                )
+                RETURNING id
+                """
+            ),
+            {"tid": tenant_id, "ports": '[{"port": 443, "protocol": "tcp"}]'},
+        ).scalar_one()
+        finding_id = conn.execute(
+            text(
+                """
+                INSERT INTO findings (
+                    tenant_id, device_id, template_id, name, severity, hostname, host,
+                    matched_at, tags, found_at, raw_json
+                )
+                VALUES (
+                    :tid, :did, 'keep-template', 'Keep finding', 'high', 'keep-host',
+                    '10.1.2.3', 'https://10.1.2.3', '', :found, CAST(:raw AS jsonb)
+                )
+                RETURNING id
+                """
+            ),
+            {
+                "tid": tenant_id,
+                "did": device_id,
+                "found": datetime.now(timezone.utc),
+                "raw": '{"id": "keep"}',
+            },
+        ).scalar_one()
         ids = {
-            "user": user.id,
-            "tenant": tenant.id,
-            "agent": agent.id,
-            "device": device.id,
-            "finding": finding.id,
+            "user": user_id,
+            "tenant": tenant_id,
+            "agent": agent_id,
+            "device": device_id,
+            "finding": finding_id,
         }
-    finally:
-        db.close()
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == "0001_baseline"
+    assert revision == head_revision() == current_revision() == PHASE1A_HEAD
 
     db = SessionLocal()
     try:
@@ -127,6 +158,7 @@ def test_existing_schema_adoption_preserves_data(reset_db):
         assert kept_agent is not None
         assert kept_agent.enrollment_secret == "keep-enrollment-secret"
         assert kept_agent.uuid == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        assert kept_agent.site_id is not None
         assert kept_device is not None
         assert kept_device.hostname == "keep-host"
         assert kept_device.description == "must survive"
@@ -209,7 +241,7 @@ def test_compare_metadata_detects_unmigrated_model_table(reset_db):
     copied = MetaData()
     for table in Base.metadata.sorted_tables:
         table.to_metadata(copied)
-    Table("sites", copied, Column("id", Integer, primary_key=True))
+    Table("unmigrated_probe", copied, Column("id", Integer, primary_key=True))
     with engine.connect() as conn:
         diffs = compare_metadata(MigrationContext.configure(conn), copied)
     assert diffs, "compare_metadata must report a model table that has no migration"
@@ -236,36 +268,40 @@ def test_head_matches_current_models(reset_db):
 
 @requires_postgres
 def test_legacy_compatibility_restores_missing_columns_without_dropping_rows(reset_db):
-    from app.database import Base, SessionLocal, engine, ensure_columns
-    from app.migrate import apply_schema
-    from app.models import Device, Tenant
+    from alembic import command
 
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    try:
-        tenant = Tenant(name="Compat Tenant")
-        db.add(tenant)
-        db.flush()
-        db.add(
-            Device(
-                tenant_id=tenant.id,
-                ip="10.9.9.9",
-                hostname="compat-host",
-                scope="wan",
-                description="before-drop",
-            )
+    from app.database import SessionLocal, engine, ensure_columns
+    from app.migrate import alembic_config, apply_schema
+    from app.models import Device
+
+    command.upgrade(alembic_config(), "0001_baseline")
+    with engine.begin() as conn:
+        tenant_id = conn.execute(
+            text("INSERT INTO tenants (name, notes) VALUES ('Compat Tenant', '') RETURNING id")
+        ).scalar_one()
+        conn.execute(
+            text(
+                """
+                INSERT INTO devices (
+                    tenant_id, ip, hostname, scope, status, classification, description,
+                    auto_label, title, tech, ports
+                )
+                VALUES (
+                    :tid, '10.9.9.9', 'compat-host', 'wan', 'new', 'Unknown', 'before-drop',
+                    '', '', '', '[]'::jsonb
+                )
+                """
+            ),
+            {"tid": tenant_id},
         )
-        db.commit()
-        tenant_id = tenant.id
-    finally:
-        db.close()
+        conn.execute(text("DROP TABLE alembic_version"))
 
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE findings DROP COLUMN IF EXISTS hostname"))
         conn.execute(text("ALTER TABLE devices DROP COLUMN IF EXISTS description"))
 
     revision = apply_schema()
-    assert revision == "0001_baseline"
+    assert revision == PHASE1A_HEAD
     assert "hostname" in _columns(engine, "findings")
     assert "description" in _columns(engine, "devices")
 
