@@ -362,6 +362,9 @@ def create_expected_asset(
         site_id=site.id,
         details={"display_name": asset.display_name, "hostname": body.hostname, "ip": body.ip},
     )
+    from app.policy import apply_asset_handling
+
+    apply_asset_handling(db, asset)
     db.commit()
     return get_asset(asset.id, user, db)
 
@@ -549,6 +552,9 @@ def add_asset_tag(
         site_id=asset.site_id,
         details={"op": "add", "tag_id": tag.id, "name": tag.name},
     )
+    from app.policy import apply_asset_handling
+
+    apply_asset_handling(db, asset)
     db.commit()
     return get_asset(asset.id, user, db)
 
@@ -579,6 +585,9 @@ def delete_asset_tag(
         site_id=asset.site_id,
         details={"op": "remove", "tag_id": tag.id, "name": tag.name},
     )
+    from app.policy import apply_asset_handling
+
+    apply_asset_handling(db, asset)
     db.commit()
     return get_asset(asset.id, user, db)
 

@@ -90,6 +90,7 @@ POST_BASELINE_TABLES = frozenset(
         "compliance_frameworks",
         "compliance_controls",
         "compliance_control_references",
+        "policy_rules",
     }
 )
 PHASE1A_MARKER_COLUMNS = {

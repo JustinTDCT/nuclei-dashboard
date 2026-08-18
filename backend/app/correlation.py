@@ -580,13 +580,13 @@ def post_correlation_asset_policy_hook(
     result: CorrelationResult,
     context: dict,
 ) -> None:
-    """Phase 3A integration seam.
+    """Apply Asset handling policy after correlation identity is resolved.
 
-    Phase 1C default: do nothing. Newly discovered Assets stay unreviewed,
-    repeated observations do not become Approved, and human disposition is
-    preserved. Phase 3A will plug policy evaluation in here.
+    Policy never changes the selected Asset, score, or confidence.
     """
-    return None
+    from app.policy import apply_asset_handling_for_observation
+
+    apply_asset_handling_for_observation(db, asset, context)
 
 
 __all__ = [

@@ -10,6 +10,7 @@ import type {
   AssetObservation,
   DomainEvent,
   HistoryPage,
+  PolicyEvaluation,
   Site,
   Tag,
 } from "../types";
@@ -308,6 +309,7 @@ function AssetDrawer({
   const [reassignTarget, setReassignTarget] = useState("");
   const [confirmAction, setConfirmAction] = useState("");
   const [actionError, setActionError] = useState("");
+  const [policyEval, setPolicyEval] = useState<PolicyEvaluation | null>(null);
 
   useEffect(() => {
     setClassification(asset.classification);
@@ -318,7 +320,8 @@ function AssetDrawer({
       setObservations(page.items)
     );
     api<HistoryPage<DomainEvent>>(`/api/assets/${asset.id}/events?limit=20`).then((page) => setEvents(page.items));
-  }, [asset.id, asset.classification, asset.description, asset.criticality, asset.disposition]);
+    api<PolicyEvaluation>(`/api/tenants/${tenantId}/assets/${asset.id}/policy-evaluation`).then(setPolicyEval);
+  }, [asset.id, asset.classification, asset.description, asset.criticality, asset.disposition, tenantId]);
 
   async function saveMeta() {
     await api(`/api/assets/${asset.id}`, {
@@ -392,6 +395,39 @@ function AssetDrawer({
             First seen: {formatUtc(asset.first_seen, timezone)} · Last seen: {formatUtc(asset.last_seen, timezone)}
           </div>
         </section>
+
+        {policyEval && (
+          <section className="space-y-2">
+            <h3 className="text-sm uppercase tracking-wide text-slate-400">Policy Evaluation</h3>
+            <div className="text-sm space-y-2">
+              {(["classification", "disposition", "inactive_after_days"] as const).map((key) => {
+                const action = policyEval.actions[key];
+                if (!action) return null;
+                return (
+                  <div key={key} className="border border-slate-800 rounded-lg p-3">
+                    <div className="font-medium">
+                      {key === "inactive_after_days" ? "Inactive after" : key.replace(/^./, (c) => c.toUpperCase())}: {String(action.value)}
+                      {key === "inactive_after_days" ? " days" : ""}
+                    </div>
+                    <div className="text-slate-400">
+                      {action.source === "policy"
+                        ? `Winning rule: ${action.rule_name} (${action.scope_type}, priority ${action.priority})`
+                        : `Fallback: ${action.source.replaceAll("_", " ")}`}
+                    </div>
+                    {action.matched_conditions.length > 0 && (
+                      <div className="text-slate-500">Why: {action.matched_conditions.map((item) => item.detail).join("; ")}</div>
+                    )}
+                    {action.overrode && (
+                      <div className="text-slate-500">
+                        Overrode: {action.overrode.rule_name} ({action.overrode.scope_type})
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         <section className="space-y-2">
           <h3 className="text-sm uppercase tracking-wide text-slate-400">Tags</h3>

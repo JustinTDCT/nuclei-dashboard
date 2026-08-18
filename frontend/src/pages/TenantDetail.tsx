@@ -17,6 +17,7 @@ import type {
   ScanExclusion,
   ScanJob,
   Site,
+  PolicyEvaluation,
   Tenant,
   TenantSummary,
 } from "../types";
@@ -867,6 +868,7 @@ function Findings({ tenantId }: { tenantId: number }) {
   const [reviewOverdue, setReviewOverdue] = useState("");
   const [selected, setSelected] = useState<AssetFindingDetail | null>(null);
   const [evidenceId, setEvidenceId] = useState<number | null>(null);
+  const [policyEval, setPolicyEval] = useState<PolicyEvaluation | null>(null);
   function load() {
     const qs = new URLSearchParams();
     if (severity) qs.set("severity", severity);
@@ -882,6 +884,7 @@ function Findings({ tenantId }: { tenantId: number }) {
     const detail = await api<AssetFindingDetail>(`/api/tenants/${tenantId}/asset-findings/${id}`);
     setSelected(detail);
     setEvidenceId(detail.evidence[0]?.id ?? null);
+    api<PolicyEvaluation>(`/api/tenants/${tenantId}/asset-findings/${id}/policy-evaluation`).then(setPolicyEval);
   }
   return (
     <div className="space-y-4">
@@ -1057,6 +1060,19 @@ function Findings({ tenantId }: { tenantId: number }) {
               <div>KEV fetched: {selected.kev_fetched_at ? formatUtc(selected.kev_fetched_at, defaultTimezone) : "—"}</div>
             </div>
           </section>
+          {policyEval?.actions.resolution_clean_scans && (
+            <section className="bg-slate-950 border border-slate-800 rounded-lg p-4 space-y-2">
+              <h4 className="text-sm uppercase tracking-wide text-slate-400">Policy Evaluation</h4>
+              <div className="text-sm">
+                Resolve after {String(policyEval.actions.resolution_clean_scans.value)} consecutive applicable clean scans
+              </div>
+              <div className="text-sm text-slate-400">
+                {policyEval.actions.resolution_clean_scans.source === "policy"
+                  ? `Winning rule: ${policyEval.actions.resolution_clean_scans.rule_name} (${policyEval.actions.resolution_clean_scans.scope_type}, priority ${policyEval.actions.resolution_clean_scans.priority})`
+                  : "Fallback: global setting"}
+              </div>
+            </section>
+          )}
           <TreatmentPanel
             tenantId={tenantId}
             selected={selected}

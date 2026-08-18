@@ -1024,6 +1024,92 @@ class ControlReferenceOut(BaseModel):
     )
 
 
+class PolicyConditionIn(BaseModel):
+    field: str
+    op: str
+    value: Any
+
+    model_config = {"extra": "forbid"}
+
+
+class PolicyIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    category: str
+    scope_type: str
+    tenant_id: int | None = None
+    site_id: int | None = None
+    network_id: int | None = None
+    priority: int = 100
+    conditions: list[PolicyConditionIn] = []
+    actions: dict[str, Any]
+
+
+class PolicyUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+    category: str | None = None
+    scope_type: str | None = None
+    tenant_id: int | None = None
+    site_id: int | None = None
+    network_id: int | None = None
+    priority: int | None = None
+    enabled: bool | None = None
+    conditions: list[PolicyConditionIn] | None = None
+    actions: dict[str, Any] | None = None
+
+
+class PolicyArchiveIn(BaseModel):
+    reason: str = ""
+
+
+class PolicyPreviewIn(PolicyIn):
+    asset_id: int | None = None
+    asset_finding_id: int | None = None
+
+
+class PolicyOut(BaseModel):
+    id: int
+    name: str
+    description: str
+    category: str
+    scope_type: str
+    tenant_id: int | None = None
+    site_id: int | None = None
+    network_id: int | None = None
+    tenant_name: str | None = None
+    site_name: str | None = None
+    network_name: str | None = None
+    priority: int
+    enabled: bool
+    conditions: list[dict[str, Any]]
+    actions: dict[str, Any]
+    revision: int
+    created_by_user_id: int | None = None
+    updated_by_user_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None = None
+    archived_by_user_id: int | None = None
+    archive_reason: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PolicyEvaluationOut(BaseModel):
+    category: str
+    tenant_id: int | None = None
+    site_id: int | None = None
+    network_id: int | None = None
+    asset_id: int | None = None
+    asset_finding_id: int | None = None
+    current: dict[str, Any] = {}
+    effective: dict[str, Any]
+    actions: dict[str, Any]
+    matched_rules: list[dict[str, Any]]
+    considered: list[dict[str, Any]]
+
+
 SiteOut.model_rebuild()
 NetworkOut.model_rebuild()
 AssetListItem.model_rebuild()

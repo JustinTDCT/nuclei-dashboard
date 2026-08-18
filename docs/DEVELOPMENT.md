@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0011_phase2c_treatments_compliance` (after frozen `0001_baseline` through `0010_cve_intelligence_priority`).
+Current head revision: `0012_policy_engine` (after frozen `0001_baseline` through `0011_phase2c_treatments_compliance`).
 
-`0001_baseline` through `0010_cve_intelligence_priority` are immutable. Phase 2C treatments and compliance live in `0011_phase2c_treatments_compliance`; later correctness fixes belong in application code unless a new revision is truly required.
+`0001_baseline` through `0011_phase2c_treatments_compliance` are immutable. Phase 3A policy lives in `0012_policy_engine`; later correctness fixes belong in application code unless a new revision is truly required.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -42,6 +42,8 @@ Current head revision: `0011_phase2c_treatments_compliance` (after frozen `0001_
 `alembic downgrade` from `0010_cve_intelligence_priority` is **refused**. It would destroy normalized NVD/EPSS/KEV intelligence and AssetFinding operational priority explanations.
 
 `alembic downgrade` from `0011_phase2c_treatments_compliance` is **refused**. It would destroy treatment history, compensating controls, framework/control catalog rows, and evidence-to-control mappings.
+
+`alembic downgrade` from `0012_policy_engine` is **refused when `policy_rules` contains rows**. Configured policy history is not silently dropped. An empty `policy_rules` table may downgrade.
 
 ### Fresh install
 
@@ -146,7 +148,7 @@ Manual operations (`asset.merge`, `asset.split`, `asset.identifier_correct`, `as
 
 `asset_inactive_days` is a new Admin setting and is intentionally separate from Device `stale_days`. Expected / not-yet-observed Assets do not become inactive. Domain events persist `new_asset`, `asset_became_inactive`, and `previously_inactive_asset_returned` only. Alert email/webhook/Teams routing remains Phase 3B.
 
-`post_correlation_asset_policy_hook` is the Phase 3A seam. Phase 1C never auto-approves by observation count or age.
+`post_correlation_asset_policy_hook` applies Asset Handling policy after correlation identity is resolved. Phase 1C correlation never auto-approves by observation count or age; only an explicit matching Phase 3A disposition action may set `approved`.
 
 `0004_asset_observation_integrity` is a corrective revision after the already-shipped `0003`. It adds `observation_key`, allows NULL lifecycle for expected Assets, and removes hostname identifiers that are only IP/placeholder values.
 
@@ -227,6 +229,52 @@ This product uses the NVD API but is not endorsed or certified by the NVD.
 - Phase 2B P1–P4 scoring is unchanged. Treatment remains 0 priority points. `PRIORITY_MODEL_VERSION` stays `2b.1`.
 
 Built-in catalog files live under `backend/app/data/compliance/`. Import is idempotent, transactional, and does not require live Internet access. The importer verifies the recorded control count and SHA-256 provenance checksums before applying a bundle.
+
+## Phase 3A policy engine
+
+`0012_policy_engine` adds UI-driven, deterministic policies. Evaluation is separate from application. Policies never change Asset correlation identity, scores, or confidence.
+
+Categories:
+
+- **Asset Handling** — optional `classification` and/or `disposition`.
+- **Asset Inactivity** — `inactive_after_days` (mark inactive after N days without observation).
+- **Finding Lifecycle** — `resolution_clean_scans` (resolve after N consecutive *applicable* clean scans).
+
+Scope inheritance is always:
+
+`Network > Site > Tenant > Global`
+
+A more-specific matching rule wins for the **same action**. Priority does not let a Global rule beat a Network rule.
+
+Within the same scope, higher integer priority wins. Equal priority uses the lowest stable PolicyRule ID.
+
+Per-action override: a Site rule that sets only disposition leaves a broader classification in effect.
+
+Conditions are AND. Supported fields:
+
+- Asset: hostname (`equals`, `glob` such as `LT-*`), tag (`has` / `lacks`), criticality, expected asset, observed port.
+- Finding lifecycle also: severity, operational priority (P1–P4), has CVE.
+
+No regex, SQL, or executable expressions.
+
+Fallbacks when no matching action exists:
+
+- Classification: existing `infer_class` / current value.
+- Disposition: current value, default `unreviewed`. Repeated observation never approves an Asset.
+- Inactivity: Admin `asset_inactive_days`.
+- Clean-scan resolution: Admin `finding_resolution_clean_scans`.
+
+Those global settings are not copied into PolicyRule rows.
+
+Authorization:
+
+- Admin: create/edit/archive Global and scoped policies.
+- User: read all; create/edit/archive Tenant/Site/Network only.
+- Viewer: read only.
+
+Automatic Asset classification/disposition changes are audited (`asset.policy_classification_changed`, `asset.policy_disposition_changed`) only when the value actually changes. Policy CRUD is audited. Viewing an evaluation does not mutate or audit.
+
+Reconciliation of existing Assets runs on APScheduler every 20 minutes in bounded batches. It applies current rules forward; it does not invent historical values.
 
 ## Viewer / Auditor
 

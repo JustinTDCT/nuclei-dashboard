@@ -15,6 +15,7 @@ from tests.test_phase2a import _finding_payload, _run_detected
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
+PHASE3A_HEAD = "0012_policy_engine"
 NIST_BUNDLE = BACKEND_ROOT / "app" / "data" / "compliance" / "nist_sp_800_171_rev3.json"
 
 
@@ -51,7 +52,7 @@ def test_fresh_db_reaches_0011(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE2C_HEAD
+    assert revision == head_revision() == current_revision() == PHASE3A_HEAD
     tables = set(inspect(engine).get_table_names())
     assert {
         "finding_treatments",

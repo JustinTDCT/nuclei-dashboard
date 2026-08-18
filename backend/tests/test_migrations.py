@@ -20,6 +20,7 @@ PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
+PHASE3A_HEAD = "0012_policy_engine"
 FROZEN_MIGRATION_HASHES = {
     "0001_baseline_current_schema.py": "8daecbb5da9582ebdd2f6b13c157cadcb91368879532dd121a3804a49c99ed03",
     "0002_sites_networks.py": "e0988e97238ffd6d00f32cf1f1d3ea59cfb1f3acad17c3db6b3deaf586472278",
@@ -31,6 +32,7 @@ FROZEN_MIGRATION_HASHES = {
     "0008_phase2a_finding_identity_repair.py": "2fe859754f7bdeb8df6cebca282364d47e843c3f1d75ca9857b33ee8959ca517",
     "0009_phase2a_detector_identity_partition.py": "5aca877c13076e4ab5fcc6aac8893c4ae1066750e44c49e9301eec00a21d5b2b",
     "0010_cve_intelligence_priority.py": "2c06a52049516b825f06ab6b3ec18aa10408637450431c90c71ca72b109f36f1",
+    "0011_phase2c_treatments_compliance.py": "f78ddcd7fb8753ec652ef8377d74758f737394c505012c4786b6b71868fb22d1",
 }
 PHASE1B_TABLES = {
     "assets",
@@ -60,7 +62,7 @@ def test_fresh_database_reaches_head(reset_db):
 
     assert "users" not in _tables(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE2C_HEAD
+    assert revision == head_revision() == current_revision() == PHASE3A_HEAD
     expected = {
         "alembic_version",
         "users",
@@ -100,6 +102,7 @@ def test_fresh_database_reaches_head(reset_db):
         "compliance_frameworks",
         "compliance_controls",
         "compliance_control_references",
+        "policy_rules",
     }.issubset(_tables(engine))
     assert "priority" in _columns(engine, "asset_findings")
     assert "asset_finding_id" in _columns(engine, "findings")
@@ -195,7 +198,7 @@ def test_existing_schema_adoption_preserves_data(reset_db):
         }
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE2C_HEAD
+    assert revision == head_revision() == current_revision() == PHASE3A_HEAD
 
     db = SessionLocal()
     try:
@@ -353,7 +356,7 @@ def test_legacy_compatibility_restores_missing_columns_without_dropping_rows(res
         conn.execute(text("ALTER TABLE devices DROP COLUMN IF EXISTS description"))
 
     revision = apply_schema()
-    assert revision == PHASE2C_HEAD
+    assert revision == PHASE3A_HEAD
     assert "hostname" in _columns(engine, "findings")
     assert "description" in _columns(engine, "devices")
 
@@ -508,6 +511,10 @@ def test_phase1a_and_baseline_revisions_remain_frozen():
     assert "from app.database import Base" not in phase2c
     assert "import app.models" not in phase2c
     assert 'down_revision: str | None = "0010_cve_intelligence_priority"' in phase2c
+    phase3a = (BACKEND_ROOT / "alembic" / "versions" / "0012_policy_engine.py").read_text()
+    assert "from app.database import Base" not in phase3a
+    assert "import app.models" not in phase3a
+    assert 'down_revision: str | None = "0011_phase2c_treatments_compliance"' in phase3a
     import hashlib
 
     for name, digest in FROZEN_MIGRATION_HASHES.items():

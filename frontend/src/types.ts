@@ -594,6 +594,61 @@ export interface IntelligenceStatus {
   sources: Record<string, IntelligenceSourceStatus>;
 }
 
+export type PolicyCategory = "asset_handling" | "asset_inactivity" | "finding_lifecycle";
+export type PolicyScope = "global" | "tenant" | "site" | "network";
+
+export interface PolicyCondition {
+  field: string;
+  op: string;
+  value: string | number | boolean;
+}
+
+export interface Policy {
+  id: number;
+  name: string;
+  description: string;
+  category: PolicyCategory;
+  scope_type: PolicyScope;
+  tenant_id: number | null;
+  site_id: number | null;
+  network_id: number | null;
+  tenant_name: string | null;
+  site_name: string | null;
+  network_name: string | null;
+  priority: number;
+  enabled: boolean;
+  conditions: PolicyCondition[];
+  actions: Record<string, string | number>;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+  archive_reason: string | null;
+}
+
+export interface PolicyActionExplanation {
+  value: string | number;
+  source: string;
+  rule_id: number | null;
+  rule_name: string | null;
+  revision: number | null;
+  scope_type: string | null;
+  priority: number | null;
+  matched_conditions: { field: string; op: string; value: unknown; matched: boolean; detail: string }[];
+  overrode?: { rule_id: number; rule_name: string; scope_type: string; priority: number; value: unknown } | null;
+}
+
+export interface PolicyEvaluation {
+  asset_id?: number;
+  tenant_id?: number | null;
+  site_id?: number | null;
+  network_id?: number | null;
+  current?: Record<string, unknown>;
+  effective: Record<string, string | number>;
+  actions: Record<string, PolicyActionExplanation>;
+  matched_rules: { id: number; name: string; scope_type: string; priority: number }[];
+}
+
 export interface Dashboard {
   tenants: number;
   users: number;

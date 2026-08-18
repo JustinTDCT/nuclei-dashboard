@@ -830,7 +830,17 @@ def ingest_device_report(
         source_device_id=None,
         result=result,
     )
-    post_correlation_asset_policy_hook(db, asset, result, context)
+    post_correlation_asset_policy_hook(
+        db,
+        asset,
+        result,
+        {
+            **context,
+            "hostname": report.hostname,
+            "ports": report.ports,
+            "classification": report.classification,
+        },
+    )
     db.flush()
     return asset, False
 

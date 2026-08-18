@@ -27,6 +27,9 @@ export function Layout() {
           <NavLink to="/compliance" className={link}>
             Compliance
           </NavLink>
+          <NavLink to="/policies" className={link}>
+            Policies
+          </NavLink>
           {user?.role === "admin" && (
             <>
               <div className="pt-4 pb-1 px-3 text-[11px] uppercase tracking-wider text-slate-500">Admin</div>

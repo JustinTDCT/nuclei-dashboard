@@ -32,24 +32,38 @@ def asset_inactive_days(db: Session) -> int:
 
 def mark_inactive_assets(db: Session | None = None, *, now: datetime | None = None) -> int:
     from app.database import SessionLocal
+    from app.models import POLICY_CATEGORY_ASSET_INACTIVITY
+    from app.policy import PolicyResolver, contexts_for_assets
 
     owns = db is None
     session = db or SessionLocal()
     try:
-        cutoff = (now or utcnow()) - timedelta(days=asset_inactive_days(session))
+        moment = now or utcnow()
+        min_cutoff = moment - timedelta(days=1)
         rows = (
             session.query(Asset)
             .filter(
                 Asset.lifecycle_state == LIFECYCLE_ACTIVE,
                 Asset.last_seen.isnot(None),
-                Asset.last_seen < cutoff,
+                Asset.last_seen < min_cutoff,
+                Asset.first_seen.isnot(None),
                 Asset.merged_into_asset_id.is_(None),
             )
+            .order_by(Asset.id.asc())
             .all()
         )
+        if not rows:
+            if owns:
+                session.commit()
+            return 0
+        resolver = PolicyResolver(session)
+        contexts = contexts_for_assets(session, rows)
         changed = 0
         for asset in rows:
-            if asset.first_seen is None:
+            result = resolver.evaluate(contexts[asset.id], POLICY_CATEGORY_ASSET_INACTIVITY)
+            days = int(result.effective["inactive_after_days"])
+            cutoff = moment - timedelta(days=days)
+            if asset.last_seen is None or asset.last_seen >= cutoff:
                 continue
             previous = asset.lifecycle_state
             asset.lifecycle_state = LIFECYCLE_INACTIVE

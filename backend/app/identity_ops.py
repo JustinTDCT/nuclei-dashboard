@@ -525,6 +525,9 @@ def move_asset_site(
         site_id=site.id,
         details={"reason": reason, "before_site_id": before, "after_site_id": site.id},
     )
+    from app.policy import apply_asset_handling
+
+    apply_asset_handling(db, asset)
     return asset
 
 

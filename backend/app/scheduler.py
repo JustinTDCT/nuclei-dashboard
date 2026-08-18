@@ -148,6 +148,15 @@ def start_scheduler() -> None:
     scheduler.add_job(tick_schedules, "interval", seconds=30, id="schedules", replace_existing=True)
     scheduler.add_job(mark_stale_devices, "interval", minutes=30, id="stale", replace_existing=True)
     scheduler.add_job(mark_inactive_assets, "interval", minutes=30, id="asset-inactive", replace_existing=True)
+    from app.policy import reconcile_asset_handling_job
+
+    scheduler.add_job(
+        reconcile_asset_handling_job,
+        "interval",
+        minutes=20,
+        id="policy-reconcile",
+        replace_existing=True,
+    )
     scheduler.add_job(expire_stuck_jobs, "interval", minutes=5, id="stuck-jobs", replace_existing=True)
     scheduler.add_job(
         refresh_vulnerability_intelligence,

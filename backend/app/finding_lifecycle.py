@@ -1143,6 +1143,7 @@ def _resolve_if_threshold_reached(
     job: ScanJob,
     occurred_at: datetime,
     threshold: int,
+    threshold_details: dict[str, Any] | None = None,
 ) -> None:
     if asset_finding.technical_state != TECHNICAL_OPEN:
         return
@@ -1152,6 +1153,9 @@ def _resolve_if_threshold_reached(
     asset_finding.technical_state = TECHNICAL_RESOLVED
     asset_finding.resolved_at = occurred_at
     asset_finding.updated_at = occurred_at
+    details = {"reason": "consecutive_clean_scans", "threshold": threshold}
+    if threshold_details:
+        details.update(threshold_details)
     history = _append_history(
         db,
         asset_finding=asset_finding,
@@ -1160,7 +1164,7 @@ def _resolve_if_threshold_reached(
         new_state=TECHNICAL_RESOLVED,
         scan_job_id=job.id,
         occurred_at=occurred_at,
-        details={"reason": "consecutive_clean_scans", "threshold": threshold},
+        details=details,
         idempotence_key=f"resolved:{asset_finding.id}:{job.id}",
     )
     if history is not None:
@@ -1179,7 +1183,11 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
     if not job.execution_snapshot:
         raise FindingLifecycleError("Run has no immutable execution snapshot")
     occurred_at = job.finished_at or utcnow()
-    threshold = resolution_threshold(db)
+    from app.models import POLICY_CATEGORY_FINDING_LIFECYCLE
+    from app.policy import PolicyResolver, context_for_findings, resolution_details
+
+    resolver = PolicyResolver(db)
+    fallback_threshold = resolution_threshold(db)
     detected_ids = {
         row[0]
         for row in db.query(Finding.asset_finding_id)
@@ -1210,6 +1218,14 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
         .filter(or_(*conditions))
         .all()
     )
+    clean_candidates = [row for row in candidates if row.id not in detected_ids]
+    unique_assets: list[Asset] = []
+    seen_assets: set[int] = set()
+    for row in clean_candidates:
+        if row.asset is not None and row.asset.id not in seen_assets:
+            seen_assets.add(row.asset.id)
+            unique_assets.append(row.asset)
+    finding_contexts = context_for_findings(db, clean_candidates, assets=unique_assets)
     for asset_finding in candidates:
         if asset_finding.id in detected_ids:
             _evaluation, created = _record_evaluation(
@@ -1238,12 +1254,22 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
             continue
         asset_finding.consecutive_clean_scans = (asset_finding.consecutive_clean_scans or 0) + 1
         asset_finding.updated_at = occurred_at
+        context = finding_contexts.get(asset_finding.id)
+        if context is None:
+            threshold = fallback_threshold
+            details = {"threshold_source": "fallback"}
+        else:
+            evaluated = resolver.evaluate(context, POLICY_CATEGORY_FINDING_LIFECYCLE)
+            explanation = evaluated.actions["resolution_clean_scans"]
+            threshold = int(explanation.value)
+            details = resolution_details(explanation)
         _resolve_if_threshold_reached(
             db,
             asset_finding=asset_finding,
             job=job,
             occurred_at=occurred_at,
             threshold=threshold,
+            threshold_details=details,
         )
     db.flush()
 

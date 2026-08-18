@@ -195,6 +195,25 @@ CONTROL_SUBJECT_TYPES = frozenset(
     }
 )
 
+POLICY_CATEGORY_ASSET_HANDLING = "asset_handling"
+POLICY_CATEGORY_ASSET_INACTIVITY = "asset_inactivity"
+POLICY_CATEGORY_FINDING_LIFECYCLE = "finding_lifecycle"
+POLICY_CATEGORIES = frozenset(
+    {
+        POLICY_CATEGORY_ASSET_HANDLING,
+        POLICY_CATEGORY_ASSET_INACTIVITY,
+        POLICY_CATEGORY_FINDING_LIFECYCLE,
+    }
+)
+
+POLICY_SCOPE_GLOBAL = "global"
+POLICY_SCOPE_TENANT = "tenant"
+POLICY_SCOPE_SITE = "site"
+POLICY_SCOPE_NETWORK = "network"
+POLICY_SCOPES = frozenset(
+    {POLICY_SCOPE_GLOBAL, POLICY_SCOPE_TENANT, POLICY_SCOPE_SITE, POLICY_SCOPE_NETWORK}
+)
+
 TREATMENT_DISPLAY_UNADDRESSED = "unaddressed"
 TREATMENT_DISPLAY_PENDING_REVIEW = "pending_review"
 TREATMENT_DISPLAY_ACTIVE = "active"
@@ -1561,3 +1580,65 @@ class ComplianceControlReference(Base):
     removal_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     control: Mapped["ComplianceControl"] = relationship()
+
+
+class PolicyRule(Base):
+    __tablename__ = "policy_rules"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('asset_handling', 'asset_inactivity', 'finding_lifecycle')",
+            name="ck_policy_rules_category",
+        ),
+        CheckConstraint(
+            "scope_type IN ('global', 'tenant', 'site', 'network')",
+            name="ck_policy_rules_scope_type",
+        ),
+        CheckConstraint(
+            "("
+            "(scope_type = 'global' AND tenant_id IS NULL AND site_id IS NULL AND network_id IS NULL) OR "
+            "(scope_type = 'tenant' AND tenant_id IS NOT NULL AND site_id IS NULL AND network_id IS NULL) OR "
+            "(scope_type = 'site' AND tenant_id IS NOT NULL AND site_id IS NOT NULL AND network_id IS NULL) OR "
+            "(scope_type = 'network' AND tenant_id IS NOT NULL AND site_id IS NOT NULL AND network_id IS NOT NULL)"
+            ")",
+            name="ck_policy_rules_scope_shape",
+        ),
+        CheckConstraint("revision >= 1", name="ck_policy_rules_revision"),
+        Index("ix_policy_rules_category_enabled_archived", "category", "enabled", "archived_at"),
+        Index("ix_policy_rules_scope_lookup", "scope_type", "tenant_id", "site_id", "network_id"),
+        Index("ix_policy_rules_category_scope_tenant", "category", "scope_type", "tenant_id"),
+        Index(
+            "ix_policy_rules_enabled_archived_category_priority",
+            "enabled",
+            "archived_at",
+            "category",
+            "priority",
+        ),
+        Index("ix_policy_rules_tenant_id", "tenant_id"),
+        Index("ix_policy_rules_site_id", "site_id"),
+        Index("ix_policy_rules_network_id", "network_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    category: Mapped[str] = mapped_column(String(40))
+    scope_type: Mapped[str] = mapped_column(String(20))
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"), nullable=True)
+    network_id: Mapped[int | None] = mapped_column(ForeignKey("networks.id", ondelete="CASCADE"), nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    conditions: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    actions: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    archive_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    tenant: Mapped["Tenant | None"] = relationship()
+    site: Mapped["Site | None"] = relationship()
+    network: Mapped["Network | None"] = relationship()

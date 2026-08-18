@@ -20,6 +20,7 @@ PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
+PHASE3A_HEAD = "0012_policy_engine"
 PHASE1C_TABLES = {"asset_correlation_decisions", "domain_events"}
 FROZEN = (
     "0001_baseline_current_schema.py",
@@ -113,7 +114,7 @@ def test_fresh_db_reaches_phase1c_head(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE2C_HEAD
+    assert revision == head_revision() == current_revision() == PHASE3A_HEAD
     assert PHASE1C_TABLES.issubset(_tables(engine))
     assert "site_id" in _columns(engine, "devices")
     assert "merged_into_asset_id" in _columns(engine, "assets")
@@ -208,7 +209,7 @@ def test_upgrade_0004_to_0005_preserves_assets_and_does_not_merge(reset_db):
             )
 
     command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE2C_HEAD
+    assert current_revision() == head_revision() == PHASE3A_HEAD
     db = SessionLocal()
     try:
         assets = db.query(Asset).filter(Asset.tenant_id == tenant_id).all()

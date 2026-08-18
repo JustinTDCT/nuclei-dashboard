@@ -8,6 +8,7 @@ import { Alerts } from "./pages/Alerts";
 import { Compliance } from "./pages/Compliance";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
+import { Policies } from "./pages/Policies";
 import { TenantDetail } from "./pages/TenantDetail";
 import { Tenants } from "./pages/Tenants";
 
@@ -36,6 +37,7 @@ export default function App() {
         <Route path="tenants/:id" element={<TenantDetail />} />
         <Route path="alerts" element={<Alerts />} />
         <Route path="compliance" element={<Compliance />} />
+        <Route path="policies" element={<Policies />} />
         <Route
           path="admin/users"
           element={
