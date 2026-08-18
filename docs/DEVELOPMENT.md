@@ -17,13 +17,15 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0002_sites_networks` (after frozen `0001_baseline`).
+Current head revision: `0003_assets_observations` (after frozen `0001_baseline` and `0002_sites_networks`).
 
-`0001_baseline` is immutable. Phase 1A schema lives only in `0002_sites_networks`.
+`0001_baseline` and `0002_sites_networks` are immutable. Phase 1B schema lives only in `0003_assets_observations`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
 `alembic downgrade` from `0002_sites_networks` is **refused**. It would destroy Site, Network, authorization, and audit rows. Restore from backup instead of pretending a destructive downgrade is safe.
+
+`alembic downgrade` from `0003_assets_observations` is **refused**. It would destroy Asset, identifier, address, service, observation, and tag history.
 
 ### Fresh install
 
@@ -53,7 +55,7 @@ alembic upgrade head
 Startup **fails closed** and refuses to stamp or upgrade when:
 
 - some Phase 0 tables exist but the complete Phase 0 set does not, or
-- any Phase 1A table or marker column is present and `alembic_version` is missing (including a database that only has `sites`/`networks`).
+- any Phase 1A/1B table or marker column is present and `alembic_version` is missing (including a database that only has `sites`/`networks`, `assets`, or `devices.asset_id`).
 
 Do not guess. Inspect the database and repair or restore it before retrying.
 
@@ -89,6 +91,28 @@ Existing databases are upgraded in place:
 - WAN subnet rows are **not** converted into Networks. WAN scans keep using `subnets` with `scope=wan`.
 
 This companion `subnets` mapping for LAN is an intentional compatibility shim. Remove it when Phase 1D replaces scan targeting with Scan Definition scope and authorized WAN targets.
+
+## Phase 1B assets and observations
+
+`0003_assets_observations` introduces Tenant-scoped Assets with identifier, address, service, and observation history, plus generic Tags for Assets, Sites, and Networks.
+
+Existing Device rows are mapped one-to-one to Assets (`devices.asset_id`, indexed, not unique). Findings continue to reference Device.
+
+LAN Site during backfill:
+
+1. `Device.last_scan_job_id` → ScanJob → Scan → Agent → Site when that chain is complete.
+2. Otherwise reuse the tenant's **Imported Site** if it exists.
+3. Otherwise create a deterministic **Unassigned Assets** Site for that Tenant.
+
+WAN Devices keep `site_id` NULL. IP is not used to guess Site.
+
+Each migrated Device gets one observation with `source = legacy_migration`. That is a snapshot of the current Device row, not a fabricated scanner timeline.
+
+Scanner ingestion still uses the legacy Device resolver. After a Device is matched or created, the mapped Asset is reused, an `AssetObservation` is appended, and identifier/address/service facts are upserted. Repeated observations do not change `Asset.disposition`. Matching another Asset by IP/hostname/MAC is Phase 1C and is not implemented.
+
+Agent and central scanner `/jobs/{id}/devices` posts can be retried. Observation idempotence is `(scan_job_id, asset_id)`, not hostname or IP.
+
+Expected Assets can be created manually (`is_expected`, `first_seen`/`last_seen` NULL). Discovery does not auto-attach to them in Phase 1B.
 
 Archived Sites/Networks are soft-deleted (`archived_at`). Do not physically delete them in the normal technician workflow.
 

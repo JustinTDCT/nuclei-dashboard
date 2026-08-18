@@ -22,6 +22,13 @@ const colors: Record<string, string> = {
   lan: "bg-teal-500/20 text-teal-200",
   online: "bg-emerald-500/20 text-emerald-200",
   offline: "bg-slate-500/20 text-slate-300",
+  active: "bg-emerald-500/20 text-emerald-200",
+  inactive: "bg-slate-500/20 text-slate-300",
+  unreviewed: "bg-amber-500/20 text-amber-200",
+  unauthorized: "bg-rose-500/20 text-rose-200",
+  ignored: "bg-slate-500/20 text-slate-300",
+  normal: "bg-slate-500/20 text-slate-200",
+  expected: "bg-amber-500/20 text-amber-200",
 };
 
 export function Badge({ value }: { value: string }) {

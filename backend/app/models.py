@@ -3,10 +3,13 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
+    Table,
     Text,
     UniqueConstraint,
     func,
@@ -19,6 +22,72 @@ from app.database import Base
 DISPATCH_ANY_AVAILABLE = "any_available"
 DISPATCH_PREFERRED_FAILOVER = "preferred_failover"
 COMPATIBILITY_SITE_NAME = "Imported Site"
+UNASSIGNED_SITE_NAME = "Unassigned Assets"
+
+LIFECYCLE_ACTIVE = "active"
+LIFECYCLE_INACTIVE = "inactive"
+LIFECYCLE_STATES = frozenset({LIFECYCLE_ACTIVE, LIFECYCLE_INACTIVE})
+
+DISPOSITION_UNREVIEWED = "unreviewed"
+DISPOSITION_APPROVED = "approved"
+DISPOSITION_UNAUTHORIZED = "unauthorized"
+DISPOSITION_IGNORED = "ignored"
+DISPOSITIONS = frozenset(
+    {DISPOSITION_UNREVIEWED, DISPOSITION_APPROVED, DISPOSITION_UNAUTHORIZED, DISPOSITION_IGNORED}
+)
+
+CRITICALITY_LOW = "low"
+CRITICALITY_NORMAL = "normal"
+CRITICALITY_HIGH = "high"
+CRITICALITY_CRITICAL = "critical"
+CRITICALITIES = frozenset({CRITICALITY_LOW, CRITICALITY_NORMAL, CRITICALITY_HIGH, CRITICALITY_CRITICAL})
+
+IDENTIFIER_MAC = "mac"
+IDENTIFIER_HOSTNAME = "hostname"
+IDENTIFIER_FQDN = "fqdn"
+IDENTIFIER_DNS_NAME = "dns_name"
+IDENTIFIER_TLS_NAME = "tls_name"
+IDENTIFIER_SERIAL = "serial"
+IDENTIFIER_DEVICE_ID = "device_id"
+IDENTIFIER_OTHER = "other"
+IDENTIFIER_TYPES = frozenset(
+    {
+        IDENTIFIER_MAC,
+        IDENTIFIER_HOSTNAME,
+        IDENTIFIER_FQDN,
+        IDENTIFIER_DNS_NAME,
+        IDENTIFIER_TLS_NAME,
+        IDENTIFIER_SERIAL,
+        IDENTIFIER_DEVICE_ID,
+        IDENTIFIER_OTHER,
+    }
+)
+
+SOURCE_SCANNER = "scanner"
+SOURCE_LEGACY_MIGRATION = "legacy_migration"
+SOURCE_MANUAL = "manual"
+ASSET_SOURCES = frozenset({SOURCE_SCANNER, SOURCE_LEGACY_MIGRATION, SOURCE_MANUAL})
+
+tag_assets = Table(
+    "asset_tags",
+    Base.metadata,
+    Column("asset_id", ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True, index=True),
+)
+
+tag_sites = Table(
+    "site_tags",
+    Base.metadata,
+    Column("site_id", ForeignKey("sites.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True, index=True),
+)
+
+tag_networks = Table(
+    "network_tags",
+    Base.metadata,
+    Column("network_id", ForeignKey("networks.id", ondelete="CASCADE"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True, index=True),
+)
 
 
 class User(Base):
@@ -46,6 +115,8 @@ class Tenant(Base):
     agents: Mapped[list["Agent"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     scans: Mapped[list["Scan"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     devices: Mapped[list["Device"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    assets: Mapped[list["Asset"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    tags: Mapped[list["Tag"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     findings: Mapped[list["Finding"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
 
@@ -64,6 +135,8 @@ class Site(Base):
     tenant: Mapped["Tenant"] = relationship(back_populates="sites")
     networks: Mapped[list["Network"]] = relationship(back_populates="site", cascade="all, delete-orphan")
     agents: Mapped[list["Agent"]] = relationship(back_populates="site")
+    assets: Mapped[list["Asset"]] = relationship(back_populates="site")
+    tags: Mapped[list["Tag"]] = relationship(secondary=tag_sites, back_populates="sites")
 
 
 class Network(Base):
@@ -94,6 +167,7 @@ class Network(Base):
     agent_links: Mapped[list["NetworkAgent"]] = relationship(
         back_populates="network", cascade="all, delete-orphan"
     )
+    tags: Mapped[list["Tag"]] = relationship(secondary=tag_networks, back_populates="networks")
 
 
 class NetworkAgent(Base):
@@ -215,8 +289,12 @@ class Device(Base):
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id", ondelete="SET NULL"), nullable=True)
+    asset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     tenant: Mapped["Tenant"] = relationship(back_populates="devices")
+    asset: Mapped["Asset | None"] = relationship(back_populates="devices")
     findings: Mapped[list["Finding"]] = relationship(back_populates="device")
 
 
@@ -280,3 +358,182 @@ class AuditLog(Base):
     site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+    __table_args__ = (UniqueConstraint("tenant_id", "normalized_name", name="uq_tags_tenant_id_normalized_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    normalized_name: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="tags")
+    assets: Mapped[list["Asset"]] = relationship(secondary=tag_assets, back_populates="tags")
+    sites: Mapped[list["Site"]] = relationship(secondary=tag_sites, back_populates="tags")
+    networks: Mapped[list["Network"]] = relationship(secondary=tag_networks, back_populates="tags")
+
+
+class Asset(Base):
+    __tablename__ = "assets"
+    __table_args__ = (
+        CheckConstraint(
+            "lifecycle_state IN ('active', 'inactive')",
+            name="ck_assets_lifecycle_state",
+        ),
+        CheckConstraint(
+            "disposition IN ('unreviewed', 'approved', 'unauthorized', 'ignored')",
+            name="ck_assets_disposition",
+        ),
+        CheckConstraint(
+            "criticality IN ('low', 'normal', 'high', 'critical')",
+            name="ck_assets_criticality",
+        ),
+        Index("ix_assets_tenant_id_last_seen", "tenant_id", "last_seen"),
+        Index("ix_assets_tenant_id_site_id", "tenant_id", "site_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(255), default="")
+    classification: Mapped[str] = mapped_column(String(80), default="Unknown")
+    description: Mapped[str] = mapped_column(Text, default="")
+    lifecycle_state: Mapped[str] = mapped_column(String(20), default=LIFECYCLE_ACTIVE)
+    disposition: Mapped[str] = mapped_column(String(20), default=DISPOSITION_UNREVIEWED)
+    criticality: Mapped[str] = mapped_column(String(20), default=CRITICALITY_NORMAL)
+    is_expected: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="assets")
+    site: Mapped["Site | None"] = relationship(back_populates="assets")
+    devices: Mapped[list["Device"]] = relationship(back_populates="asset")
+    identifiers: Mapped[list["AssetIdentifier"]] = relationship(
+        back_populates="asset", cascade="all, delete-orphan"
+    )
+    addresses: Mapped[list["AssetAddress"]] = relationship(back_populates="asset", cascade="all, delete-orphan")
+    services: Mapped[list["AssetService"]] = relationship(back_populates="asset", cascade="all, delete-orphan")
+    observations: Mapped[list["AssetObservation"]] = relationship(
+        back_populates="asset", cascade="all, delete-orphan"
+    )
+    tags: Mapped[list["Tag"]] = relationship(secondary=tag_assets, back_populates="assets")
+
+
+class AssetIdentifier(Base):
+    __tablename__ = "asset_identifiers"
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_id",
+            "identifier_type",
+            "normalized_value",
+            name="uq_asset_identifiers_asset_type_value",
+        ),
+        CheckConstraint(
+            "identifier_type IN ('mac', 'hostname', 'fqdn', 'dns_name', 'tls_name', 'serial', 'device_id', 'other')",
+            name="ck_asset_identifiers_type",
+        ),
+        Index("ix_asset_identifiers_tenant_type_value", "tenant_id", "identifier_type", "normalized_value"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    identifier_type: Mapped[str] = mapped_column(String(40))
+    value: Mapped[str] = mapped_column(String(255))
+    normalized_value: Mapped[str] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(40), default=SOURCE_SCANNER)
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    asset: Mapped["Asset"] = relationship(back_populates="identifiers")
+
+
+class AssetAddress(Base):
+    __tablename__ = "asset_addresses"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "ip", name="uq_asset_addresses_asset_id_ip"),
+        CheckConstraint("address_family IN ('ipv4', 'ipv6')", name="ck_asset_addresses_family"),
+        Index("ix_asset_addresses_tenant_id_ip", "tenant_id", "ip"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    network_id: Mapped[int | None] = mapped_column(
+        ForeignKey("networks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    ip: Mapped[str] = mapped_column(String(80))
+    address_family: Mapped[str] = mapped_column(String(8), default="ipv4")
+    source: Mapped[str] = mapped_column(String(40), default=SOURCE_SCANNER)
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    asset: Mapped["Asset"] = relationship(back_populates="addresses")
+
+
+class AssetService(Base):
+    __tablename__ = "asset_services"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "ip", "port", "protocol", name="uq_asset_services_asset_ip_port_proto"),
+        Index("ix_asset_services_tenant_ip_port", "tenant_id", "ip", "port"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    address_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_addresses.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    ip: Mapped[str] = mapped_column(String(80), default="")
+    port: Mapped[int] = mapped_column(Integer)
+    protocol: Mapped[str] = mapped_column(String(16), default="tcp")
+    product: Mapped[str] = mapped_column(String(200), default="")
+    version: Mapped[str] = mapped_column(String(80), default="")
+    tls_metadata: Mapped[dict] = mapped_column(JSONB, default=dict)
+    web_title: Mapped[str] = mapped_column(String(500), default="")
+    tech: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(40), default=SOURCE_SCANNER)
+    first_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    asset: Mapped["Asset"] = relationship(back_populates="services")
+
+
+class AssetObservation(Base):
+    __tablename__ = "asset_observations"
+    __table_args__ = (
+        UniqueConstraint("scan_job_id", "asset_id", name="uq_asset_observations_scan_job_id_asset_id"),
+        Index("ix_asset_observations_asset_id_observed_at", "asset_id", "observed_at"),
+        Index("ix_asset_observations_tenant_id_observed_at", "tenant_id", "observed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    network_id: Mapped[int | None] = mapped_column(
+        ForeignKey("networks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"), nullable=True, index=True)
+    scan_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("scan_jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scope: Mapped[str] = mapped_column(String(10), default="")
+    source: Mapped[str] = mapped_column(String(40), default=SOURCE_SCANNER)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    hostname: Mapped[str] = mapped_column(String(255), default="")
+    ip: Mapped[str] = mapped_column(String(80), default="")
+    snapshot: Mapped[dict] = mapped_column(JSONB, default=dict)
+    provenance: Mapped[str] = mapped_column(String(80), default=SOURCE_SCANNER)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    asset: Mapped["Asset"] = relationship(back_populates="observations")

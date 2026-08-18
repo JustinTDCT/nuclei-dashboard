@@ -107,6 +107,7 @@ class SiteOut(BaseModel):
     effective_timezone: str = "UTC"
     network_count: int = 0
     agent_count: int = 0
+    tags: list["TagOut"] = []
 
     model_config = {"from_attributes": True}
 
@@ -131,6 +132,7 @@ class NetworkOut(BaseModel):
     created_at: datetime
     subnet_id: int | None = None
     authorized_agent_ids: list[int] = []
+    tags: list["TagOut"] = []
 
     model_config = {"from_attributes": True}
 
@@ -232,6 +234,7 @@ class DeviceOut(BaseModel):
     ports: list[Any]
     first_seen: datetime
     last_seen: datetime
+    asset_id: int | None = None
     findings_count: int = 0
 
     model_config = {"from_attributes": True}
@@ -337,3 +340,157 @@ class FindingReport(BaseModel):
     tags: str = ""
     timestamp: str | None = None
     raw: dict[str, Any] = {}
+
+
+class TagOut(BaseModel):
+    id: int
+    tenant_id: int
+    name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TagIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class TagAssignIn(BaseModel):
+    tag_id: int | None = None
+    name: str | None = Field(default=None, max_length=80)
+
+
+class AssetListItem(BaseModel):
+    id: int
+    tenant_id: int
+    site_id: int | None
+    site_name: str | None = None
+    display_name: str
+    hostname: str | None = None
+    current_addresses: list[str] = []
+    classification: str
+    description: str = ""
+    lifecycle_state: str
+    disposition: str
+    criticality: str
+    is_expected: bool
+    is_not_yet_observed: bool = False
+    first_seen: datetime | None
+    last_seen: datetime | None
+    tags: list[TagOut] = []
+    findings_count: int = 0
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AssetIdentifierOut(BaseModel):
+    id: int
+    asset_id: int
+    identifier_type: str
+    value: str
+    normalized_value: str
+    source: str
+    first_seen: datetime | None
+    last_seen: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AssetAddressOut(BaseModel):
+    id: int
+    asset_id: int
+    site_id: int | None
+    network_id: int | None
+    ip: str
+    address_family: str
+    source: str
+    first_seen: datetime | None
+    last_seen: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AssetServiceOut(BaseModel):
+    id: int
+    asset_id: int
+    address_id: int | None
+    ip: str
+    port: int
+    protocol: str
+    product: str
+    version: str
+    tls_metadata: dict[str, Any] = {}
+    web_title: str
+    tech: str
+    source: str
+    first_seen: datetime | None
+    last_seen: datetime | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AssetObservationOut(BaseModel):
+    id: int
+    asset_id: int
+    tenant_id: int
+    site_id: int | None
+    network_id: int | None
+    agent_id: int | None
+    scan_job_id: int | None
+    scope: str
+    source: str
+    observed_at: datetime
+    hostname: str
+    ip: str
+    snapshot: dict[str, Any] = {}
+    provenance: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AssetDetail(AssetListItem):
+    identifiers: list[AssetIdentifierOut] = []
+    addresses: list[AssetAddressOut] = []
+    services: list[AssetServiceOut] = []
+    device_ids: list[int] = []
+    findings: list[FindingOut] = []
+
+
+class AssetCreate(BaseModel):
+    site_id: int
+    display_name: str = Field(min_length=1, max_length=255)
+    hostname: str = ""
+    mac: str = ""
+    ip: str = ""
+    classification: str = "Unknown"
+    description: str = ""
+    criticality: str = "normal"
+    disposition: str = "unreviewed"
+    tags: list[str] = []
+
+
+class AssetUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=255)
+    classification: str | None = None
+    description: str | None = None
+    lifecycle_state: str | None = None
+    disposition: str | None = None
+    criticality: str | None = None
+
+
+class HistoryPage(BaseModel):
+    items: list[Any]
+    total: int
+    limit: int
+    offset: int
+
+
+SiteOut.model_rebuild()
+NetworkOut.model_rebuild()
+AssetListItem.model_rebuild()
+AssetDetail.model_rebuild()

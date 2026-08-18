@@ -1,7 +1,7 @@
 """Alembic-backed schema apply with pre-Alembic adoption.
 
 Paths:
-- Fresh database (no managed application tables or Phase 1A markers):
+- Fresh database (no managed application tables or post-baseline markers):
   alembic upgrade head.
 - Recognized complete pre-Alembic Phase 0 schema (all Phase 0 tables,
   no post-baseline tables/columns, no alembic_version): run the
@@ -60,11 +60,27 @@ POST_BASELINE_TABLES = frozenset(
         "networks",
         "network_agents",
         "audit_logs",
+        "tags",
+        "assets",
+        "asset_identifiers",
+        "asset_addresses",
+        "asset_services",
+        "asset_observations",
+        "asset_tags",
+        "site_tags",
+        "network_tags",
     }
 )
 PHASE1A_MARKER_COLUMNS = {
     "agents": frozenset({"site_id"}),
     "subnets": frozenset({"site_id", "network_id"}),
+}
+PHASE1B_MARKER_COLUMNS = {
+    "devices": frozenset({"asset_id"}),
+}
+POST_BASELINE_MARKER_COLUMNS = {
+    table: PHASE1A_MARKER_COLUMNS.get(table, frozenset()) | PHASE1B_MARKER_COLUMNS.get(table, frozenset())
+    for table in set(PHASE1A_MARKER_COLUMNS) | set(PHASE1B_MARKER_COLUMNS)
 }
 MANAGED_TABLES = PHASE0_TABLES | POST_BASELINE_TABLES
 
@@ -101,7 +117,7 @@ def _column_names(inspector, table: str) -> set[str]:
 
 def _post_baseline_markers(inspector, tables: set[str]) -> set[str]:
     markers = set(tables & POST_BASELINE_TABLES)
-    for table, columns in PHASE1A_MARKER_COLUMNS.items():
+    for table, columns in POST_BASELINE_MARKER_COLUMNS.items():
         if table not in tables:
             continue
         present = _column_names(inspector, table) & columns

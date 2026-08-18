@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from app.alerts import create_alert
+from app.assets import apply_device_report
 from app.classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
 from app.models import Alert, Device, Finding
 from app.schemas import DEVICE_CLASSES, DeviceReport, FindingReport
@@ -100,6 +101,8 @@ def _merge_into(db: Session, keeper: Device, donor: Device) -> Device:
         keeper.classification = donor.classification
     if donor.first_seen and (not keeper.first_seen or donor.first_seen < keeper.first_seen):
         keeper.first_seen = donor.first_seen
+    if keeper.asset_id is None and donor.asset_id is not None:
+        keeper.asset_id = donor.asset_id
     db.query(Finding).filter(Finding.device_id == donor.id).update({Finding.device_id: keeper.id}, synchronize_session=False)
     db.query(Alert).filter(Alert.device_id == donor.id).update({Alert.device_id: keeper.id}, synchronize_session=False)
     db.delete(donor)
@@ -147,6 +150,7 @@ def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[Devic
             _apply_class(device, report)
             db.add(device)
             db.flush()
+            apply_device_report(db, device, report, job_id)
             created.append(device)
             create_alert(
                 db,
@@ -185,6 +189,7 @@ def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[Devic
             device.status = "known"
         elif device.status == "new" and previous_job and previous_job != job_id:
             device.status = "known"
+        apply_device_report(db, device, report, job_id)
         db.flush()
     return len(created), created
 

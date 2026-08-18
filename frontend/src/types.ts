@@ -38,6 +38,7 @@ export interface Site {
   effective_timezone: string;
   network_count: number;
   agent_count: number;
+  tags?: Tag[];
 }
 
 export interface Network {
@@ -53,6 +54,7 @@ export interface Network {
   created_at: string;
   subnet_id: number | null;
   authorized_agent_ids: number[];
+  tags?: Tag[];
 }
 
 export interface Agent {
@@ -105,6 +107,13 @@ export interface ScanJob {
   scope?: string | null;
 }
 
+export interface Tag {
+  id: number;
+  tenant_id: number;
+  name: string;
+  created_at: string;
+}
+
 export interface Device {
   id: number;
   tenant_id: number;
@@ -120,7 +129,106 @@ export interface Device {
   ports: number[];
   first_seen: string;
   last_seen: string;
+  asset_id?: number | null;
   findings_count?: number;
+}
+
+export interface Asset {
+  id: number;
+  tenant_id: number;
+  site_id: number | null;
+  site_name?: string | null;
+  display_name: string;
+  hostname?: string | null;
+  current_addresses: string[];
+  classification: string;
+  description: string;
+  lifecycle_state: string;
+  disposition: string;
+  criticality: string;
+  is_expected: boolean;
+  is_not_yet_observed: boolean;
+  first_seen: string | null;
+  last_seen: string | null;
+  tags: Tag[];
+  findings_count: number;
+  created_at: string;
+}
+
+export interface AssetIdentifier {
+  id: number;
+  asset_id: number;
+  identifier_type: string;
+  value: string;
+  normalized_value: string;
+  source: string;
+  first_seen: string | null;
+  last_seen: string | null;
+  created_at: string;
+}
+
+export interface AssetAddress {
+  id: number;
+  asset_id: number;
+  site_id: number | null;
+  network_id: number | null;
+  ip: string;
+  address_family: string;
+  source: string;
+  first_seen: string | null;
+  last_seen: string | null;
+  created_at: string;
+}
+
+export interface AssetService {
+  id: number;
+  asset_id: number;
+  address_id: number | null;
+  ip: string;
+  port: number;
+  protocol: string;
+  product: string;
+  version: string;
+  tls_metadata: Record<string, unknown>;
+  web_title: string;
+  tech: string;
+  source: string;
+  first_seen: string | null;
+  last_seen: string | null;
+  created_at: string;
+}
+
+export interface AssetObservation {
+  id: number;
+  asset_id: number;
+  tenant_id: number;
+  site_id: number | null;
+  network_id: number | null;
+  agent_id: number | null;
+  scan_job_id: number | null;
+  scope: string;
+  source: string;
+  observed_at: string;
+  hostname: string;
+  ip: string;
+  snapshot: Record<string, unknown>;
+  provenance: string;
+  created_at: string;
+}
+
+export interface AssetDetail extends Asset {
+  identifiers: AssetIdentifier[];
+  addresses: AssetAddress[];
+  services: AssetService[];
+  device_ids: number[];
+  findings: Finding[];
+}
+
+export interface HistoryPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 export interface DeviceDetail extends Device {
@@ -183,6 +291,7 @@ export interface Dashboard {
 
 export interface TenantSummary {
   devices: { new: number; known: number; stale: number };
+  assets?: { total: number; unreviewed: number; expected: number };
   findings: Record<string, number>;
   agents: { total: number; pending: number; approved: number; online: number };
   open_alerts: number;

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.assets import assign_tag, get_or_create_tag, remove_tag
 from app.audit import record_audit, utcnow
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -18,8 +19,8 @@ from app.locality import (
     sync_lan_subnet,
     valid_cidr,
 )
-from app.models import DISPATCH_ANY_AVAILABLE, Network, User
-from app.schemas import NetworkAuthorizationIn, NetworkIn, NetworkOut
+from app.models import DISPATCH_ANY_AVAILABLE, Network, Tag, User
+from app.schemas import NetworkAuthorizationIn, NetworkIn, NetworkOut, TagAssignIn, TagOut
 
 router = APIRouter(tags=["networks"])
 
@@ -30,6 +31,7 @@ def serialize_network(db: Session, network: Network) -> NetworkOut:
     subnet = companion_subnet(db, network)
     out.subnet_id = subnet.id if subnet else None
     out.authorized_agent_ids = sorted(authorized_agent_ids(db, network.id))
+    out.tags = [TagOut.model_validate(tag) for tag in network.tags]
     return out
 
 
@@ -232,3 +234,72 @@ def replace_authorized_agents(
     db.commit()
     db.refresh(network)
     return serialize_network(db, network)
+
+
+@router.post("/networks/{network_id}/tags", response_model=NetworkOut)
+def add_network_tag(
+    network_id: int,
+    body: TagAssignIn,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    network = get_network(db, network_id)
+    tag = _resolve_network_tag(db, network.tenant_id, body)
+    try:
+        assign_tag(network, tag)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_audit(
+        db,
+        actor=user,
+        action="network.tag_change",
+        object_type="network",
+        object_id=network.id,
+        tenant_id=network.tenant_id,
+        site_id=network.site_id,
+        details={"op": "add", "tag_id": tag.id, "name": tag.name},
+    )
+    db.commit()
+    db.refresh(network)
+    return serialize_network(db, network)
+
+
+@router.delete("/networks/{network_id}/tags/{tag_id}", response_model=NetworkOut)
+def delete_network_tag(
+    network_id: int,
+    tag_id: int,
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
+    network = get_network(db, network_id)
+    tag = db.query(Tag).filter(Tag.id == tag_id, Tag.tenant_id == network.tenant_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    remove_tag(network, tag)
+    record_audit(
+        db,
+        actor=user,
+        action="network.tag_change",
+        object_type="network",
+        object_id=network.id,
+        tenant_id=network.tenant_id,
+        site_id=network.site_id,
+        details={"op": "remove", "tag_id": tag.id, "name": tag.name},
+    )
+    db.commit()
+    db.refresh(network)
+    return serialize_network(db, network)
+
+
+def _resolve_network_tag(db: Session, tenant_id: int, body: TagAssignIn) -> Tag:
+    if body.tag_id is not None:
+        tag = db.query(Tag).filter(Tag.id == body.tag_id).first()
+        if not tag or tag.tenant_id != tenant_id:
+            raise HTTPException(status_code=400, detail="Tag does not belong to this tenant")
+        return tag
+    if body.name:
+        try:
+            return get_or_create_tag(db, tenant_id, body.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    raise HTTPException(status_code=400, detail="tag_id or name is required")

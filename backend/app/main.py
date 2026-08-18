@@ -11,6 +11,7 @@ from app.routers import (
     agent_api,
     agents,
     alerts,
+    assets,
     auth,
     devices,
     findings,
@@ -61,6 +62,7 @@ app.include_router(subnets.router, prefix="/api")
 app.include_router(agents.router, prefix="/api")
 app.include_router(scans.router, prefix="/api")
 app.include_router(devices.router, prefix="/api")
+app.include_router(assets.router, prefix="/api")
 app.include_router(findings.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")

@@ -3,9 +3,10 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
-from app.models import Device, Finding, Tenant, User
+from app.models import Asset, Device, Finding, Tenant, User
 from app.schemas import DEVICE_CLASSES, DeviceDetail, DeviceOut, DeviceUpdate, FindingOut
 
 router = APIRouter(tags=["devices"])
@@ -104,7 +105,7 @@ def get_device(device_id: int, _: User = Depends(require_any), db: Session = Dep
 
 @router.patch("/devices/{device_id}", response_model=DeviceOut)
 def update_device(
-    device_id: int, body: DeviceUpdate, _: User = Depends(require_user), db: Session = Depends(get_db)
+    device_id: int, body: DeviceUpdate, user: User = Depends(require_user), db: Session = Depends(get_db)
 ):
     device = db.query(Device).filter(Device.id == device_id).first()
     if not device:
@@ -117,6 +118,27 @@ def update_device(
         device.description = body.description
     if body.status is not None:
         device.status = body.status
+    if device.asset_id and (body.classification is not None or body.description is not None):
+        asset = db.get(Asset, device.asset_id)
+        if asset is not None:
+            before = {"classification": asset.classification, "description": asset.description}
+            if body.classification is not None:
+                asset.classification = body.classification
+            if body.description is not None:
+                asset.description = body.description
+            record_audit(
+                db,
+                actor=user,
+                action="asset.metadata_update",
+                object_type="asset",
+                object_id=asset.id,
+                tenant_id=asset.tenant_id,
+                site_id=asset.site_id,
+                details={"before": before, "after": {
+                    "classification": asset.classification,
+                    "description": asset.description,
+                }, "via": "device"},
+            )
     db.commit()
     db.refresh(device)
     return _with_counts(db, [device])[0]

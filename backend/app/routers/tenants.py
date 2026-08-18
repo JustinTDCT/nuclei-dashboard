@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_any, require_user
 from app.database import get_db
-from app.models import Agent, Alert, Device, Finding, ScanJob, Tenant, User
+from app.models import Agent, Alert, Asset, Device, Finding, ScanJob, Tenant, User
 from app.schemas import TenantIn, TenantOut
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
@@ -79,8 +79,25 @@ def tenant_summary(tenant_id: int, _: User = Depends(require_any), db: Session =
         .all()
     )
     agents = db.query(Agent).filter(Agent.tenant_id == tenant_id).all()
+    assets = dict(
+        db.query(Asset.disposition, func.count(Asset.id))
+        .filter(Asset.tenant_id == tenant_id)
+        .group_by(Asset.disposition)
+        .all()
+    )
+    expected = (
+        db.query(func.count(Asset.id))
+        .filter(Asset.tenant_id == tenant_id, Asset.is_expected.is_(True), Asset.first_seen.is_(None))
+        .scalar()
+        or 0
+    )
     return {
         "devices": {k: devices.get(k, 0) for k in ("new", "known", "stale")},
+        "assets": {
+            "total": db.query(func.count(Asset.id)).filter(Asset.tenant_id == tenant_id).scalar() or 0,
+            "unreviewed": assets.get("unreviewed", 0),
+            "expected": expected,
+        },
         "findings": {
             k: findings.get(k, 0) for k in ("critical", "high", "medium", "low", "info")
         },

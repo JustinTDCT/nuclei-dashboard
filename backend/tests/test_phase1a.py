@@ -13,7 +13,8 @@ from tests.conftest import requires_postgres
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_schema.py"
-PHASE1A_HEAD = "0002_sites_networks"
+PHASE1A_REVISION = "0002_sites_networks"
+PHASE1B_HEAD = "0003_assets_observations"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
@@ -212,8 +213,8 @@ def test_upgrade_from_0001_preserves_representative_phase0_data(reset_db):
     command.upgrade(alembic_config(), "0001_baseline")
     ids = _insert_phase0_representative(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE1A_HEAD
-    assert PHASE1B_TABLES.isdisjoint(_tables(engine))
+    assert revision == head_revision() == current_revision() == PHASE1B_HEAD
+    assert PHASE1B_TABLES.issubset(_tables(engine))
 
     db = SessionLocal()
     try:
@@ -259,7 +260,7 @@ def test_downgrade_from_0002_is_refused(reset_db):
 
     from app.migrate import alembic_config, apply_schema
 
-    apply_schema()
+    command.upgrade(alembic_config(), PHASE1A_REVISION)
     try:
         command.downgrade(alembic_config(), "0001_baseline")
     except (NotImplementedError, CommandError) as exc:

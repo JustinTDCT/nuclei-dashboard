@@ -4,6 +4,7 @@ import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import { formatUtc, useTimezone } from "../timezone";
 import type { Agent, Network, Site } from "../types";
+import { TagEditor } from "./AssetsPanel";
 
 const COMMON_TIMEZONES = [
   "UTC",
@@ -194,6 +195,15 @@ function SiteDetail({
           </div>
         )}
         {error && <div className="text-rose-300 text-sm">{error}</div>}
+        <div>
+          <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Tags</div>
+          <TagEditor
+            write={write}
+            tags={site.tags}
+            onAdd={(name) => api(`/api/sites/${site.id}/tags`, { method: "POST", body: JSON.stringify({ name }) }).then(onChanged)}
+            onRemove={(tagId) => api(`/api/sites/${site.id}/tags/${tagId}`, { method: "DELETE" }).then(onChanged)}
+          />
+        </div>
       </form>
       <NetworkList site={site} networks={networks} agents={siteAgents} write={write} onChanged={() => { load(); onChanged(); }} />
       <SiteAgents
@@ -401,6 +411,15 @@ function NetworkCard({
           </div>
         </div>
       )}
+      <div>
+        <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Tags</div>
+        <TagEditor
+          write={write}
+          tags={network.tags}
+          onAdd={(name) => api(`/api/networks/${network.id}/tags`, { method: "POST", body: JSON.stringify({ name }) }).then(onChanged)}
+          onRemove={(tagId) => api(`/api/networks/${network.id}/tags/${tagId}`, { method: "DELETE" }).then(onChanged)}
+        />
+      </div>
       {error && <div className="text-rose-300 text-sm">{error}</div>}
     </form>
   );

@@ -11,13 +11,18 @@ from tests.conftest import requires_postgres
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_PATH = BACKEND_ROOT / "alembic" / "versions" / "0001_baseline_current_schema.py"
-PHASE1A_HEAD = "0002_sites_networks"
+PHASE1A_REVISION = "0002_sites_networks"
+PHASE1B_HEAD = "0003_assets_observations"
 PHASE1B_TABLES = {
     "assets",
     "asset_identifiers",
     "asset_addresses",
     "asset_services",
     "asset_observations",
+    "tags",
+    "asset_tags",
+    "site_tags",
+    "network_tags",
 }
 
 
@@ -36,7 +41,7 @@ def test_fresh_database_reaches_head(reset_db):
 
     assert "users" not in _tables(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE1A_HEAD
+    assert revision == head_revision() == current_revision() == PHASE1B_HEAD
     expected = {
         "alembic_version",
         "users",
@@ -55,7 +60,8 @@ def test_fresh_database_reaches_head(reset_db):
         "settings",
     }
     assert expected.issubset(_tables(engine))
-    assert PHASE1B_TABLES.isdisjoint(_tables(engine))
+    assert PHASE1B_TABLES.issubset(_tables(engine))
+    assert "asset_id" in _columns(engine, "devices")
 
 
 @requires_postgres
@@ -144,7 +150,7 @@ def test_existing_schema_adoption_preserves_data(reset_db):
         }
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE1A_HEAD
+    assert revision == head_revision() == current_revision() == PHASE1B_HEAD
 
     db = SessionLocal()
     try:
@@ -160,6 +166,7 @@ def test_existing_schema_adoption_preserves_data(reset_db):
         assert kept_agent.uuid == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         assert kept_agent.site_id is not None
         assert kept_device is not None
+        assert kept_device.asset_id is not None
         assert kept_device.hostname == "keep-host"
         assert kept_device.description == "must survive"
         assert kept_device.ports == [{"port": 443, "protocol": "tcp"}]
@@ -301,7 +308,7 @@ def test_legacy_compatibility_restores_missing_columns_without_dropping_rows(res
         conn.execute(text("ALTER TABLE devices DROP COLUMN IF EXISTS description"))
 
     revision = apply_schema()
-    assert revision == PHASE1A_HEAD
+    assert revision == PHASE1B_HEAD
     assert "hostname" in _columns(engine, "findings")
     assert "description" in _columns(engine, "devices")
 
@@ -362,3 +369,48 @@ def test_unversioned_sites_networks_only_is_not_fresh(reset_db):
         apply_schema()
     assert "alembic_version" not in _tables(engine)
     assert "users" not in _tables(engine)
+
+
+@requires_postgres
+def test_unversioned_phase1b_tables_fail_closed(reset_db):
+    from app.database import engine
+    from app.migrate import UnrecognizedSchemaError, apply_schema
+
+    apply_schema()
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+    assert "assets" in _tables(engine)
+    assert "alembic_version" not in _tables(engine)
+    with pytest.raises(UnrecognizedSchemaError, match="Unrecognized/partial"):
+        apply_schema()
+    assert "alembic_version" not in _tables(engine)
+
+
+@requires_postgres
+def test_unversioned_phase1b_marker_columns_fail_closed(reset_db):
+    from alembic import command
+
+    from app.database import engine
+    from app.migrate import UnrecognizedSchemaError, alembic_config, apply_schema
+
+    command.upgrade(alembic_config(), PHASE1A_REVISION)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE devices ADD COLUMN asset_id INTEGER"))
+        conn.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+    with pytest.raises(UnrecognizedSchemaError, match="Unrecognized/partial"):
+        apply_schema()
+    assert "alembic_version" not in _tables(engine)
+    assert "assets" not in _tables(engine)
+
+
+def test_phase1a_and_baseline_revisions_remain_frozen():
+    phase1a = (BACKEND_ROOT / "alembic" / "versions" / "0002_sites_networks.py").read_text()
+    phase1b = (BACKEND_ROOT / "alembic" / "versions" / "0003_assets_observations.py").read_text()
+    assert "from app.database import Base" not in phase1a
+    assert "import app.models" not in phase1a
+    assert '"assets"' not in phase1a
+    assert "from app.database import Base" not in phase1b
+    assert "import app.models" not in phase1b
+    assert 'down_revision: str | None = "0002_sites_networks"' in phase1b
