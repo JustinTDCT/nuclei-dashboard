@@ -372,6 +372,24 @@ def upsert_services(
             row.tech = tech
 
 
+def find_observation(
+    db: Session,
+    asset: Asset,
+    *,
+    scan_job_id: int | None,
+    observation_key: str,
+) -> AssetObservation | None:
+    existing_q = db.query(AssetObservation).filter(
+        AssetObservation.asset_id == asset.id,
+        AssetObservation.observation_key == observation_key,
+    )
+    if scan_job_id is not None:
+        existing_q = existing_q.filter(AssetObservation.scan_job_id == scan_job_id)
+    else:
+        existing_q = existing_q.filter(AssetObservation.scan_job_id.is_(None))
+    return existing_q.first()
+
+
 def append_observation(
     db: Session,
     asset: Asset,
@@ -383,18 +401,15 @@ def append_observation(
     observed_at: datetime,
     observation_key: str,
 ) -> AssetObservation:
-    scan_job_id = context.get("scan_job_id")
-    existing_q = db.query(AssetObservation).filter(
-        AssetObservation.asset_id == asset.id,
-        AssetObservation.observation_key == observation_key,
+    existing = find_observation(
+        db,
+        asset,
+        scan_job_id=context.get("scan_job_id"),
+        observation_key=observation_key,
     )
-    if scan_job_id is not None:
-        existing_q = existing_q.filter(AssetObservation.scan_job_id == scan_job_id)
-    else:
-        existing_q = existing_q.filter(AssetObservation.scan_job_id.is_(None))
-    existing = existing_q.first()
     if existing is not None:
         return existing
+    scan_job_id = context.get("scan_job_id")
     row = AssetObservation(
         asset_id=asset.id,
         tenant_id=asset.tenant_id,
@@ -426,6 +441,24 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
     report_scope = (report.scope or "").strip()
     context = observation_context(db, job_id, report_ip, report_scope or device.scope)
     asset = ensure_asset_for_device(db, device, context)
+    snapshot = {
+        "hostname": report_hostname,
+        "ip": report_ip,
+        "ports": list(report.ports or []),
+        "title": report.title or "",
+        "tech": report.tech or "",
+        "auto_label": report.auto_label or "",
+        "classification": report.classification or "",
+        "scope": report_scope or context.get("scope") or "",
+    }
+    observation_key = observation_fingerprint(
+        report_hostname,
+        report_ip,
+        snapshot["scope"],
+        snapshot["ports"],
+    )
+    if find_observation(db, asset, scan_job_id=job_id, observation_key=observation_key) is not None:
+        return asset
     now = utcnow()
     if not asset.is_expected:
         if asset.first_seen is None:
@@ -466,16 +499,6 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
         source=SOURCE_SCANNER,
         seen_at=now,
     )
-    snapshot = {
-        "hostname": report_hostname,
-        "ip": report_ip,
-        "ports": list(report.ports or []),
-        "title": report.title or "",
-        "tech": report.tech or "",
-        "auto_label": report.auto_label or "",
-        "classification": report.classification or "",
-        "scope": report_scope or context.get("scope") or "",
-    }
     append_observation(
         db,
         asset,
@@ -484,12 +507,7 @@ def apply_device_report(db: Session, device: Device, report: DeviceReport, job_i
         ip=report_ip,
         snapshot=snapshot,
         observed_at=now,
-        observation_key=observation_fingerprint(
-            report_hostname,
-            report_ip,
-            snapshot["scope"],
-            snapshot["ports"],
-        ),
+        observation_key=observation_key,
     )
     db.flush()
     return asset
@@ -563,6 +581,7 @@ __all__ = [
     "assign_tag",
     "display_name_for",
     "ensure_asset_for_device",
+    "find_observation",
     "get_or_create_tag",
     "normalize_identifier",
     "normalize_tag_name",

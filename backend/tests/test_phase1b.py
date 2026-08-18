@@ -1052,3 +1052,79 @@ def test_observation_uses_report_facts_and_per_report_keys(reset_db):
         assert db.query(AssetAddress).filter(AssetAddress.asset_id == placeholder_asset.id, AssetAddress.ip == "203.0.113.9").one()
     finally:
         db.close()
+
+
+@requires_postgres
+def test_exact_retry_does_not_advance_asset_evidence(reset_db):
+    from datetime import timedelta
+    from unittest.mock import patch
+
+    from app.database import SessionLocal
+    from app.inventory import upsert_devices
+    from app.migrate import apply_schema
+    from app.models import Asset, AssetAddress, AssetIdentifier, AssetObservation, AssetService, Device, Scan, ScanJob, Tenant
+    from app.schemas import DeviceReport
+
+    apply_schema()
+    db: Session = SessionLocal()
+    try:
+        tenant = Tenant(name="Retry Evidence Tenant", notes="")
+        db.add(tenant)
+        db.flush()
+        scan = Scan(tenant_id=tenant.id, name="wan", scope="wan", profile="discovery")
+        db.add(scan)
+        db.flush()
+        job = ScanJob(scan_id=scan.id, tenant_id=tenant.id, status="running")
+        db.add(job)
+        db.flush()
+        report = DeviceReport(
+            ip="10.4.4.4",
+            scope="wan",
+            hostname="retry01",
+            ports=[443],
+            title="panel",
+            tech="nginx",
+        )
+        upsert_devices(db, tenant.id, job.id, [report])
+        device = db.query(Device).filter(Device.hostname == "retry01").one()
+        asset = db.get(Asset, device.asset_id)
+        identifier = (
+            db.query(AssetIdentifier)
+            .filter(AssetIdentifier.asset_id == asset.id, AssetIdentifier.identifier_type == "hostname")
+            .one()
+        )
+        address = db.query(AssetAddress).filter(AssetAddress.asset_id == asset.id, AssetAddress.ip == "10.4.4.4").one()
+        service = db.query(AssetService).filter(AssetService.asset_id == asset.id, AssetService.port == 443).one()
+        observation = db.query(AssetObservation).filter(AssetObservation.asset_id == asset.id).one()
+        recorded = {
+            "asset": asset.last_seen,
+            "identifier": identifier.last_seen,
+            "address": address.last_seen,
+            "service": service.last_seen,
+            "observed_at": observation.observed_at,
+            "obs_id": observation.id,
+            "snapshot": dict(observation.snapshot),
+        }
+        assert all(value is not None for key, value in recorded.items() if key not in {"obs_id", "snapshot"})
+
+        later = recorded["asset"] + timedelta(seconds=30)
+        with patch("app.assets.utcnow", return_value=later):
+            upsert_devices(db, tenant.id, job.id, [report])
+
+        db.refresh(asset)
+        db.refresh(identifier)
+        db.refresh(address)
+        db.refresh(service)
+        db.refresh(observation)
+        observations = db.query(AssetObservation).filter(AssetObservation.asset_id == asset.id).all()
+        assert len(observations) == 1
+        assert observations[0].id == recorded["obs_id"]
+        assert asset.last_seen == recorded["asset"]
+        assert identifier.last_seen == recorded["identifier"]
+        assert address.last_seen == recorded["address"]
+        assert service.last_seen == recorded["service"]
+        assert observation.observed_at == recorded["observed_at"]
+        assert observation.snapshot == recorded["snapshot"]
+        assert later != recorded["asset"]
+    finally:
+        db.close()
