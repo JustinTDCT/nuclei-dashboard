@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0006_scan_definition_execution` (after frozen `0001_baseline` through `0005_asset_correlation_lifecycle`).
+Current head revision: `0007_vulnerability_finding_lifecycle` (after frozen `0001_baseline` through `0006_scan_definition_execution`).
 
-`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, `0004_asset_observation_integrity`, and `0005_asset_correlation_lifecycle` are immutable. Phase 1D schema lives in `0006_scan_definition_execution`.
+`0001_baseline`, `0002_sites_networks`, `0003_assets_observations`, `0004_asset_observation_integrity`, `0005_asset_correlation_lifecycle`, and `0006_scan_definition_execution` are immutable. Phase 2A schema lives in `0007_vulnerability_finding_lifecycle`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -32,6 +32,8 @@ Current head revision: `0006_scan_definition_execution` (after frozen `0001_base
 `alembic downgrade` from `0005_asset_correlation_lifecycle` is **refused**. It would destroy correlation decisions, domain events, merge lineage, and identifier correction history.
 
 `alembic downgrade` from `0006_scan_definition_execution` is **refused**. It would destroy authorized WAN targets, scan definition associations, exclusions, execution snapshots, and schedule history.
+
+`alembic downgrade` from `0007_vulnerability_finding_lifecycle` is **refused**. It would destroy vulnerability catalog identity, Asset Finding lifecycle history, and Detection Evidence linkage.
 
 ### Fresh install
 

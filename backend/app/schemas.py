@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 DEVICE_CLASSES = (
     "Unknown",
@@ -324,6 +324,10 @@ class FindingOut(BaseModel):
     tenant_id: int
     scan_job_id: int | None
     device_id: int | None
+    asset_id: int | None = None
+    asset_finding_id: int | None = None
+    detector_type: str = ""
+    detector_key: str = ""
     hostname: str = ""
     ip: str = ""
     template_id: str
@@ -384,6 +388,14 @@ class SettingsOut(BaseModel):
     scan_cap_nuclei_concurrency: int = 100
     scan_cap_nuclei_timeout: int = 30
     scan_cap_nuclei_retries: int = 5
+    finding_resolution_clean_scans: int = 2
+
+    @field_validator("finding_resolution_clean_scans")
+    @classmethod
+    def _positive_clean_scans(cls, value: int) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError("finding_resolution_clean_scans must be a positive integer")
+        return value
 
 
 class DisplaySettingsOut(BaseModel):
@@ -392,6 +404,52 @@ class DisplaySettingsOut(BaseModel):
 
 class SettingsIn(SettingsOut):
     pass
+
+
+class AssetFindingOut(BaseModel):
+    id: int
+    tenant_id: int
+    asset_id: int
+    asset_hostname: str = ""
+    asset_display_name: str = ""
+    vulnerability_id: int
+    canonical_key: str
+    cve_id: str | None = None
+    title: str
+    identity_label: str
+    severity: str
+    technical_state: str
+    treatment_state: str
+    first_seen: datetime
+    last_seen: datetime
+    resolved_at: datetime | None = None
+    consecutive_clean_scans: int
+    reopened_count: int
+    evidence_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssetFindingHistoryOut(BaseModel):
+    id: int
+    asset_finding_id: int
+    tenant_id: int
+    transition_type: str
+    previous_technical_state: str | None = None
+    new_technical_state: str
+    scan_job_id: int | None = None
+    occurred_at: datetime
+    details: dict[str, Any] = {}
+
+    model_config = {"from_attributes": True}
+
+
+class AssetFindingDetail(AssetFindingOut):
+    description: str = ""
+    detector_type: str = ""
+    detector_key: str = ""
+    history: list[AssetFindingHistoryOut] = []
+    evidence: list[FindingOut] = []
 
 
 class EnrollIn(BaseModel):

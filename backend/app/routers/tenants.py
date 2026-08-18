@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_any, require_user
 from app.database import get_db
-from app.models import Agent, Alert, Asset, Device, Finding, ScanJob, Tenant, User
+from app.finding_lifecycle import open_finding_severity_counts
+from app.models import Agent, Alert, Asset, Device, ScanJob, Tenant, User
 from app.schemas import TenantIn, TenantOut
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
@@ -72,12 +73,7 @@ def tenant_summary(tenant_id: int, _: User = Depends(require_any), db: Session =
         .group_by(Device.status)
         .all()
     )
-    findings = dict(
-        db.query(Finding.severity, func.count(Finding.id))
-        .filter(Finding.tenant_id == tenant_id)
-        .group_by(Finding.severity)
-        .all()
-    )
+    findings = open_finding_severity_counts(db, tenant_id)
     agents = db.query(Agent).filter(Agent.tenant_id == tenant_id).all()
     assets = dict(
         db.query(Asset.disposition, func.count(Asset.id))
@@ -98,9 +94,7 @@ def tenant_summary(tenant_id: int, _: User = Depends(require_any), db: Session =
             "unreviewed": assets.get("unreviewed", 0),
             "expected": expected,
         },
-        "findings": {
-            k: findings.get(k, 0) for k in ("critical", "high", "medium", "low", "info")
-        },
+        "findings": {k: findings.get(k, 0) for k in ("critical", "high", "medium", "low", "info")},
         "agents": {
             "total": len(agents),
             "pending": sum(1 for a in agents if a.status == "pending_approval"),

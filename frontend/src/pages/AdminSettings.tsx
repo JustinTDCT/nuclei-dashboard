@@ -31,6 +31,7 @@ const empty: Settings = {
   scan_cap_nuclei_concurrency: 100,
   scan_cap_nuclei_timeout: 30,
   scan_cap_nuclei_retries: 5,
+  finding_resolution_clean_scans: 2,
 };
 
 export function AdminSettings() {
@@ -120,6 +121,11 @@ export function AdminSettings() {
         <div className="text-sm text-slate-400 mt-6">
           Timestamps stay in UTC. The UI displays them in this timezone unless a Site overrides it.
         </div>
+        <Field
+          label="Resolve finding after consecutive clean applicable scans"
+          value={String(form.finding_resolution_clean_scans ?? 2)}
+          onChange={(v) => setForm({ ...form, finding_resolution_clean_scans: Number(v) || 0 })}
+        />
       </section>
       <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-2 gap-3">
         <div className="md:col-span-2 text-sm text-slate-400">

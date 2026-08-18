@@ -17,6 +17,7 @@ from tests.conftest import requires_postgres
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1C_HEAD = "0005_asset_correlation_lifecycle"
 PHASE1D_HEAD = "0006_scan_definition_execution"
+PHASE2A_HEAD = "0007_vulnerability_finding_lifecycle"
 RUNTIME_ROOT = BACKEND_ROOT.parent / "scan_runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
@@ -153,7 +154,7 @@ def test_fresh_db_reaches_phase1d_head(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE1D_HEAD
+    assert revision == head_revision() == current_revision() == PHASE2A_HEAD
     tables = set(inspect(engine).get_table_names())
     assert {"authorized_wan_targets", "scan_network_targets", "scan_wan_targets", "scan_exclusions"}.issubset(tables)
     assert "execution_snapshot" in {c["name"] for c in inspect(engine).get_columns("scan_jobs")}
@@ -232,8 +233,8 @@ def test_0005_to_0006_preserves_ids_and_does_not_fabricate_snapshots(reset_db):
             {"s": lan_scan, "t": tenant_id},
         ).scalar_one()
 
-    command.upgrade(alembic_config(), "head")
-    assert current_revision() == head_revision() == PHASE1D_HEAD
+    command.upgrade(alembic_config(), PHASE1D_HEAD)
+    assert current_revision() == PHASE1D_HEAD
     db = SessionLocal()
     try:
         assert db.get(Scan, lan_scan) is not None
@@ -262,7 +263,7 @@ def test_downgrade_from_0006_is_refused(reset_db):
 
     from app.migrate import alembic_config, apply_schema
 
-    apply_schema()
+    command.upgrade(alembic_config(), PHASE1D_HEAD)
     try:
         command.downgrade(alembic_config(), PHASE1C_HEAD)
     except (CommandError, RuntimeError) as exc:

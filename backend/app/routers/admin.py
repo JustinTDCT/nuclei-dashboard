@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 from app.audit import record_audit
 from app.auth import require_admin, require_any
 from app.database import get_db
-from app.models import Agent, Alert, Device, Finding, ScanJob, Tenant, User
+from app.finding_lifecycle import open_finding_severity_counts
+from app.models import Agent, Alert, Device, ScanJob, Tenant, User
 from app.scan_dispatch import is_agent_healthy
 from app.scan_intensity import DEFAULT_CAPS
 from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
@@ -80,9 +81,7 @@ def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
             "pending": sum(1 for a in agents if a.status == "pending_approval"),
             "online": sum(1 for a in agents if is_agent_healthy(a)),
         },
-        "findings": dict(
-            db.query(Finding.severity, func.count(Finding.id)).group_by(Finding.severity).all()
-        ),
+        "findings": open_finding_severity_counts(db),
         "recent_alerts": [
             {
                 "id": a.id,

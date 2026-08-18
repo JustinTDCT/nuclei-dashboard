@@ -333,6 +333,10 @@ export interface Finding {
   tenant_id: number;
   scan_job_id: number | null;
   device_id: number | null;
+  asset_id?: number | null;
+  asset_finding_id?: number | null;
+  detector_type?: string;
+  detector_key?: string;
   hostname?: string;
   ip?: string;
   template_id: string;
@@ -342,6 +346,50 @@ export interface Finding {
   matched_at: string;
   tags: string;
   found_at: string;
+}
+
+export interface AssetFinding {
+  id: number;
+  tenant_id: number;
+  asset_id: number;
+  asset_hostname: string;
+  asset_display_name: string;
+  vulnerability_id: number;
+  canonical_key: string;
+  cve_id: string | null;
+  title: string;
+  identity_label: string;
+  severity: string;
+  technical_state: "open" | "resolved" | string;
+  treatment_state: string;
+  first_seen: string;
+  last_seen: string;
+  resolved_at: string | null;
+  consecutive_clean_scans: number;
+  reopened_count: number;
+  evidence_count?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssetFindingHistory {
+  id: number;
+  asset_finding_id: number;
+  tenant_id: number;
+  transition_type: string;
+  previous_technical_state: string | null;
+  new_technical_state: string;
+  scan_job_id: number | null;
+  occurred_at: string;
+  details?: Record<string, unknown>;
+}
+
+export interface AssetFindingDetail extends AssetFinding {
+  description: string;
+  detector_type: string;
+  detector_key: string;
+  history: AssetFindingHistory[];
+  evidence: Finding[];
 }
 
 export interface AlertItem {
@@ -384,6 +432,7 @@ export interface Settings {
   scan_cap_nuclei_concurrency?: number;
   scan_cap_nuclei_timeout?: number;
   scan_cap_nuclei_retries?: number;
+  finding_resolution_clean_scans?: number;
 }
 
 export interface Dashboard {

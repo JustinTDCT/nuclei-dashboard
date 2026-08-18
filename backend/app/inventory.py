@@ -329,40 +329,9 @@ def store_findings(
     scope: str,
     reports: list[FindingReport],
 ) -> int:
-    count = 0
-    for report in reports:
-        raw_host = (report.host or report.matched_at or "").strip()
-        parsed = urlparse(raw_host).hostname if "://" in raw_host else raw_host.split("/")[0].split(":")[0]
-        parsed = normalize_hostname(parsed or "")
-        ip = host_to_ip(report.host or report.matched_at) or ""
-        hostname = identity_name(parsed, ip)
-        context = observation_context(db, job_id, ip, scope)
-        run_scope = context.get("scope") or scope
-        site_id = context.get("site_id") if run_scope == "lan" else None
-        device = _find_device(db, tenant_id, run_scope, hostname, ip, site_id=site_id)
-        if device and parsed and not is_ip(parsed):
-            device = _promote_hostname(db, device, parsed, tenant_id, run_scope, site_id=site_id)
-        if device and ip:
-            device.ip = ip
-        raw = report.raw or {}
-        finding = Finding(
-            tenant_id=tenant_id,
-            scan_job_id=job_id,
-            device_id=device.id if device else None,
-            hostname=(device.hostname if device else hostname) or hostname,
-            template_id=report.template_id or raw.get("template-id") or "",
-            name=report.name or (raw.get("info") or {}).get("name") or "",
-            severity=(report.severity or (raw.get("info") or {}).get("severity") or "info").lower(),
-            host=report.host or raw.get("host") or "",
-            matched_at=report.matched_at or raw.get("matched-at") or "",
-            tags=report.tags
-            or ",".join((raw.get("info") or {}).get("tags") or []),
-            raw_json=raw,
-        )
-        db.add(finding)
-        count += 1
-    db.flush()
-    return count
+    from app.finding_lifecycle import ingest_findings
+
+    return ingest_findings(db, tenant_id, job_id, scope, reports)
 
 
 def refresh_discovery_metadata(db: Session) -> int:

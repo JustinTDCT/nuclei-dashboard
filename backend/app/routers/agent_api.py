@@ -8,6 +8,7 @@ from app.alerts import impersonation_alert
 from app.auth import create_agent_token, decode_token
 from app.crypto_util import new_nonce, verify_ed25519
 from app.database import get_db
+from app.finding_lifecycle import FindingLifecycleError, complete_scan_run
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError, is_authorized
@@ -263,9 +264,11 @@ def complete_job(
     db: Session = Depends(get_db),
 ):
     job = _owned_job(db, job_id, agent.uuid)
-    job.status = "done" if ok else "failed"
-    job.error = error
-    job.finished_at = _now()
+    try:
+        complete_scan_run(db, job, ok=ok, error=error)
+    except FindingLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     db.commit()
     return {"ok": True, "status": job.status}
 

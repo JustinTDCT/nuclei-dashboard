@@ -17,6 +17,7 @@ from app.assets import (
 )
 from app.audit import record_audit
 from app.correlation import canonical_asset_id
+from app.finding_lifecycle import merge_asset_findings
 from app.locality import get_site
 from app.models import (
     IDENTIFIER_TYPES,
@@ -222,6 +223,7 @@ def merge_assets(
                 observation.tenant_id = target.tenant_id
         for device in list(source.devices):
             _attach_device_to_canonical(db, device, target)
+        merge_asset_findings(db, target=target, sources=[source])
         source.merged_into_asset_id = target.id
         source.merged_at = now
         source.updated_at = now
@@ -381,6 +383,9 @@ def split_observations_to_new_asset(
 ) -> Asset:
     if source.merged_into_asset_id:
         raise IdentityError("Cannot split a merged Asset")
+    # Phase 2A: AssetFindings stay on the source Asset. Observation selection
+    # cannot deterministically prove which logical finding belongs to the new
+    # Asset, so findings are not moved or duplicated.
     now = utcnow()
     target = Asset(
         tenant_id=source.tenant_id,

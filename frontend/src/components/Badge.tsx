@@ -29,6 +29,12 @@ const colors: Record<string, string> = {
   ignored: "bg-slate-500/20 text-slate-300",
   normal: "bg-slate-500/20 text-slate-200",
   expected: "bg-amber-500/20 text-amber-200",
+  open: "bg-rose-500/20 text-rose-200",
+  resolved: "bg-emerald-500/20 text-emerald-200",
+  unaddressed: "bg-amber-500/20 text-amber-200",
+  mitigated: "bg-sky-500/20 text-sky-200",
+  accepted_risk: "bg-violet-500/20 text-violet-200",
+  false_positive: "bg-slate-500/20 text-slate-300",
 };
 
 export function Badge({ value }: { value: string }) {

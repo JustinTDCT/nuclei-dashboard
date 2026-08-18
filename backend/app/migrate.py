@@ -75,6 +75,11 @@ POST_BASELINE_TABLES = frozenset(
         "scan_network_targets",
         "scan_wan_targets",
         "scan_exclusions",
+        "vulnerabilities",
+        "vulnerability_detector_mappings",
+        "asset_findings",
+        "asset_finding_history",
+        "asset_finding_run_evaluations",
     }
 )
 PHASE1A_MARKER_COLUMNS = {
@@ -94,17 +99,22 @@ PHASE1D_MARKER_COLUMNS = {
     "scans": frozenset({"site_id", "definition_revision", "archived_at", "stage_config", "next_run_at"}),
     "scan_jobs": frozenset({"execution_snapshot", "snapshot_version", "claimed_agent_id"}),
 }
+PHASE2A_MARKER_COLUMNS = {
+    "findings": frozenset({"asset_id", "asset_finding_id", "evidence_key"}),
+}
 POST_BASELINE_MARKER_COLUMNS = {
     table: (
         PHASE1A_MARKER_COLUMNS.get(table, frozenset())
         | PHASE1B_MARKER_COLUMNS.get(table, frozenset())
         | PHASE1C_MARKER_COLUMNS.get(table, frozenset())
         | PHASE1D_MARKER_COLUMNS.get(table, frozenset())
+        | PHASE2A_MARKER_COLUMNS.get(table, frozenset())
     )
     for table in set(PHASE1A_MARKER_COLUMNS)
     | set(PHASE1B_MARKER_COLUMNS)
     | set(PHASE1C_MARKER_COLUMNS)
     | set(PHASE1D_MARKER_COLUMNS)
+    | set(PHASE2A_MARKER_COLUMNS)
 }
 MANAGED_TABLES = PHASE0_TABLES | POST_BASELINE_TABLES
 

@@ -33,7 +33,9 @@ from app.locality import get_site, get_tenant
 from app.models import (
     IDENTIFIER_HOSTNAME,
     IDENTIFIER_MAC,
+    TECHNICAL_OPEN,
     Asset,
+    AssetFinding,
     AssetAddress,
     AssetCorrelationDecision,
     AssetIdentifier,
@@ -102,10 +104,12 @@ def _findings_count_map(db: Session, asset_ids: list[int]) -> dict[int, int]:
     if not asset_ids:
         return {}
     rows = (
-        db.query(Device.asset_id, func.count(Finding.id))
-        .join(Finding, Finding.device_id == Device.id)
-        .filter(Device.asset_id.in_(asset_ids))
-        .group_by(Device.asset_id)
+        db.query(AssetFinding.asset_id, func.count(AssetFinding.id))
+        .filter(
+            AssetFinding.asset_id.in_(asset_ids),
+            AssetFinding.technical_state == TECHNICAL_OPEN,
+        )
+        .group_by(AssetFinding.asset_id)
         .all()
     )
     return {asset_id: int(count) for asset_id, count in rows}

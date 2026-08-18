@@ -7,8 +7,9 @@ import { Alerts } from "./Alerts";
 import { formatUtc, useTimezone } from "../timezone";
 import type {
   Agent,
+  AssetFinding,
+  AssetFindingDetail,
   AuthorizedWanTarget,
-  Finding,
   Network,
   Scan,
   ScanExclusion,
@@ -836,17 +837,33 @@ function Scans({ tenantId }: { tenantId: number }) {
 }
 
 function Findings({ tenantId }: { tenantId: number }) {
-  const [rows, setRows] = useState<Finding[]>([]);
+  const { defaultTimezone } = useTimezone();
+  const [rows, setRows] = useState<AssetFinding[]>([]);
   const [severity, setSeverity] = useState("");
+  const [technicalState, setTechnicalState] = useState("open");
+  const [selected, setSelected] = useState<AssetFindingDetail | null>(null);
   function load() {
     const qs = new URLSearchParams();
     if (severity) qs.set("severity", severity);
-    api<Finding[]>(`/api/tenants/${tenantId}/findings?${qs}`).then(setRows);
+    if (technicalState) qs.set("technical_state", technicalState);
+    api<AssetFinding[]>(`/api/tenants/${tenantId}/asset-findings?${qs}`).then(setRows);
   }
-  useEffect(load, [tenantId, severity]);
+  useEffect(load, [tenantId, severity, technicalState]);
+  async function openDetail(id: number) {
+    const detail = await api<AssetFindingDetail>(`/api/tenants/${tenantId}/asset-findings/${id}`);
+    setSelected(detail);
+  }
   return (
     <div className="space-y-4">
-      <div className="flex gap-3 items-end">
+      <div className="flex flex-wrap gap-3 items-end">
+        <div>
+          <label>State</label>
+          <select value={technicalState} onChange={(e) => setTechnicalState(e.target.value)}>
+            <option value="">All</option>
+            <option value="open">Open</option>
+            <option value="resolved">Resolved</option>
+          </select>
+        </div>
         <div>
           <label>Severity</label>
           <select value={severity} onChange={(e) => setSeverity(e.target.value)}>
@@ -858,24 +875,111 @@ function Findings({ tenantId }: { tenantId: number }) {
         </div>
         <button
           className="text-cyan-400 text-sm"
-          onClick={() => download(`/api/tenants/${tenantId}/findings/export`, `findings-${tenantId}.csv`)}
+          onClick={() => download(`/api/tenants/${tenantId}/findings/export`, `detection-evidence-${tenantId}.csv`)}
         >
-          Export CSV
+          Export detection evidence CSV
         </button>
       </div>
-      <Table
-        headers={["When", "Severity", "Hostname", "Template", "Name"]}
-        rows={rows.map((f) => [
-          new Date(f.found_at).toLocaleString(),
-          <Badge value={f.severity} />,
+      <div className="overflow-auto border border-slate-800 rounded-xl">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-900 text-slate-400 text-left">
+            <tr>
+              {["State", "Severity", "Asset", "Finding", "Identity", "Treatment", "First seen", "Last seen"].map((h) => (
+                <th key={h} className="px-3 py-2 font-medium">
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td className="px-3 py-4 text-slate-500" colSpan={8}>
+                  None yet.
+                </td>
+              </tr>
+            )}
+            {rows.map((f) => (
+              <tr
+                key={f.id}
+                className="border-t border-slate-800 cursor-pointer hover:bg-slate-800/40"
+                onClick={() => openDetail(f.id)}
+              >
+                <td className="px-3 py-2">
+                  <Badge value={f.technical_state} />
+                </td>
+                <td className="px-3 py-2">
+                  <Badge value={f.severity} />
+                </td>
+                <td className="px-3 py-2">{f.asset_hostname || f.asset_display_name || `Asset #${f.asset_id}`}</td>
+                <td className="px-3 py-2">{f.title || "—"}</td>
+                <td className="px-3 py-2 font-mono text-xs">{f.identity_label}</td>
+                <td className="px-3 py-2">
+                  <Badge value={f.treatment_state} />
+                </td>
+                <td className="px-3 py-2">{formatUtc(f.first_seen, defaultTimezone)}</td>
+                <td className="px-3 py-2">{formatUtc(f.last_seen, defaultTimezone)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {selected && (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
+          <div className="flex justify-between gap-3">
+            <div>
+              <h3 className="font-semibold">{selected.title || selected.identity_label}</h3>
+              <p className="text-slate-400 text-sm">
+                {selected.identity_label} · Asset #{selected.asset_id} {selected.asset_hostname || selected.asset_display_name}
+              </p>
+            </div>
+            <button className="text-cyan-400 text-sm" onClick={() => setSelected(null)}>
+              Close
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge value={selected.technical_state} />
+            <Badge value={selected.severity} />
+            <Badge value={selected.treatment_state} />
+          </div>
+          <div className="grid md:grid-cols-2 gap-2 text-sm text-slate-300">
+            <div>First seen: {formatUtc(selected.first_seen, defaultTimezone)}</div>
+            <div>Last seen: {formatUtc(selected.last_seen, defaultTimezone)}</div>
+            <div>Resolved: {selected.resolved_at ? formatUtc(selected.resolved_at, defaultTimezone) : "—"}</div>
+            <div>Clean scans: {selected.consecutive_clean_scans}</div>
+            <div>Reopened: {selected.reopened_count}</div>
+            <div>
+              Detector: {selected.detector_type || "—"} {selected.detector_key || ""}
+            </div>
+          </div>
           <div>
-            <div>{f.hostname || "—"}</div>
-            <div className="font-mono text-[11px] text-slate-500">{f.ip || f.host || f.matched_at}</div>
-          </div>,
-          <span className="font-mono text-xs">{f.template_id}</span>,
-          f.name,
-        ])}
-      />
+            <h4 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Lifecycle history</h4>
+            <Table
+              headers={["When", "Transition", "From", "To", "Run"]}
+              rows={selected.history.map((row) => [
+                formatUtc(row.occurred_at, defaultTimezone),
+                <Badge value={row.transition_type} />,
+                row.previous_technical_state || "—",
+                row.new_technical_state,
+                row.scan_job_id ? `#${row.scan_job_id}` : "—",
+              ])}
+            />
+          </div>
+          <div>
+            <h4 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Detection evidence</h4>
+            <Table
+              headers={["When", "Severity", "Template", "Host", "Run"]}
+              rows={selected.evidence.map((row) => [
+                formatUtc(row.found_at, defaultTimezone),
+                <Badge value={row.severity} />,
+                row.template_id || row.detector_key || "—",
+                row.host || row.matched_at || row.hostname || "—",
+                row.scan_job_id ? `#${row.scan_job_id}` : "—",
+              ])}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

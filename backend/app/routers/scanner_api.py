@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.finding_lifecycle import FindingLifecycleError, complete_scan_run
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError
@@ -126,9 +127,11 @@ def complete_job(
     db: Session = Depends(get_db),
 ):
     job = _owned(db, job_id)
-    job.status = "done" if ok else "failed"
-    job.error = error
-    job.finished_at = _now()
+    try:
+        complete_scan_run(db, job, ok=ok, error=error)
+    except FindingLifecycleError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     db.commit()
     return {"ok": True, "status": job.status}
 

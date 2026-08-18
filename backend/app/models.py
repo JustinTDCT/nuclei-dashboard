@@ -103,6 +103,39 @@ LEGACY_PRE_1D_REQUEUE_ERROR = (
 EVENT_SCAN_MISSED_UNAVAILABLE_AGENT = "scan_missed_unavailable_agent"
 PHASE1D_EVENT_TYPES = frozenset({EVENT_SCAN_MISSED_UNAVAILABLE_AGENT})
 
+DETECTOR_NUCLEI = "nuclei"
+DETECTOR_TYPES = frozenset({DETECTOR_NUCLEI})
+
+TECHNICAL_OPEN = "open"
+TECHNICAL_RESOLVED = "resolved"
+TECHNICAL_STATES = frozenset({TECHNICAL_OPEN, TECHNICAL_RESOLVED})
+
+TREATMENT_UNADDRESSED = "unaddressed"
+TREATMENT_MITIGATED = "mitigated"
+TREATMENT_ACCEPTED_RISK = "accepted_risk"
+TREATMENT_FALSE_POSITIVE = "false_positive"
+TREATMENT_STATES = frozenset(
+    {TREATMENT_UNADDRESSED, TREATMENT_MITIGATED, TREATMENT_ACCEPTED_RISK, TREATMENT_FALSE_POSITIVE}
+)
+
+HISTORY_OPENED = "opened"
+HISTORY_RESOLVED = "resolved"
+HISTORY_REOPENED = "reopened"
+HISTORY_TRANSITIONS = frozenset({HISTORY_OPENED, HISTORY_RESOLVED, HISTORY_REOPENED})
+
+EVALUATION_DETECTED = "detected"
+EVALUATION_CLEAN = "clean"
+EVALUATION_OUTCOMES = frozenset({EVALUATION_DETECTED, EVALUATION_CLEAN})
+
+EVENT_NEW_FINDING = "new_finding"
+EVENT_VULNERABILITY_RESOLVED = "vulnerability_resolved"
+EVENT_VULNERABILITY_REOPENED = "vulnerability_reopened"
+PHASE2A_EVENT_TYPES = frozenset(
+    {EVENT_NEW_FINDING, EVENT_VULNERABILITY_RESOLVED, EVENT_VULNERABILITY_REOPENED}
+)
+
+DEFAULT_FINDING_RESOLUTION_CLEAN_SCANS = 2
+
 WAN_TARGET_IP = "ip"
 WAN_TARGET_CIDR = "cidr"
 WAN_TARGET_FQDN = "fqdn"
@@ -225,6 +258,9 @@ class Tenant(Base):
     assets: Mapped[list["Asset"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     tags: Mapped[list["Tag"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     findings: Mapped[list["Finding"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    asset_findings: Mapped[list["AssetFinding"]] = relationship(
+        back_populates="tenant", cascade="all, delete-orphan"
+    )
     alerts: Mapped[list["Alert"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
     authorized_wan_targets: Mapped[list["AuthorizedWanTarget"]] = relationship(
         back_populates="tenant", cascade="all, delete-orphan"
@@ -566,11 +602,24 @@ class Device(Base):
 
 class Finding(Base):
     __tablename__ = "findings"
+    __table_args__ = (
+        UniqueConstraint("evidence_key", name="uq_findings_evidence_key"),
+        Index("ix_findings_asset_id_found_at", "asset_id", "found_at"),
+        Index("ix_findings_asset_finding_id_found_at", "asset_finding_id", "found_at"),
+        Index("ix_findings_scan_job_id_asset_finding_id", "scan_job_id", "asset_finding_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
     scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id", ondelete="SET NULL"), nullable=True)
     device_id: Mapped[int | None] = mapped_column(ForeignKey("devices.id", ondelete="SET NULL"), nullable=True)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True)
+    asset_finding_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_findings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    detector_type: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    detector_key: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    evidence_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     template_id: Mapped[str] = mapped_column(String(200), index=True)
     name: Mapped[str] = mapped_column(String(500), default="")
     severity: Mapped[str] = mapped_column(String(20), default="info", index=True)
@@ -584,6 +633,8 @@ class Finding(Base):
     tenant: Mapped["Tenant"] = relationship(back_populates="findings")
     job: Mapped["ScanJob | None"] = relationship(back_populates="findings")
     device: Mapped["Device | None"] = relationship(back_populates="findings")
+    asset: Mapped["Asset | None"] = relationship()
+    asset_finding: Mapped["AssetFinding | None"] = relationship(back_populates="evidence")
 
 
 class Alert(Base):
@@ -699,6 +750,7 @@ class Asset(Base):
         back_populates="selected_asset"
     )
     domain_events: Mapped[list["DomainEvent"]] = relationship(back_populates="asset")
+    asset_findings: Mapped[list["AssetFinding"]] = relationship(back_populates="asset")
     tags: Mapped[list["Tag"]] = relationship(secondary=tag_assets, back_populates="assets")
 
 
@@ -905,3 +957,137 @@ class DomainEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     asset: Mapped["Asset | None"] = relationship(back_populates="domain_events")
+
+
+class Vulnerability(Base):
+    __tablename__ = "vulnerabilities"
+    __table_args__ = (UniqueConstraint("canonical_key", name="uq_vulnerabilities_canonical_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    canonical_key: Mapped[str] = mapped_column(String(255), index=True)
+    cve_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    mappings: Mapped[list["VulnerabilityDetectorMapping"]] = relationship(
+        back_populates="vulnerability", cascade="all, delete-orphan"
+    )
+    asset_findings: Mapped[list["AssetFinding"]] = relationship(back_populates="vulnerability")
+
+
+class VulnerabilityDetectorMapping(Base):
+    __tablename__ = "vulnerability_detector_mappings"
+    __table_args__ = (
+        UniqueConstraint("detector_type", "detector_key", name="uq_vulnerability_detector_mappings_type_key"),
+        Index("ix_vulnerability_detector_mappings_vulnerability_id", "vulnerability_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    vulnerability_id: Mapped[int] = mapped_column(ForeignKey("vulnerabilities.id", ondelete="CASCADE"))
+    detector_type: Mapped[str] = mapped_column(String(40))
+    detector_key: Mapped[str] = mapped_column(String(200))
+    last_severity: Mapped[str] = mapped_column(String(20), default="", server_default="")
+    last_tags: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    vulnerability: Mapped["Vulnerability"] = relationship(back_populates="mappings")
+
+
+class AssetFinding(Base):
+    __tablename__ = "asset_findings"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "vulnerability_id", name="uq_asset_findings_asset_id_vulnerability_id"),
+        CheckConstraint(
+            "technical_state IN ('open', 'resolved')",
+            name="ck_asset_findings_technical_state",
+        ),
+        CheckConstraint(
+            "treatment_state IN ('unaddressed', 'mitigated', 'accepted_risk', 'false_positive')",
+            name="ck_asset_findings_treatment_state",
+        ),
+        Index("ix_asset_findings_tenant_id_technical_state", "tenant_id", "technical_state"),
+        Index("ix_asset_findings_asset_id_technical_state", "asset_id", "technical_state"),
+        Index("ix_asset_findings_vulnerability_id", "vulnerability_id"),
+        Index("ix_asset_findings_last_seen", "last_seen"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), index=True)
+    vulnerability_id: Mapped[int] = mapped_column(ForeignKey("vulnerabilities.id", ondelete="RESTRICT"), index=True)
+    technical_state: Mapped[str] = mapped_column(String(20), default=TECHNICAL_OPEN, server_default="open")
+    treatment_state: Mapped[str] = mapped_column(String(32), default=TREATMENT_UNADDRESSED, server_default="unaddressed")
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consecutive_clean_scans: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    reopened_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    tenant: Mapped["Tenant"] = relationship(back_populates="asset_findings")
+    asset: Mapped["Asset"] = relationship(back_populates="asset_findings")
+    vulnerability: Mapped["Vulnerability"] = relationship(back_populates="asset_findings")
+    evidence: Mapped[list["Finding"]] = relationship(back_populates="asset_finding")
+    history: Mapped[list["AssetFindingHistory"]] = relationship(
+        back_populates="asset_finding", cascade="all, delete-orphan"
+    )
+    evaluations: Mapped[list["AssetFindingRunEvaluation"]] = relationship(
+        back_populates="asset_finding", cascade="all, delete-orphan"
+    )
+
+
+class AssetFindingHistory(Base):
+    __tablename__ = "asset_finding_history"
+    __table_args__ = (
+        UniqueConstraint("idempotence_key", name="uq_asset_finding_history_idempotence_key"),
+        CheckConstraint(
+            "transition_type IN ('opened', 'resolved', 'reopened')",
+            name="ck_asset_finding_history_transition_type",
+        ),
+        Index("ix_asset_finding_history_asset_finding_id_occurred_at", "asset_finding_id", "occurred_at"),
+        Index("ix_asset_finding_history_tenant_id_occurred_at", "tenant_id", "occurred_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_finding_id: Mapped[int] = mapped_column(ForeignKey("asset_findings.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    transition_type: Mapped[str] = mapped_column(String(20))
+    previous_technical_state: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    new_technical_state: Mapped[str] = mapped_column(String(20))
+    scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id", ondelete="SET NULL"), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    idempotence_key: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    asset_finding: Mapped["AssetFinding"] = relationship(back_populates="history")
+
+
+class AssetFindingRunEvaluation(Base):
+    __tablename__ = "asset_finding_run_evaluations"
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_finding_id",
+            "scan_job_id",
+            name="uq_asset_finding_run_evaluations_finding_job",
+        ),
+        CheckConstraint(
+            "outcome IN ('detected', 'clean')",
+            name="ck_asset_finding_run_evaluations_outcome",
+        ),
+        Index("ix_asset_finding_run_evaluations_scan_job_id", "scan_job_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    asset_finding_id: Mapped[int] = mapped_column(ForeignKey("asset_findings.id", ondelete="CASCADE"), index=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    outcome: Mapped[str] = mapped_column(String(20))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    asset_finding: Mapped["AssetFinding"] = relationship(back_populates="evaluations")
