@@ -75,8 +75,11 @@ class CentralClient:
             json={"uuid": uuid, "nonce": nonce, "signature": signature},
         ).json()
 
-    def heartbeat(self, token: str) -> dict:
-        return self._request("POST", "/api/agent/heartbeat", headers=_auth(token)).json()
+    def heartbeat(self, token: str, runtime_inventory: dict[str, Any] | None = None) -> dict:
+        kwargs: dict[str, Any] = {"headers": _auth(token)}
+        if runtime_inventory is not None:
+            kwargs["json"] = {"runtime_inventory": runtime_inventory}
+        return self._request("POST", "/api/agent/heartbeat", **kwargs).json()
 
     def jobs(self, token: str) -> list[dict[str, Any]]:
         return self._request("GET", "/api/agent/jobs", headers=_auth(token)).json()

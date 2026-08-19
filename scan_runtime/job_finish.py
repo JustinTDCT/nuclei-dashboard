@@ -31,11 +31,6 @@ def submit_normalized(
     findings_fn: JsonFn | None,
     result: dict[str, Any],
 ) -> None:
-    if result.get("provenance") and provenance_fn is not None:
-        try:
-            provenance_fn(result["provenance"])
-        except ApiError:
-            pass
     if result.get("devices") and devices_fn is not None:
         devices_fn(result["devices"])
     for coverage in result.get("detector_coverage") or []:
@@ -67,8 +62,18 @@ def finish_pipeline_run(
         cleanup_staging(result.get("staging_dir"))
         raise
     cleanup_staging(result.get("staging_dir"))
+    provenance_error: str | None = None
+    dry_run = bool(result.get("dry_run"))
+    if provenance_fn is not None:
+        if result.get("provenance"):
+            try:
+                provenance_fn(result["provenance"])
+            except Exception as exc:
+                provenance_error = f"version provenance persistence failed: {exc}"
+        elif not dry_run and not pipeline_error:
+            provenance_error = "required version provenance was not collected"
     submit_normalized(
-        provenance_fn=provenance_fn,
+        provenance_fn=None,
         devices_fn=devices_fn,
         coverage_fn=coverage_fn,
         findings_fn=findings_fn,
@@ -76,6 +81,9 @@ def finish_pipeline_run(
     )
     if pipeline_error:
         complete(False, pipeline_error)
+        return
+    if provenance_error:
+        complete(False, provenance_error)
         return
     complete(True, None, raw_evidence=raw_evidence_declaration(result))
 

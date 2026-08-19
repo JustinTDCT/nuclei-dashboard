@@ -50,6 +50,7 @@ PROVENANCE_SCALAR_KEYS = frozenset(
         "naabu_version",
         "httpx_version",
         "nuclei_version",
+        "nuclei_templates_version",
         "nuclei_templates",
     }
 )
@@ -241,8 +242,12 @@ def _sanitize_merged_value(value: Any) -> Any:
 
 
 def merge_provenance(existing: dict[str, Any] | None, incoming: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(incoming or {})
+    legacy_templates = payload.pop("nuclei_templates", None)
+    if legacy_templates is not None and "nuclei_templates_version" not in payload:
+        payload["nuclei_templates_version"] = legacy_templates
     merged = dict(existing or {})
-    for key, value in (incoming or {}).items():
+    for key, value in payload.items():
         if is_secret_key(str(key)):
             continue
         if key in PROVENANCE_SCALAR_KEYS:

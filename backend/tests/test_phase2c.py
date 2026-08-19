@@ -15,7 +15,7 @@ from tests.test_phase2a import _finding_payload, _run_detected
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0015_raw_scan_evidence"
+PHASE3A_HEAD = "0016_scanner_runtime_inventory"
 NIST_BUNDLE = BACKEND_ROOT / "app" / "data" / "compliance" / "nist_sp_800_171_rev3.json"
 
 

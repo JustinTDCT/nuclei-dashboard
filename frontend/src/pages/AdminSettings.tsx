@@ -34,6 +34,11 @@ const empty: Settings = {
   finding_resolution_clean_scans: 2,
   vulnerability_intelligence_enabled: true,
   raw_scan_artifact_retention_days: 365,
+  approved_scanner_runtime_version: "",
+  approved_nuclei_version: "",
+  approved_nuclei_templates_version: "",
+  approved_naabu_version: "",
+  approved_httpx_version: "",
 };
 
 export function AdminSettings() {
@@ -154,6 +159,41 @@ export function AdminSettings() {
           />
           Enable vulnerability intelligence refresh
         </label>
+      </section>
+      <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-2 gap-3">
+        <div className="md:col-span-2">
+          <h2 className="font-medium">Approved scanner versions</h2>
+          <p className="text-sm text-slate-400 mt-1">
+            These are the centrally approved scanner runtime and tool versions. Changing them updates
+            match/mismatch status for Agents and reports. It does not upgrade remote Agents, rebuild
+            containers, or replace template volumes.
+          </p>
+        </div>
+        <Field
+          label="Scanner runtime"
+          value={form.approved_scanner_runtime_version ?? ""}
+          onChange={(v) => setForm({ ...form, approved_scanner_runtime_version: v })}
+        />
+        <Field
+          label="Nuclei"
+          value={form.approved_nuclei_version ?? ""}
+          onChange={(v) => setForm({ ...form, approved_nuclei_version: v })}
+        />
+        <Field
+          label="Nuclei templates"
+          value={form.approved_nuclei_templates_version ?? ""}
+          onChange={(v) => setForm({ ...form, approved_nuclei_templates_version: v })}
+        />
+        <Field
+          label="Naabu"
+          value={form.approved_naabu_version ?? ""}
+          onChange={(v) => setForm({ ...form, approved_naabu_version: v })}
+        />
+        <Field
+          label="httpx"
+          value={form.approved_httpx_version ?? ""}
+          onChange={(v) => setForm({ ...form, approved_httpx_version: v })}
+        />
       </section>
       <section className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
         <div>

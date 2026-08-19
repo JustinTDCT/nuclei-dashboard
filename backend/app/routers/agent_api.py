@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Request
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadFile, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -34,7 +34,16 @@ from app.raw_artifacts import (
     serialize_artifact,
 )
 from app.scan_snapshot import merge_provenance
+from app.scanner_versions import (
+    InventoryError,
+    VersionProvenanceError,
+    apply_agent_inventory,
+    apply_version_provenance_requirement,
+    merge_run_provenance,
+    validate_runtime_inventory,
+)
 from app.schemas import (
+    AgentHeartbeatIn,
     AgentTokenIn,
     DetectorCoverageIn,
     DeviceReport,
@@ -193,9 +202,37 @@ def current_agent(
 
 
 @router.post("/heartbeat")
-def heartbeat(request: Request, agent: Agent = Depends(current_agent), db: Session = Depends(get_db)):
+def heartbeat(
+    request: Request,
+    agent: Agent = Depends(current_agent),
+    db: Session = Depends(get_db),
+    body: AgentHeartbeatIn | None = Body(default=None),
+):
     agent.last_heartbeat = _now()
     agent.last_ip = _client_ip(request)
+    if body is not None and body.runtime_inventory is not None:
+        try:
+            inventory = validate_runtime_inventory(body.runtime_inventory)
+        except InventoryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        reported_at = _now()
+        previous = dict(agent.runtime_inventory) if isinstance(agent.runtime_inventory, dict) else None
+        changed = apply_agent_inventory(db, agent, inventory, reported_at=reported_at)
+        if changed:
+            record_audit(
+                db,
+                actor=None,
+                action="agent.runtime_inventory_change",
+                object_type="agent",
+                object_id=agent.id,
+                tenant_id=agent.tenant_id,
+                site_id=agent.site_id,
+                details={
+                    "before": previous,
+                    "after": inventory,
+                    "reported_at": reported_at.isoformat(),
+                },
+            )
     db.commit()
     return {"ok": True, "status": agent.status}
 
@@ -343,6 +380,7 @@ def complete_job(
     job = _owned_job(db, job_id, agent.uuid)
     try:
         apply_raw_evidence_declaration(db, job, ok=ok, declaration=raw_evidence)
+        apply_version_provenance_requirement(job, ok=ok)
         complete_scan_run(db, job, ok=ok, error=error)
     except FindingLifecycleError as exc:
         db.rollback()
@@ -350,6 +388,9 @@ def complete_job(
     except ArtifactError as exc:
         db.rollback()
         raise_http(exc)
+    except VersionProvenanceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     db.commit()
     return {"ok": True, "status": job.status}
 
@@ -370,7 +411,7 @@ def post_provenance(
     db: Session = Depends(get_db),
 ):
     job = _owned_job(db, job_id, agent.uuid)
-    job.runtime_provenance = merge_provenance(job.runtime_provenance, body)
+    job.runtime_provenance = merge_run_provenance(job.runtime_provenance, body)
     db.commit()
     return {"ok": True}
 

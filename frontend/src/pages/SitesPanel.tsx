@@ -3,6 +3,7 @@ import { api, download } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import { formatUtc, useTimezone } from "../timezone";
+import { versionStatusLabel } from "../versionStatus";
 import type { Agent, Network, Site } from "../types";
 import { TagEditor } from "./AssetsPanel";
 
@@ -488,7 +489,7 @@ function SiteAgents({
         </div>
       )}
       <Table
-        headers={["Name", "Status", "Online", "Last seen", ""]}
+        headers={["Name", "Status", "Online", "Runtime", "Nuclei", "Templates", "Naabu", "httpx", "Approved version status", "Last seen", ""]}
         rows={agents.map((a) => [
           <div>
             <div>{a.name}</div>
@@ -496,6 +497,12 @@ function SiteAgents({
           </div>,
           <Badge value={a.status} />,
           <Badge value={a.online ? "online" : "offline"} />,
+          a.runtime_inventory?.runtime_version || "Not reported",
+          a.runtime_inventory?.nuclei_version || "Not reported",
+          a.runtime_inventory?.nuclei_templates_version || "Not reported",
+          a.runtime_inventory?.naabu_version || "Not reported",
+          a.runtime_inventory?.httpx_version || "Not reported",
+          versionStatusLabel(a.version_status),
           formatUtc(a.last_heartbeat, site.effective_timezone),
           write ? <MoveAgent agent={a} tenantId={tenantId} currentSiteId={site.id} onChanged={onChanged} /> : "",
         ])}

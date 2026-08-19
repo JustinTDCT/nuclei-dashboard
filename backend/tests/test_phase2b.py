@@ -14,7 +14,7 @@ from tests.test_phase2a import _finding_payload, _run_detected
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0015_raw_scan_evidence"
+PHASE3A_HEAD = "0016_scanner_runtime_inventory"
 CVE = "CVE-2024-1234"
 
 

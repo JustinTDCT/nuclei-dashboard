@@ -4,7 +4,7 @@ Flags are limited to options actually supported by ProjectDiscovery CLIs:
 - naabu: -host, -p, -top-ports, -json, -silent, -rate, -c, -timeout, -retries, -exclude-hosts
 - httpx: -l, -json, -silent, -title, -tech-detect, -status-code, -cname, -web-server, -tls-grab,
          -rl, -t, -timeout, -retries
-- nuclei: -l, -jsonl, -silent, -severity, -tags, -rl, -c, -timeout, -retries
+- nuclei: -l, -jsonl, -silent, -severity, -tags, -rl, -c, -timeout, -retries, -duc
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ def build_nuclei_command(
     tags: str = "",
     intensity: dict[str, Any] | None = None,
 ) -> list[str]:
-    cmd = [binary, "-l", list_path, "-jsonl", "-silent", "-severity", severities]
+    cmd = [binary, "-l", list_path, "-jsonl", "-silent", "-severity", severities, "-duc"]
     if tags:
         cmd.extend(["-tags", tags])
     intensity = intensity or {}

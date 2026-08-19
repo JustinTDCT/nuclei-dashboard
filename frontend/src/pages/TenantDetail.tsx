@@ -6,6 +6,7 @@ import { Badge } from "../components/Badge";
 import { ControlMapping } from "../components/ControlMapping";
 import { Alerts } from "./Alerts";
 import { formatUtc, useTimezone } from "../timezone";
+import { recordedVersion, versionStatusLabel } from "../versionStatus";
 import type {
   Agent,
   AssetFinding,
@@ -265,7 +266,7 @@ function Agents({ tenantId }: { tenantId: number }) {
         </div>
       )}
       <Table
-        headers={["Name", "Site", "Status", "Online", "Host", "Last seen", ""]}
+        headers={["Name", "Site", "Status", "Online", "Host", "Runtime", "Nuclei", "Templates", "Naabu", "httpx", "Approved version status", "Last seen", ""]}
         rows={rows.map((a) => [
           <div>
             <div>{a.name}</div>
@@ -275,6 +276,12 @@ function Agents({ tenantId }: { tenantId: number }) {
           <Badge value={a.status} />,
           <Badge value={a.online ? "online" : "offline"} />,
           a.hostname || "—",
+          a.runtime_inventory?.runtime_version || "Not reported",
+          a.runtime_inventory?.nuclei_version || "Not reported",
+          a.runtime_inventory?.nuclei_templates_version || "Not reported",
+          a.runtime_inventory?.naabu_version || "Not reported",
+          a.runtime_inventory?.httpx_version || "Not reported",
+          versionStatusLabel(a.version_status),
           formatUtc(a.last_heartbeat, defaultTimezone),
           <div className="flex flex-col items-end gap-1 text-sm">
             {write && (
@@ -836,6 +843,15 @@ function Scans({ tenantId }: { tenantId: number }) {
             </button>
           </div>
           <div>Revision {selectedJob.definition_revision} · snapshot {selectedJob.snapshot_version || "legacy"}</div>
+          <div className="grid md:grid-cols-2 gap-1 text-slate-300">
+            <div>Runtime: {recordedVersion(selectedJob.runtime_provenance, "runtime_version")}</div>
+            <div>Nuclei: {recordedVersion(selectedJob.runtime_provenance, "nuclei_version")}</div>
+            <div>
+              Templates: {recordedVersion(selectedJob.runtime_provenance, "nuclei_templates_version", "nuclei_templates")}
+            </div>
+            <div>Naabu: {recordedVersion(selectedJob.runtime_provenance, "naabu_version")}</div>
+            <div>httpx: {recordedVersion(selectedJob.runtime_provenance, "httpx_version")}</div>
+          </div>
           <pre className="text-xs overflow-auto bg-slate-950 p-3 rounded max-h-80">
             {JSON.stringify(
               {

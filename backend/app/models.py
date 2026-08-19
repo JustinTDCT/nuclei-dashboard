@@ -597,6 +597,8 @@ class Agent(Base):
     container_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_ip: Mapped[str | None] = mapped_column(String(80), nullable=True)
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    runtime_inventory: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    runtime_inventory_reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approved_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)

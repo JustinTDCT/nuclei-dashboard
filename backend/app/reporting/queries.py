@@ -753,11 +753,15 @@ def treatment_rows(ctx: ReportContext, *, offset=None, limit=None):
 
 
 def _provenance(job: ScanJob, key: str) -> str:
+    from app.scanner_versions import provenance_version
+
     payload = job.runtime_provenance or {}
     snapshot = job.execution_snapshot or {}
     for source in (payload, snapshot.get("runtime_provenance") or {}, snapshot.get("tool_versions") or {}, snapshot):
-        if isinstance(source, dict) and source.get(key):
-            return str(source.get(key))
+        if isinstance(source, dict):
+            value = provenance_version(source, key)
+            if value:
+                return value
     return NOT_RECORDED
 
 
@@ -816,8 +820,10 @@ def serialize_scan_row(ctx: ReportContext, job: ScanJob, tenants: dict[int, str]
         "error": job.error or "",
         "agent": job.claimed_by or (job.claimed_agent.name if job.claimed_agent else NOT_RECORDED),
         "runtime_provenance": "recorded" if job.runtime_provenance else NOT_RECORDED,
+        "runtime_version": _provenance(job, "runtime_version"),
         "nuclei_version": _provenance(job, "nuclei_version"),
-        "nuclei_templates": _provenance(job, "nuclei_templates") if _provenance(job, "nuclei_templates") != NOT_RECORDED else _provenance(job, "nuclei_template_version"),
+        "nuclei_templates_version": _provenance(job, "nuclei_templates_version"),
+        "nuclei_templates": _provenance(job, "nuclei_templates_version"),
         "naabu_version": _provenance(job, "naabu_version"),
         "httpx_version": _provenance(job, "httpx_version"),
     }
@@ -841,7 +847,13 @@ def agent_health_query(ctx: ReportContext):
     return query.order_by(Agent.name, Agent.id)
 
 
-def serialize_agent_row(agent: Agent) -> dict[str, Any]:
+def serialize_agent_row(agent: Agent, approved: dict[str, str] | None = None) -> dict[str, Any]:
+    from app.scanner_versions import INVENTORY_FIELDS, STATUS_LABELS, agent_version_view
+
+    view = agent_version_view(agent, approved)
+    inventory = view["runtime_inventory"] or {}
+    reported = _iso(view["runtime_inventory_reported_at"]) or "Not Reported"
+    versions = {field: inventory.get(field) or "Not Reported" for field in INVENTORY_FIELDS}
     return {
         "agent_id": agent.id,
         "tenant": agent.tenant.name if agent.tenant else "",
@@ -854,17 +866,28 @@ def serialize_agent_row(agent: Agent) -> dict[str, Any]:
         "approved_at": _iso(agent.approved_at) or NOT_RECORDED,
         "hostname": agent.hostname or NOT_RECORDED,
         "container_id": agent.container_id or NOT_RECORDED,
-        "agent_version": NOT_RECORDED,
+        "agent_version": versions["runtime_version"],
+        "runtime_version": versions["runtime_version"],
+        "nuclei_version": versions["nuclei_version"],
+        "nuclei_templates_version": versions["nuclei_templates_version"],
+        "naabu_version": versions["naabu_version"],
+        "httpx_version": versions["httpx_version"],
+        "version_status": STATUS_LABELS.get(view["version_status"], view["version_status"]),
+        "runtime_inventory_reported_at": reported,
     }
 
 
 def agent_health_rows(ctx: ReportContext, *, offset=None, limit=None):
+    from app.scanner_versions import approved_versions_from_settings
+    from app.settings_store import get_settings
+
     query = agent_health_query(ctx)
     if offset is not None:
         query = query.offset(offset)
     if limit is not None:
         query = query.limit(limit)
-    return [serialize_agent_row(agent) for agent in query.all()]
+    approved = approved_versions_from_settings(get_settings(ctx.db))
+    return [serialize_agent_row(agent, approved) for agent in query.all()]
 
 
 def control_evidence_controls(ctx: ReportContext) -> list[ComplianceControl]:

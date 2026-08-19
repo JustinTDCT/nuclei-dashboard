@@ -10,6 +10,7 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
 # On the LAN host (outbound HTTPS to GitHub and {central_url}):
 #   docker compose --env-file agent.env up -d --build
 # Docker clones scan_runtime from the public repo and builds the image.
+# Scanner tool versions are pinned in scan_runtime/pinned_versions.json at image build.
 # After we push agent changes: docker compose up -d --build
 # Linux sites should keep network_mode: host so LAN subnets are reachable.
 #

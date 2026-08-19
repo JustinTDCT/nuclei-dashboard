@@ -1,7 +1,11 @@
 from datetime import date, datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from app.scanner_versions import approved_settings_defaults
+
+_APPROVED_VERSION_DEFAULTS = approved_settings_defaults()
 
 DEVICE_CLASSES = (
     "Unknown",
@@ -175,12 +179,21 @@ class AgentOut(BaseModel):
     container_id: str | None
     last_ip: str | None
     last_heartbeat: datetime | None
+    runtime_inventory: dict[str, str] | None = None
+    runtime_inventory_reported_at: datetime | None = None
+    version_status: str = "not_reported"
+    version_comparison: dict[str, Any] | None = None
     created_at: datetime
     approved_at: datetime | None
     enrollment_secret: str | None = None
     online: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class AgentHeartbeatIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    runtime_inventory: dict[str, Any] | None = None
 
 
 class ScanIn(BaseModel):
@@ -475,6 +488,11 @@ class SettingsOut(BaseModel):
     finding_resolution_clean_scans: int = 2
     vulnerability_intelligence_enabled: bool = True
     raw_scan_artifact_retention_days: int = 365
+    approved_scanner_runtime_version: str = _APPROVED_VERSION_DEFAULTS["approved_scanner_runtime_version"]
+    approved_nuclei_version: str = _APPROVED_VERSION_DEFAULTS["approved_nuclei_version"]
+    approved_nuclei_templates_version: str = _APPROVED_VERSION_DEFAULTS["approved_nuclei_templates_version"]
+    approved_naabu_version: str = _APPROVED_VERSION_DEFAULTS["approved_naabu_version"]
+    approved_httpx_version: str = _APPROVED_VERSION_DEFAULTS["approved_httpx_version"]
 
     @field_validator("finding_resolution_clean_scans")
     @classmethod
@@ -489,6 +507,25 @@ class SettingsOut(BaseModel):
         if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > 3650:
             raise ValueError("raw_scan_artifact_retention_days must be an integer from 1 to 3650")
         return value
+
+    @field_validator(
+        "approved_scanner_runtime_version",
+        "approved_nuclei_version",
+        "approved_nuclei_templates_version",
+        "approved_naabu_version",
+        "approved_httpx_version",
+        mode="before",
+    )
+    @classmethod
+    def _approved_version_string(cls, value: object) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError("approved version values must be strings")
+        text = value.strip()
+        if len(text) > 200:
+            raise ValueError("approved version values must be at most 200 characters")
+        return text
 
 
 class DisplaySettingsOut(BaseModel):

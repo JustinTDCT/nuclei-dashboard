@@ -14,20 +14,42 @@ case "$ARCH" in
     ;;
 esac
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VERSIONS_FILE="${VERSIONS_FILE:-}"
+if [ -z "$VERSIONS_FILE" ]; then
+  if [ -f "/tmp/pinned_versions.json" ]; then
+    VERSIONS_FILE="/tmp/pinned_versions.json"
+  else
+    VERSIONS_FILE="${SCRIPT_DIR}/pinned_versions.json"
+  fi
+fi
+DOWNLOADER="${DOWNLOADER:-}"
+if [ -z "$DOWNLOADER" ]; then
+  if [ -f "/tmp/pinned_download.py" ]; then
+    DOWNLOADER="/tmp/pinned_download.py"
+  else
+    DOWNLOADER="${SCRIPT_DIR}/pinned_download.py"
+  fi
+fi
+
+if [ ! -f "$VERSIONS_FILE" ]; then
+  echo "Pinned versions file not found: ${VERSIONS_FILE}" >&2
+  exit 1
+fi
+
+read_pin() {
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$VERSIONS_FILE" "$1"
+}
+
 install_pd() {
-  repo="$1"
-  bin="$2"
-  echo "Installing ${bin} (${PDARCH}) from ${repo}"
-  url=$(curl -fsSL "https://api.github.com/repos/projectdiscovery/${repo}/releases/latest" \
-    | python3 -c "import json,sys
-assets=json.load(sys.stdin).get('assets', [])
-need=f'linux_{sys.argv[1]}'
-matches=[a['browser_download_url'] for a in assets if need in a['name'] and a['name'].endswith('.zip')]
-if not matches:
-    raise SystemExit(f'no linux_{sys.argv[1]} zip for {sys.argv[2]}')
-print(matches[0])
-" "$PDARCH" "$bin")
-  curl -fsSL "$url" -o "/tmp/${bin}.zip"
+  bin="$1"
+  echo "Installing pinned ${bin} (${PDARCH})"
+  url="$(python3 "$DOWNLOADER" zip "$bin" "$PDARCH" "$VERSIONS_FILE")"
+  echo "Fetching ${url}"
+  if ! curl -fsSL "$url" -o "/tmp/${bin}.zip"; then
+    echo "Pinned ${bin} release was not found. Refusing to fall back to latest: ${url}" >&2
+    exit 1
+  fi
   unzip -o "/tmp/${bin}.zip" -d /tmp/pdout
   find /tmp/pdout -type f -name "$bin" -exec mv {} "/usr/local/bin/${bin}" \;
   chmod +x "/usr/local/bin/${bin}"
@@ -35,9 +57,50 @@ print(matches[0])
   "$bin" -version
 }
 
-install_pd nuclei nuclei
-install_pd naabu naabu
-install_pd httpx httpx
+install_templates() {
+  tag="$(read_pin nuclei_templates_version)"
+  url="$(python3 "$DOWNLOADER" templates "$VERSIONS_FILE")"
+  echo "Installing pinned nuclei-templates ${tag}"
+  echo "Fetching ${url}"
+  if ! curl -fsSL "$url" -o /tmp/nuclei-templates.tar.gz; then
+    echo "Pinned nuclei-templates release was not found. Refusing to fall back to latest: ${url}" >&2
+    exit 1
+  fi
+  mkdir -p /tmp/templates-src /opt/nuclei-templates /root/nuclei-templates
+  tar -xzf /tmp/nuclei-templates.tar.gz -C /tmp/templates-src
+  top="$(find /tmp/templates-src -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+  if [ -z "$top" ]; then
+    echo "Pinned nuclei-templates archive did not contain a directory" >&2
+    exit 1
+  fi
+  cp -a "$top"/. /opt/nuclei-templates/
+  cp -a "$top"/. /root/nuclei-templates/
+  printf '%s\n' "$tag" > /opt/nuclei-templates/.nd-templates-version
+  mkdir -p /root/.config/nuclei
+  python3 -c '
+import json, sys
+tag = sys.argv[1]
+nuclei = sys.argv[2]
+path = "/root/.config/nuclei/.templates-config.json"
+print(json.dumps({
+    "nuclei-templates-directory": "/opt/nuclei-templates",
+    "nuclei-templates-version": tag,
+    "nuclei-templates-latest-version": tag,
+    "nuclei-latest-version": nuclei,
+}, indent=2))
+' "$tag" "$(read_pin nuclei_version)" > /root/.config/nuclei/.templates-config.json
+  cat > /root/.config/nuclei/config.yaml <<'EOF'
+disable-update-check: true
+EOF
+  rm -rf /tmp/templates-src /tmp/nuclei-templates.tar.gz
+}
+
+install_pd nuclei
+install_pd naabu
+install_pd httpx
 # Python's httpx package also ships a CLI named httpx; keep the PD binary.
 cp /usr/local/bin/httpx /usr/local/bin/pd-httpx
 chmod +x /usr/local/bin/pd-httpx
+install_templates
+mkdir -p /usr/local/share
+cp "$VERSIONS_FILE" /usr/local/share/nuclei-dashboard-pinned-versions.json

@@ -20,7 +20,7 @@ PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0015_raw_scan_evidence"
+PHASE3A_HEAD = "0016_scanner_runtime_inventory"
 RUNTIME_ROOT = BACKEND_ROOT.parent / "scan_runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
@@ -492,6 +492,25 @@ def _agent_headers(agent: dict) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_agent_token(agent['uuid'], agent['id'], agent['tenant_id'])}"}
 
 
+def _post_required_versions(client: TestClient, job_id: int, headers: dict[str, str], url_prefix: str) -> dict:
+    from app.database import SessionLocal
+    from app.models import ScanJob
+    from app.scanner_versions import required_run_version_keys
+
+    db = SessionLocal()
+    try:
+        job = db.get(ScanJob, job_id)
+        keys = required_run_version_keys(job) if job is not None else []
+    finally:
+        db.close()
+    if not keys:
+        return {}
+    payload = {key: f"test-{key}" for key in keys}
+    posted = client.post(f"{url_prefix}/{job_id}/provenance", headers=headers, json=payload)
+    assert posted.status_code == 200, posted.text
+    return payload
+
+
 @requires_postgres
 def test_atomic_claim_and_new_agent_does_not_join_old_pool(reset_db):
     with _client() as client:
@@ -804,6 +823,8 @@ def test_command_builders_honor_stages_and_do_not_invent_flags():
     assert "-severity" in nuclei and "critical" in nuclei
     assert "-tags" in nuclei
     assert "-c" in nuclei
+    assert "-duc" in nuclei
+    assert "-tl" not in nuclei
 
 
 def test_custom_ports_and_fqdn_normalization():

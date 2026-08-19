@@ -64,7 +64,11 @@ curl -fsSL -o docker-compose.yml \
 docker compose --env-file agent.env up -d --build
 ```
 
-Linux sites should keep `network_mode: host` so LAN subnets are reachable. The first build downloads naabu/httpx/nuclei and takes several minutes.
+Linux sites should keep `network_mode: host` so LAN subnets are reachable. The first build downloads the pinned Naabu, httpx, Nuclei, and nuclei-templates releases and takes several minutes. Pins are in `scan_runtime/pinned_versions.json`. The build does not follow ProjectDiscovery `latest`.
+
+Admin → Settings has the centrally approved scanner versions. A mismatch in the Agent list or Agent Health report does **not** upgrade the remote Agent. Rebuild/redeploy the image on the site host (`docker compose up -d --build`) when you intend to pick up a new pin. Existing `nuclei-templates` volumes are not replaced automatically.
+
+Verify inside the agent container: `nuclei -version`, `nuclei -tv -disable-update-check`, `naabu -version`, `pd-httpx -version`. Older Agents that have not been rebuilt show **Not Reported**. Historical Scan Runs keep the versions recorded for that run.
 
 The agent stores its private key on a Docker volume. Losing that volume after approval means the agent cannot be reused — create a new agent.
 

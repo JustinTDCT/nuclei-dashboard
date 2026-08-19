@@ -8,6 +8,20 @@ from job_finish import finish_pipeline_run
 from keys import load_or_create_keypair, sign
 from runner import PipelineError, run_pipeline
 from artifact_io import cleanup_staging
+from tool_versions import collect_runtime_inventory
+
+INVENTORY_REFRESH_SECONDS = 3600
+_inventory_cache: dict | None = None
+_inventory_cached_at = 0.0
+
+
+def cached_runtime_inventory() -> dict:
+    global _inventory_cache, _inventory_cached_at
+    now = time.time()
+    if _inventory_cache is None or now - _inventory_cached_at >= INVENTORY_REFRESH_SECONDS:
+        _inventory_cache = collect_runtime_inventory()
+        _inventory_cached_at = now
+    return _inventory_cache
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -97,7 +111,7 @@ def main() -> None:
                 if not token:
                     wait(15)
                     continue
-            client.heartbeat(token)
+            client.heartbeat(token, runtime_inventory=cached_runtime_inventory())
             for job in client.jobs(token):
                 run_job(
                     client,

@@ -97,6 +97,13 @@ export interface Agent {
   container_id: string | null;
   last_ip: string | null;
   last_heartbeat: string | null;
+  runtime_inventory?: Record<string, string> | null;
+  runtime_inventory_reported_at?: string | null;
+  version_status?: string;
+  version_comparison?: {
+    overall?: string;
+    fields?: Record<string, { approved?: string | null; installed?: string | null; status?: string }>;
+  } | null;
   created_at: string;
   approved_at: string | null;
   enrollment_secret: string | null;
@@ -661,6 +668,11 @@ export interface Settings {
   finding_resolution_clean_scans?: number;
   vulnerability_intelligence_enabled?: boolean;
   raw_scan_artifact_retention_days?: number;
+  approved_scanner_runtime_version?: string;
+  approved_nuclei_version?: string;
+  approved_nuclei_templates_version?: string;
+  approved_naabu_version?: string;
+  approved_httpx_version?: string;
 }
 
 export interface IntelligenceSourceStatus {

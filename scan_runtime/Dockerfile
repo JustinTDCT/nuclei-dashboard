@@ -7,9 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     unzip \
+    tar \
     libpcap0.8 \
     && rm -rf /var/lib/apt/lists/*
 
+COPY pinned_versions.json /tmp/pinned_versions.json
+COPY pinned_download.py /tmp/pinned_download.py
 COPY install_tools.sh /tmp/install_tools.sh
 RUN chmod +x /tmp/install_tools.sh && /tmp/install_tools.sh "$TARGETARCH"
 

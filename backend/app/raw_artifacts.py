@@ -46,6 +46,7 @@ CLIENT_PROVENANCE_ALLOWLIST = frozenset(
         "naabu_version",
         "httpx_version",
         "nuclei_version",
+        "nuclei_templates_version",
         "nuclei_templates",
         "tool",
         "stage",

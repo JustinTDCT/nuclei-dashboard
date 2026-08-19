@@ -18,6 +18,7 @@ from tests.test_phase1d import (
     _heartbeat,
     _lan_scan,
     _login,
+    _post_required_versions,
     _scanner_headers,
     _wan_scan,
     _world,
@@ -30,7 +31,7 @@ PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0015_raw_scan_evidence"
+PHASE3A_HEAD = "0016_scanner_runtime_inventory"
 FROZEN = (
     "0001_baseline_current_schema.py",
     "0002_sites_networks.py",
@@ -159,12 +160,15 @@ def _upload_expected_artifacts(client, job_id: int, headers: dict, url_prefix: s
 
 def _complete(client, world, job_id: int, ok=True, error=None, raw_evidence=None):
     payload = raw_evidence
+    headers = _agent_headers(world["agent1"])
     if ok and payload is None:
-        keys = _upload_expected_artifacts(client, job_id, _agent_headers(world["agent1"]), "/api/agent/jobs")
+        keys = _upload_expected_artifacts(client, job_id, headers, "/api/agent/jobs")
         payload = {"status": "captured", "artifact_keys": keys}
+    if ok:
+        _post_required_versions(client, job_id, headers, "/api/agent/jobs")
     posted = client.post(
         f"/api/agent/jobs/{job_id}/complete",
-        headers=_agent_headers(world["agent1"]),
+        headers=headers,
         params={"ok": "true" if ok else "false", "error": error or ""},
         json=payload,
     )
@@ -829,6 +833,7 @@ def test_agent_and_central_use_same_lifecycle_and_legacy_api(reset_db):
         )
         assert findings.status_code == 200, findings.text
         keys = _upload_expected_artifacts(client, job_id, _scanner_headers(), "/api/internal/scanner/jobs")
+        _post_required_versions(client, job_id, _scanner_headers(), "/api/internal/scanner/jobs")
         done = client.post(
             f"/api/internal/scanner/jobs/{job_id}/complete",
             headers=_scanner_headers(),

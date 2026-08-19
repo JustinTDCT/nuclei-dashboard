@@ -19,6 +19,7 @@ from app.intel.sync import intelligence_status, refresh_intelligence
 from app.models import AGENT_HEALTH_SECONDS, Agent, Alert, AlertDelivery, AssetFinding, Device, ScanJob, Tenant, User
 from app.scan_intensity import DEFAULT_CAPS
 from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
+from app.scanner_versions import APPROVED_SETTING_KEYS
 from app.settings_store import get_settings, save_settings
 from app.timezones import list_iana_timezones, validate_iana_timezone
 
@@ -72,6 +73,20 @@ def write_settings(body: SettingsIn, user: User = Depends(require_admin), db: Se
                 "before": current.get("raw_scan_artifact_retention_days"),
                 "after": saved.get("raw_scan_artifact_retention_days"),
             },
+        )
+    version_changes = {
+        key: {"before": current.get(key), "after": saved.get(key)}
+        for key in APPROVED_SETTING_KEYS.values()
+        if current.get(key) != saved.get(key)
+    }
+    if version_changes:
+        record_audit(
+            db,
+            actor=user,
+            action="settings.scanner_versions_change",
+            object_type="settings",
+            object_id=None,
+            details=version_changes,
         )
     db.commit()
     return SettingsOut(**saved)

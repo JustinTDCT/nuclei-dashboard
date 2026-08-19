@@ -149,7 +149,9 @@ COLUMNS = {
         "execution_scope",
         "error",
         "agent",
+        "runtime_version",
         "nuclei_version",
+        "nuclei_templates_version",
         "nuclei_templates",
         "naabu_version",
         "httpx_version",
@@ -166,7 +168,13 @@ COLUMNS = {
         "approved_at",
         "hostname",
         "container_id",
-        "agent_version",
+        "runtime_version",
+        "nuclei_version",
+        "nuclei_templates_version",
+        "naabu_version",
+        "httpx_version",
+        "version_status",
+        "runtime_inventory_reported_at",
     ],
     "control_evidence": [
         "framework",
@@ -390,8 +398,14 @@ def _iter_rows(ctx: ReportContext, report_key: str):
             batch = agent_health_query(ctx).offset(offset).limit(200).all()
             if not batch:
                 return
+            approved = None
+            if batch:
+                from app.scanner_versions import approved_versions_from_settings
+                from app.settings_store import get_settings
+
+                approved = approved_versions_from_settings(get_settings(ctx.db))
             for agent in batch:
-                yield serialize_agent_row(agent)
+                yield serialize_agent_row(agent, approved)
             if len(batch) < 200:
                 return
             offset += 200

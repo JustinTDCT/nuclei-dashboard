@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0015_raw_scan_evidence` (after frozen `0001_baseline` through `0014_reports_auditor_access`).
+Current head revision: `0016_scanner_runtime_inventory` (after frozen `0001_baseline` through `0015_raw_scan_evidence`).
 
-`0001_baseline` through `0015_raw_scan_evidence` are immutable. Do not edit 0015; raw-evidence corrections must not add 0016 unless a schema change is actually required.
+`0001_baseline` through `0015_raw_scan_evidence` are immutable. Do not edit 0015. `0016_scanner_runtime_inventory` is the Candidate Tranche C schema for Agent runtime inventory and remains mutable until independently reviewed.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -51,6 +51,8 @@ Current head revision: `0015_raw_scan_evidence` (after frozen `0001_baseline` th
 
 `alembic downgrade` from `0015_raw_scan_evidence` is **refused when `scan_artifacts` contains rows**. Empty metadata may downgrade to 0014. Downgrade never deletes filesystem artifact bytes.
 
+`alembic downgrade` from `0016_scanner_runtime_inventory` is **refused when any Agent has `runtime_inventory` or `runtime_inventory_reported_at`**. An empty inventory (all NULL) may downgrade to 0015. Downgrade never fabricates or silently destroys recorded version evidence.
+
 ## Raw scan evidence
 
 The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`scan_artifacts`). Artifact bytes are gzip JSONL files on a dedicated Docker volume.
@@ -59,13 +61,42 @@ The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`sc
 - `RAW_ARTIFACT_MAX_BYTES` defaults to 268435456 (256 MiB). Oversized uploads are rejected; artifacts are never silently truncated.
 - Compose volume `scan-artifacts` is mounted only on the API. Remote LAN agents upload over HTTPS; they do not receive the volume.
 - Default retention is 365 days (`raw_scan_artifact_retention_days` in Admin → Settings). The value at upload time sets that artifact's `retention_expires_at`. Changing the setting does not bulk-delete existing artifacts.
-- Successful `complete?ok=true` requires an explicit raw-evidence declaration (`captured`, `dry_run`, or `none_executed`). The declaration is checked against the immutable execution snapshot: a normal scan with an unconditional scanner stage cannot claim `none_executed`, `dry_run` is accepted only when the snapshot itself is a dry-run, and `captured` must persist and declare every expected artifact for those stages (`port_discovery.naabu` / `discovery.naabu`, `fingerprint.httpx`, `vulnerability.nuclei`). A stale client that omits the declaration or only part of the required evidence is rejected and the run is not marked successful. Failed completes remain optional and may keep partial artifacts.
+- Successful `complete?ok=true` requires an explicit raw-evidence declaration (`captured`, `dry_run`, or `none_executed`). The declaration is checked against the immutable execution snapshot: a normal scan with an unconditional scanner stage cannot claim `none_executed`, `dry_run` is accepted only when the snapshot itself is a dry-run, and `captured` must persist and declare every expected artifact for those stages (`port_discovery.naabu` / `discovery.naabu`, `fingerprint.httpx`, `vulnerability.nuclei`). A successful real run must also persist the required scanner version provenance for that snapshot (`runtime_version`, plus `naabu_version` / `httpx_version` / `nuclei_version` / `nuclei_templates_version` when those stages executed). A stale client that omits the declaration, required evidence, or required versions is rejected and the run is not marked successful. Failed completes remain optional and may keep partial artifacts and partial provenance. Dry-run jobs must not fabricate Nuclei/Naabu/httpx/template execution versions.
 - Client-supplied artifact provenance is allowlisted to scalar runtime/tool/template version strings. Secret-bearing keys and nested objects are rejected.
 - Read-time expiry is enforced even before hourly cleanup. Expired artifacts are not downloadable. Missing pre-expiry bytes are `unavailable`, not `expired`.
 - Hourly cleanup deletes expired bytes, keeps the metadata row, and records `scan_artifact.retention_delete`. Normalized Assets, Observations, Findings, history, and ScanJobs are untouched.
 - Viewer access follows Tenant grants. Direct IDs for other tenants fail closed as 404. Successful downloads record `scan_artifact.download`.
 - Existing Scan Runs created before 0015 have no artifact rows because raw bytes were never retained. Do not treat that as “the scanner produced no output”.
 - Backup operators who need recoverable raw evidence after host failure must include the `scan-artifacts` volume as well as `postgres-data`.
+
+## Scanner runtime pinning and version inventory
+
+Pinned scanner build inputs live in `scan_runtime/pinned_versions.json`. The API copy `backend/app/pinned_scanner_versions.json` must match that file. Image construction downloads exact Nuclei, Naabu, ProjectDiscovery httpx, and nuclei-templates releases. It does not resolve ProjectDiscovery `releases/latest`, and a missing pin fails the build instead of falling back.
+
+The scanner runtime release ID (`runtime_version`) is a scanner-image identifier, not the overall application version. Ordinary Nuclei scans pass `-duc` so template releases do not change during a job. Fresh images bake templates under `/opt/nuclei-templates`. Existing `nuclei-templates` volumes are not deleted or rewritten by this upgrade; they may show mismatch until an operator rebuilds/redeploys the agent image.
+
+Admin → Settings holds the centrally approved versions. Changing those values updates match/mismatch status only. It does not upgrade Agents, rebuild containers, replace template volumes, or start a remote deployment. Auto-update remains deferred.
+
+Agents report current installed inventory on authenticated heartbeat (`runtime_version`, `nuclei_version`, `nuclei_templates_version`, `naabu_version`, `httpx_version`). Pre-Tranche-C Agents stay usable and display **Not Reported** until they run a Tranche-C image. Derived comparison is computed at read time from current inventory plus current approved settings; it is not stored on the Agent row.
+
+`ScanJob.runtime_provenance` is historical evidence for that run. Never infer it from the Agent's current inventory. Pre-Tranche-C Scan Runs display **Not Recorded**.
+
+Verify installed tools inside a scanner/agent container:
+
+```bash
+nuclei -version
+nuclei -tv -disable-update-check
+naabu -version
+pd-httpx -version
+```
+
+Rebuild a site agent after pin changes (or after pulling this repo) with the existing technician workflow:
+
+```bash
+docker compose up -d --build
+```
+
+Do not delete `postgres-data`, `scan-artifacts`, or existing `nuclei-templates` volumes as part of a normal upgrade.
 
 ### Fresh install
 

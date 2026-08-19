@@ -28,6 +28,12 @@ from commands import (
     job_stages,
     job_targets,
 )
+from tool_versions import (
+    VersionCollectionError,
+    collect_run_provenance,
+    collect_runtime_inventory,
+    collect_tool_versions,
+)
 from enrich import enrich_identities, usable_hostname
 
 LogFn = Callable[[str], None]
@@ -149,9 +155,9 @@ def dry_run(cidrs: list[str], scope: str, profile: str) -> dict[str, Any]:
         "findings": findings,
         "artifacts": [],
         "staging_dir": None,
-        "provenance": {},
         "detector_coverage": [],
         "dry_run": True,
+        "provenance": collect_run_provenance(used_tools=set(), dry_run=True, log=None),
     }
 
 
@@ -246,7 +252,19 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
         _log(f"Hostnames resolved on agent: {named}/{len(devices)}", log)
         if stages.get("vulnerability"):
             coverage.append({"detector_type": "nuclei", "targets": nuclei_targets})
-        provenance = collect_tool_versions(log=log)
+        used_tools = {str(row.get("tool") or "") for row in artifacts if row.get("tool")}
+        try:
+            provenance = collect_run_provenance(used_tools=used_tools, dry_run=False, log=log)
+        except VersionCollectionError as exc:
+            raise PipelineError(
+                str(exc),
+                artifacts=artifacts,
+                staging_dir=str(staging_dir) if artifacts else None,
+                devices=devices,
+                findings=findings,
+                provenance={},
+                detector_coverage=coverage,
+            ) from exc
         if not artifacts:
             shutil.rmtree(staging_dir, ignore_errors=True)
             staging_out = None
@@ -263,7 +281,11 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
     except PipelineError:
         raise
     except Exception as exc:
-        provenance = collect_tool_versions(log=log)
+        used_tools = {str(row.get("tool") or "") for row in artifacts if row.get("tool")}
+        try:
+            provenance = collect_run_provenance(used_tools=used_tools, dry_run=False, log=log)
+        except VersionCollectionError:
+            provenance = collect_runtime_inventory(log=log)
         if not artifacts:
             shutil.rmtree(staging_dir, ignore_errors=True)
             staging_out = None
@@ -367,43 +389,6 @@ def _exclusion_hosts(job: dict[str, Any]) -> list[str]:
         if kind == "ip" and value:
             hosts.append(value)
     return hosts
-
-
-def collect_tool_versions(log: LogFn | None = None) -> dict[str, Any]:
-    versions = {
-        "runtime_version": os.environ.get("SCAN_RUNTIME_VERSION") or None,
-        "naabu_version": _tool_version("naabu"),
-        "httpx_version": _tool_version(_pd_httpx() or "httpx"),
-        "nuclei_version": _tool_version("nuclei"),
-        "nuclei_templates": _nuclei_template_version(),
-    }
-    return {key: value for key, value in versions.items() if value}
-
-
-def _tool_version(name: str | None) -> str | None:
-    if not name:
-        return None
-    binary = name if os.path.isabs(name) else _which(name)
-    if not binary:
-        return None
-    proc = subprocess.run([binary, "-version"], capture_output=True, text=True)
-    text = (proc.stdout or proc.stderr or "").strip()
-    if not text:
-        return None
-    return text.splitlines()[0][:200]
-
-
-def _nuclei_template_version() -> str | None:
-    binary = _which("nuclei")
-    if not binary:
-        return None
-    proc = subprocess.run([binary, "-tl", "-silent"], capture_output=True, text=True)
-    # Do not invent a template commit. Only record a path hint when nuclei reports one.
-    combined = f"{proc.stdout}\n{proc.stderr}"
-    for line in combined.splitlines():
-        if "templates" in line.lower() and any(token in line.lower() for token in ("version", "commit", "release")):
-            return line.strip()[:200]
-    return None
 
 
 def run_naabu(

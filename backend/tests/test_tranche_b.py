@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import inspect as sa_inspect
 
 from tests.conftest import requires_postgres
-from tests.test_migrations import FROZEN_MIGRATION_HASHES, PHASE3C_HEAD, TRANCHE_B_HEAD
+from tests.test_migrations import FROZEN_MIGRATION_HASHES, PHASE3C_HEAD, TRANCHE_B_HEAD, TRANCHE_C_HEAD
 from tests.test_phase1d import (
     _agent_headers,
     _client,
@@ -26,6 +26,7 @@ from tests.test_phase1d import (
     _heartbeat,
     _lan_scan,
     _login,
+    _post_required_versions,
     _scanner_headers,
     _wan_scan,
     _world,
@@ -195,7 +196,7 @@ def test_0014_frozen_and_0015_is_head(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == TRANCHE_B_HEAD
+    assert revision == head_revision() == current_revision() == TRANCHE_C_HEAD
     assert hashlib.sha256(MIGRATION_0014.read_bytes()).hexdigest() == PHASE3C_SHA256
     assert FROZEN_MIGRATION_HASHES["0014_reports_auditor_access.py"] == PHASE3C_SHA256
     blob = __import__("subprocess").check_output(["git", "hash-object", str(MIGRATION_0014)], cwd=REPO_ROOT, text=True).strip()
@@ -598,6 +599,7 @@ def test_retention_setting_and_cleanup_leaves_normalized_data(reset_db, tmp_path
             headers=_agent_headers(agent),
             json=[{"ip": "10.1.0.8", "scope": "lan", "hostname": "keep-me", "ports": [80]}],
         )
+        _post_required_versions(client, job_id, _agent_headers(agent), "/api/agent/jobs")
         client.post(
             f"/api/agent/jobs/{job_id}/complete",
             headers=_agent_headers(agent),
@@ -682,7 +684,22 @@ def test_pipeline_captures_native_output_and_cleans_temp(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_runner, "_which", which)
     monkeypatch.setattr(runtime_runner, "_pd_httpx", lambda: str(bins / "httpx"))
     monkeypatch.setattr(runtime_runner, "_is_pd_httpx", lambda path: True)
-    monkeypatch.setattr(runtime_runner, "collect_tool_versions", lambda log=None: {"nuclei_version": "test"})
+
+    def fake_provenance(*, used_tools=None, dry_run=False, log=None):
+        if dry_run:
+            return {"runtime_version": "nd-scan-runtime-1"}
+        payload = {"runtime_version": "nd-scan-runtime-1"}
+        tools = {str(item).lower() for item in (used_tools or set())}
+        if "naabu" in tools:
+            payload["naabu_version"] = "v2.6.1"
+        if "httpx" in tools:
+            payload["httpx_version"] = "v1.10.0"
+        if "nuclei" in tools:
+            payload["nuclei_version"] = "v3.11.1"
+            payload["nuclei_templates_version"] = "v10.4.7"
+        return payload
+
+    monkeypatch.setattr(runtime_runner, "collect_run_provenance", fake_provenance)
 
     job = {
         "scope": "lan",
@@ -732,6 +749,10 @@ def test_pipeline_captures_native_output_and_cleans_temp(tmp_path, monkeypatch):
     assert dry["artifacts"] == []
     assert dry["dry_run"] is True
     assert dry["findings"]
+    assert dry["provenance"] == {"runtime_version": "nd-scan-runtime-1"}
+    assert "nuclei_version" not in dry["provenance"]
+    assert "naabu_version" not in dry["provenance"]
+    assert "httpx_version" not in dry["provenance"]
 
 
 @requires_postgres
@@ -891,6 +912,7 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
         assert partial.status_code == 409
         keys = _expected_artifact_keys(job_id)
         _upload_keys(client, f"/api/agent/jobs/{job_id}/artifacts", headers, gz, [key for key in keys if key != "port_discovery.naabu"])
+        _post_required_versions(client, job_id, headers, "/api/agent/jobs")
         captured = client.post(
             f"/api/agent/jobs/{job_id}/complete",
             headers=headers,
@@ -948,6 +970,7 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
             db.commit()
         finally:
             db.close()
+        _post_required_versions(client, none_job, _agent_headers(none_agent), "/api/agent/jobs")
         none = client.post(
             f"/api/agent/jobs/{none_job}/complete",
             headers=_agent_headers(none_agent),
@@ -1017,6 +1040,7 @@ def test_captured_complete_requires_all_snapshot_artifacts(reset_db, tmp_path, m
         finally:
             db.close()
         _upload_keys(client, url, headers, gz, ["fingerprint.httpx"])
+        _post_required_versions(client, job_id, headers, "/api/agent/jobs")
         complete = client.post(
             f"/api/agent/jobs/{job_id}/complete",
             headers=headers,
@@ -1054,6 +1078,7 @@ def test_captured_complete_requires_all_snapshot_artifacts(reset_db, tmp_path, m
         )
         assert wan_incomplete.status_code == 409
         _upload_keys(client, wan_url, wan_headers, gz, ["fingerprint.httpx"])
+        _post_required_versions(client, wan_id, wan_headers, "/api/internal/scanner/jobs")
         wan_ok = client.post(
             f"/api/internal/scanner/jobs/{wan_id}/complete",
             headers=wan_headers,

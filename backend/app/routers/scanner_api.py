@@ -22,6 +22,7 @@ from app.raw_artifacts import (
     serialize_artifact,
 )
 from app.scan_snapshot import merge_provenance
+from app.scanner_versions import VersionProvenanceError, apply_version_provenance_requirement, merge_run_provenance
 from app.schemas import DetectorCoverageIn, DeviceReport, FindingReport, RawEvidenceDeclaration, ScanArtifactOut
 
 router = APIRouter(prefix="/internal/scanner", tags=["scanner"])
@@ -151,6 +152,7 @@ def complete_job(
     job = _owned(db, job_id)
     try:
         apply_raw_evidence_declaration(db, job, ok=ok, declaration=raw_evidence)
+        apply_version_provenance_requirement(job, ok=ok)
         complete_scan_run(db, job, ok=ok, error=error)
     except FindingLifecycleError as exc:
         db.rollback()
@@ -158,6 +160,9 @@ def complete_job(
     except ArtifactError as exc:
         db.rollback()
         raise_http(exc)
+    except VersionProvenanceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     db.commit()
     return {"ok": True, "status": job.status}
 
@@ -170,7 +175,7 @@ def post_provenance(
     db: Session = Depends(get_db),
 ):
     job = _owned(db, job_id)
-    job.runtime_provenance = merge_provenance(job.runtime_provenance, body)
+    job.runtime_provenance = merge_run_provenance(job.runtime_provenance, body)
     db.commit()
     return {"ok": True}
 
