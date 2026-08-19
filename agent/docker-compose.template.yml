@@ -1,5 +1,6 @@
 # Reference only. Prefer agent/docker-compose.yml plus a downloaded .env,
 # or the per-agent compose file from the dashboard.
+# Rebuild the image after control-plane changes on main. A restart is not enough.
 
 services:
   nuclei-agent:

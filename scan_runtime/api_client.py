@@ -35,23 +35,27 @@ def _tls_verify() -> bool | str:
     return value
 
 
-class CentralClient:
-    def __init__(self, base_url: str, timeout: float = 30.0):
+class _PooledClient:
+    def __init__(self, base_url: str, timeout: float = 30.0, **client_kwargs: Any):
         self.base = base_url.rstrip("/")
         self.timeout = timeout
+        self._http = httpx.Client(base_url=self.base, timeout=timeout, verify=_tls_verify(), **client_kwargs)
+
+    def close(self) -> None:
+        self._http.close()
 
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        url = f"{self.base}{path}"
-        kwargs.setdefault("verify", _tls_verify())
         timeout = kwargs.pop("timeout", self.timeout)
         try:
-            response = httpx.request(method, url, timeout=timeout, **kwargs)
+            response = self._http.request(method, path, timeout=timeout, **kwargs)
         except httpx.HTTPError as exc:
             raise ApiError(str(exc)) from exc
         if response.status_code >= 400:
             raise ApiError(f"{method} {path} -> {response.status_code} {response.text}")
         return response
 
+
+class CentralClient(_PooledClient):
     def enroll(self, uuid: str, secret: str, public_key: str, hostname: str, container_id: str) -> dict:
         return self._request(
             "POST",
@@ -75,10 +79,23 @@ class CentralClient:
             json={"uuid": uuid, "nonce": nonce, "signature": signature},
         ).json()
 
-    def heartbeat(self, token: str, runtime_inventory: dict[str, Any] | None = None) -> dict:
-        kwargs: dict[str, Any] = {"headers": _auth(token)}
+    def heartbeat(
+        self,
+        token: str,
+        runtime_inventory: dict[str, Any] | None = None,
+        job_id: int | None = None,
+        activity: str | None = None,
+    ) -> dict:
+        body: dict[str, Any] = {}
         if runtime_inventory is not None:
-            kwargs["json"] = {"runtime_inventory": runtime_inventory}
+            body["runtime_inventory"] = runtime_inventory
+        if job_id is not None:
+            body["job_id"] = job_id
+        if activity is not None:
+            body["activity"] = activity
+        kwargs: dict[str, Any] = {"headers": _auth(token)}
+        if body:
+            kwargs["json"] = body
         return self._request("POST", "/api/agent/heartbeat", **kwargs).json()
 
     def jobs(self, token: str) -> list[dict[str, Any]]:
@@ -106,9 +123,7 @@ class CentralClient:
         ).json()
 
     def provenance(self, token: str, job_id: int, payload: dict[str, Any]) -> dict:
-        return self._request(
-            "POST", f"/api/agent/jobs/{job_id}/provenance", headers=_auth(token), json=payload
-        ).json()
+        return self._request("POST", f"/api/agent/jobs/{job_id}/provenance", headers=_auth(token), json=payload).json()
 
     def complete(
         self,
@@ -135,26 +150,17 @@ class CentralClient:
         )
 
 
-class ScannerClient:
+class ScannerClient(_PooledClient):
     def __init__(self, base_url: str, token: str, timeout: float = 30.0):
-        self.base = base_url.rstrip("/")
+        super().__init__(base_url, timeout=timeout)
         self.token = token
-        self.timeout = timeout
 
     def _headers(self) -> dict[str, str]:
         return {"X-Scanner-Token": self.token}
 
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
-        url = f"{self.base}{path}"
         headers = {**self._headers(), **(kwargs.pop("headers", {}) or {})}
-        timeout = kwargs.pop("timeout", self.timeout)
-        try:
-            response = httpx.request(method, url, timeout=timeout, headers=headers, **kwargs)
-        except httpx.HTTPError as exc:
-            raise ApiError(str(exc)) from exc
-        if response.status_code >= 400:
-            raise ApiError(f"{method} {path} -> {response.status_code} {response.text}")
-        return response
+        return super()._request(method, path, headers=headers, **kwargs)
 
     def jobs(self) -> list[dict[str, Any]]:
         return self._request("GET", "/api/internal/scanner/jobs").json()

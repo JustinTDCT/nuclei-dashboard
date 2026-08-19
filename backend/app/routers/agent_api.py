@@ -22,8 +22,14 @@ from app.models import (
     Network,
     ScanJob,
 )
-from app.scan_dispatch import agent_may_claim_now, atomic_claim_job, is_agent_healthy
-from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
+from app.scan_dispatch import (
+    agent_has_running_job,
+    agent_may_claim_now,
+    atomic_claim_job,
+    is_agent_healthy,
+    queued_lan_jobs_for_agent,
+)
+from app.scan_execution import require_active_phase1d_run, run_scope
 from app.scan_security import ExecutionBlocked, revalidate_lan_claim
 from app.raw_artifacts import (
     ArtifactError,
@@ -239,17 +245,9 @@ def heartbeat(
 
 @router.get("/jobs")
 def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_db)):
-    jobs = (
-        db.query(ScanJob)
-        .filter(
-            ScanJob.status.in_((JOB_QUEUED, JOB_WAITING_FOR_AGENT)),
-            ScanJob.execution_snapshot.isnot(None),
-            snapshot_scope_clause("lan"),
-        )
-        .order_by(ScanJob.created_at.asc())
-        .limit(25)
-        .all()
-    )
+    if agent_has_running_job(db, agent):
+        return []
+    jobs = queued_lan_jobs_for_agent(db, agent, limit=25)
     payloads = []
     for job in jobs:
         if not _agent_in_job_pool(job, agent):
@@ -287,6 +285,8 @@ def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = 
         raise HTTPException(status_code=404, detail="Job not available") from None
     if job.status not in {JOB_QUEUED, JOB_WAITING_FOR_AGENT}:
         raise HTTPException(status_code=404, detail="Job not available")
+    if agent_has_running_job(db, agent):
+        raise HTTPException(status_code=409, detail="Agent already has a running job")
     if not _agent_in_job_pool(job, agent):
         raise HTTPException(status_code=404, detail="Job not available")
     try:

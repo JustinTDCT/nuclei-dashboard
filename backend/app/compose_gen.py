@@ -12,6 +12,8 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
 # Docker clones scan_runtime from the public repo and builds the image.
 # Scanner tool versions are pinned in scan_runtime/pinned_versions.json at image build.
 # After we push agent changes: docker compose up -d --build
+# This image includes an independent heartbeat/control loop. Rebuild after
+# control-plane changes; a container restart is not enough.
 # Linux sites should keep network_mode: host so LAN subnets are reachable.
 #
 # TLS verification is on by default (TLS_VERIFY=1).

@@ -68,7 +68,9 @@ services:
     restart: unless-stopped
 
   # LAN site agent. Not started by default.
-  # On the LAN host: sudo docker compose --profile lan-agent up -d nuclei-agent
+  # On the LAN host: sudo docker compose --profile lan-agent up -d --build nuclei-agent
+  # The Agent image includes an independent heartbeat/control loop. Rebuild
+  # this image after scan_runtime control-plane changes.
   nuclei-agent:
     profiles: ["lan-agent"]
     image: nuclei-dashboard-agent:latest

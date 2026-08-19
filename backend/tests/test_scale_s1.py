@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import sys
+import time
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from threading import Thread
+from unittest.mock import MagicMock, patch
+
+import httpx
+
+from tests.conftest import requires_postgres
+from tests.test_phase1d import _agent_headers, _client, _headers, _heartbeat, _lan_scan, _login, _world
+from tests.test_tranche_b import _named_world
+
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_ROOT = BACKEND_ROOT.parent / "scan_runtime"
+if str(RUNTIME_ROOT) not in sys.path:
+    sys.path.insert(0, str(RUNTIME_ROOT))
+
+
+def test_central_and_scanner_clients_reuse_httpx_client():
+    from api_client import CentralClient, ScannerClient
+
+    agent = CentralClient("http://api.example:8000")
+    scanner = ScannerClient("http://api.example:8000", "scanner-token")
+    try:
+        assert isinstance(agent._http, httpx.Client)
+        assert isinstance(scanner._http, httpx.Client)
+        first_agent = agent._http
+        first_scanner = scanner._http
+        agent._http.request = MagicMock(
+            return_value=httpx.Response(200, json={"ok": True, "status": "approved"})
+        )
+        scanner._http.request = MagicMock(return_value=httpx.Response(200, json=[]))
+        agent.heartbeat("tok")
+        agent.jobs("tok")
+        scanner.jobs()
+        assert agent._http is first_agent
+        assert scanner._http is first_scanner
+        assert agent._http.request.call_count == 2
+        assert scanner._http.request.call_count == 1
+    finally:
+        agent.close()
+        scanner.close()
+
+
+def test_real_client_uses_pooled_request(tmp_path):
+    from api_client import ARTIFACT_UPLOAD_TIMEOUT, CentralClient, ScannerClient
+
+    artifact_path = tmp_path / "port_discovery.naabu.jsonl.gz"
+    artifact_path.write_bytes(b"gz-bytes")
+    artifact = {
+        "path": str(artifact_path),
+        "artifact_key": "port_discovery.naabu",
+        "stage": "port_discovery",
+        "tool": "naabu",
+        "provenance": {"naabu_version": "2.3.0"},
+    }
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"id":1}'
+
+        def json(self):
+            return {"id": 1, "artifact_key": "port_discovery.naabu"}
+
+    def fake_request(self, method, url, **kwargs):
+        calls.append({"method": method, "url": str(url), "kwargs": kwargs})
+        return FakeResponse()
+
+    with patch.object(httpx.Client, "request", fake_request):
+        CentralClient("http://api.example:8000").upload_artifact("agent-token", 9, artifact)
+        ScannerClient("http://api.example:8000", "scanner-token").upload_artifact(9, artifact)
+
+    assert len(calls) == 2
+    assert str(calls[0]["url"]).endswith("/api/agent/jobs/9/artifacts")
+    assert str(calls[1]["url"]).endswith("/api/internal/scanner/jobs/9/artifacts")
+    for call in calls:
+        assert call["kwargs"]["timeout"] == ARTIFACT_UPLOAD_TIMEOUT
+        assert "files" in call["kwargs"]
+
+
+def test_inventory_sent_on_startup_change_and_period_only(monkeypatch):
+    import agent_main
+
+    monkeypatch.setattr(agent_main, "_inventory_cache", {"nuclei_version": "v1"})
+    monkeypatch.setattr(agent_main, "_inventory_cached_at", time.time())
+    monkeypatch.setattr(agent_main, "_last_sent_inventory", None)
+    monkeypatch.setattr(agent_main, "_last_inventory_sent_at", 0.0)
+    first = agent_main.inventory_for_heartbeat(now=10.0)
+    assert first == {"nuclei_version": "v1"}
+    assert agent_main.inventory_for_heartbeat(now=20.0) is None
+    monkeypatch.setattr(agent_main, "_inventory_cache", {"nuclei_version": "v2"})
+    changed = agent_main.inventory_for_heartbeat(now=30.0)
+    assert changed == {"nuclei_version": "v2"}
+    assert agent_main.inventory_for_heartbeat(now=40.0) is None
+    periodic = agent_main.inventory_for_heartbeat(now=40.0 + agent_main.INVENTORY_REFRESH_SECONDS)
+    assert periodic == {"nuclei_version": "v2"}
+
+
+def test_control_loop_heartbeats_while_one_job_runs():
+    import agent_main
+
+    heartbeats: list[dict] = []
+    job_polls = []
+
+    class FakeClient:
+        def heartbeat(self, token, runtime_inventory=None, job_id=None, activity=None):
+            heartbeats.append({"job_id": job_id, "activity": activity, "inventory": runtime_inventory})
+            return {"ok": True}
+
+        def jobs(self, token):
+            job_polls.append(time.time())
+            if len(job_polls) == 1:
+                return [{"job_id": 7}]
+            return []
+
+    def fake_run_job(client, token, job, refresh_token):
+        time.sleep(0.7)
+
+    runtime = agent_main.AgentRuntime(
+        FakeClient(),
+        "agent-uuid",
+        "secret",
+        "pub",
+        object(),
+        interval=0.12,
+        jitter=0.0,
+        run_job_fn=fake_run_job,
+        authenticate_fn=lambda *args, **kwargs: "tok",
+        inventory_fn=lambda force=False: None,
+    )
+    thread = Thread(target=lambda: runtime.run(max_cycles=10), daemon=True)
+    thread.start()
+    deadline = time.time() + 4.0
+    while time.time() < deadline and not any(row.get("job_id") == 7 for row in heartbeats):
+        time.sleep(0.05)
+    time.sleep(0.45)
+    during = [row for row in heartbeats if row.get("job_id") == 7]
+    runtime.stop()
+    thread.join(timeout=3)
+    assert len(during) >= 2
+    assert all(row.get("activity") == "scanning" for row in during)
+
+
+def test_run_command_emits_bounded_progress(tmp_path, monkeypatch):
+    import artifact_io
+
+    monkeypatch.setattr(artifact_io, "PROGRESS_INTERVAL_SECONDS", 0.2)
+    monkeypatch.setattr(artifact_io, "MAX_PROGRESS_LOGS", 3)
+    logs: list[str] = []
+    dest = tmp_path / "out.bin"
+    artifact_io.run_command_to_file(["sleep", "0.65"], dest, log=logs.append)
+    progress = [line for line in logs if "still running" in line]
+    assert 1 <= len(progress) <= 3
+    assert any("bytes written" in line for line in progress)
+
+
+def test_jittered_interval_stays_within_bounds():
+    import agent_main
+
+    samples = {agent_main.jittered_interval(15.0, 5.0) for _ in range(40)}
+    assert all(15.0 <= value <= 20.0 for value in samples)
+    assert len(samples) > 1
+
+
+@requires_postgres
+def test_agent_job_poll_does_not_starve_behind_ineligible_queue(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world_a = _named_world(client, token, "Starve-A")
+        world_b = _named_world(client, token, "Starve-B")
+        scan_a = _lan_scan(client, token, world_a, name="A-scan")
+        first = client.post(f"/api/scans/{scan_a['id']}/run", headers=_headers(token))
+        assert first.status_code == 200, first.text
+        scan_b = _lan_scan(client, token, world_b, name="B-scan")
+        later = client.post(f"/api/scans/{scan_b['id']}/run", headers=_headers(token))
+        assert later.status_code == 200, later.text
+        later_id = later.json()["id"]
+
+        from app.database import SessionLocal
+        from app.models import JOB_QUEUED, ScanJob
+
+        db = SessionLocal()
+        try:
+            template = db.get(ScanJob, first.json()["id"])
+            assert template is not None
+            created = datetime.now(timezone.utc) - timedelta(hours=1)
+            for index in range(29):
+                clone = ScanJob(
+                    scan_id=template.scan_id,
+                    tenant_id=template.tenant_id,
+                    status=JOB_QUEUED,
+                    execution_snapshot=deepcopy(template.execution_snapshot),
+                    snapshot_version=template.snapshot_version,
+                    definition_revision=template.definition_revision,
+                    trigger_type=template.trigger_type,
+                    created_at=created + timedelta(seconds=index),
+                    runtime_provenance=deepcopy(template.runtime_provenance),
+                )
+                db.add(clone)
+            later_job = db.get(ScanJob, later_id)
+            later_job.created_at = datetime.now(timezone.utc)
+            db.commit()
+            queued_a = (
+                db.query(ScanJob)
+                .filter(ScanJob.tenant_id == world_a["tenant"]["id"], ScanJob.status == JOB_QUEUED)
+                .count()
+            )
+            assert queued_a >= 26
+        finally:
+            db.close()
+
+        _heartbeat(world_b["agent1"]["id"])
+        polled = client.get("/api/agent/jobs", headers=_agent_headers(world_b["agent1"]))
+        assert polled.status_code == 200, polled.text
+        ids = [row["job_id"] for row in polled.json()]
+        assert later_id in ids
+        assert all(job_id == later_id for job_id in ids)
+
+
+@requires_postgres
+def test_busy_agent_does_not_receive_additional_jobs(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        first_scan = _lan_scan(client, token, world, name="First")
+        first = client.post(f"/api/scans/{first_scan['id']}/run", headers=_headers(token))
+        assert first.status_code == 200, first.text
+        first_id = first.json()["id"]
+        _heartbeat(world["agent1"]["id"])
+        started = client.post(f"/api/agent/jobs/{first_id}/start", headers=_agent_headers(world["agent1"]))
+        assert started.status_code == 200, started.text
+
+        second_scan = _lan_scan(client, token, world, name="Second")
+        second = client.post(f"/api/scans/{second_scan['id']}/run", headers=_headers(token))
+        assert second.status_code == 200, second.text
+        polled = client.get("/api/agent/jobs", headers=_agent_headers(world["agent1"]))
+        assert polled.status_code == 200, polled.text
+        assert polled.json() == []
+        blocked = client.post(
+            f"/api/agent/jobs/{second.json()['id']}/start",
+            headers=_agent_headers(world["agent1"]),
+        )
+        assert blocked.status_code == 409
+
+
+@requires_postgres
+def test_lightweight_heartbeat_keeps_agent_healthy_without_inventory(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        agent = world["agent1"]
+        _heartbeat(agent["id"])
+        headers = _agent_headers(agent)
+        empty = client.post("/api/agent/heartbeat", headers=headers)
+        assert empty.status_code == 200, empty.text
+        scanning = client.post(
+            "/api/agent/heartbeat",
+            headers=headers,
+            json={"job_id": 42, "activity": "scanning"},
+        )
+        assert scanning.status_code == 200, scanning.text
+        listed = client.get(f"/api/agents/{agent['id']}", headers=_headers(token)).json()
+        assert listed["online"] is True
+        assert listed["runtime_inventory"] is None
+        assert listed["last_heartbeat"]

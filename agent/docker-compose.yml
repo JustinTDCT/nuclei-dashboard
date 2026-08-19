@@ -4,6 +4,8 @@
 #
 # Docker clones scan_runtime from this public repo and builds the image.
 # Rebuild after we push agent changes: docker compose up -d --build
+# This image includes an independent heartbeat/control loop. A container
+# restart is not enough after a control-plane change — rebuild the image.
 # Linux sites should keep network_mode: host so LAN subnets are reachable.
 #
 # TLS verification is on by default. For an internal CA:

@@ -194,6 +194,8 @@ class AgentOut(BaseModel):
 class AgentHeartbeatIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     runtime_inventory: dict[str, Any] | None = None
+    job_id: int | None = None
+    activity: str | None = None
 
 
 class ScanIn(BaseModel):

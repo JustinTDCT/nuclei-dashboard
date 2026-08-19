@@ -116,10 +116,12 @@ def _execute_stage(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_path = staging_dir / f"{artifact_key}.jsonl"
     gz_path = staging_dir / f"{artifact_key}.jsonl.gz"
+    _log(f"Starting {stage} ({tool})", log)
     run_command_to_file(cmd, raw_path, log)
     rows = parse_jsonl_file(raw_path)
     stream_gzip(raw_path, gz_path)
     raw_path.unlink(missing_ok=True)
+    _log(f"Finished {stage}: {len(rows)} records", log)
     return rows, artifact_meta(artifact_key=artifact_key, stage=stage, tool=tool, gz_path=gz_path)
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import update
+from sqlalchemy import and_, or_, update
 from sqlalchemy.orm import Session
 
 from app.locality import authorized_agent_ids
@@ -22,6 +22,7 @@ from app.models import (
     JOB_WAITING_FOR_AGENT,
     Agent,
     Network,
+    Scan,
     ScanJob,
 )
 from app.settings_store import get_settings
@@ -169,6 +170,40 @@ def agent_may_claim_now(
         available_from = current
     available_from = _aware(available_from) or current
     return current >= available_from + timedelta(seconds=grace)
+
+
+def agent_has_running_job(db: Session, agent: Agent) -> bool:
+    return (
+        db.query(ScanJob.id)
+        .filter(ScanJob.claimed_agent_id == agent.id, ScanJob.status == JOB_RUNNING)
+        .first()
+        is not None
+    )
+
+
+def queued_lan_jobs_for_agent(db: Session, agent: Agent, *, limit: int = 25) -> list[ScanJob]:
+    """Return queued LAN jobs this Agent is snapshot-eligible for.
+
+    Eligibility is applied in SQL so an Agent cannot starve behind a
+    window of older jobs that belong to other Sites or Agent pools.
+    """
+    from app.scan_execution import snapshot_scope_clause
+
+    eligible = ScanJob.execution_snapshot.contains({"dispatch": {"eligible_agent_ids": [agent.id]}})
+    missing_eligible = ScanJob.execution_snapshot["dispatch"]["eligible_agent_ids"].is_(None)
+    return (
+        db.query(ScanJob)
+        .outerjoin(Scan, Scan.id == ScanJob.scan_id)
+        .filter(
+            ScanJob.status.in_((JOB_QUEUED, JOB_WAITING_FOR_AGENT)),
+            ScanJob.execution_snapshot.isnot(None),
+            snapshot_scope_clause("lan"),
+            or_(eligible, and_(missing_eligible, Scan.agent_id == agent.id)),
+        )
+        .order_by(ScanJob.created_at.asc(), ScanJob.id.asc())
+        .limit(limit)
+        .all()
+    )
 
 
 def atomic_claim_job(db: Session, job_id: int, agent: Agent, *, now: datetime | None = None) -> ScanJob | None:

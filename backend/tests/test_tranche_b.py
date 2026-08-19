@@ -12,6 +12,7 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect as sa_inspect
@@ -836,11 +837,12 @@ def test_real_client_artifact_upload_passes_single_timeout(tmp_path):
         def json(self):
             return {"id": 1, "artifact_key": "port_discovery.naabu"}
 
-    def fake_request(method, url, **kwargs):
+    def fake_request(*args, **kwargs):
+        method, url = args[-2], args[-1]
         calls.append({"method": method, "url": url, "kwargs": kwargs})
         return FakeResponse()
 
-    with patch("api_client.httpx.request", side_effect=fake_request):
+    with patch.object(httpx.Client, "request", side_effect=fake_request):
         CentralClient("http://api.example:8000").upload_artifact("agent-token", 9, artifact)
         ScannerClient("http://api.example:8000", "scanner-token").upload_artifact(9, artifact)
 

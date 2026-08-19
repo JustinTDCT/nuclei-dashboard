@@ -77,7 +77,9 @@ The scanner runtime release ID (`runtime_version`) is a scanner-image identifier
 
 Admin → Settings holds the centrally approved versions. Changing those values updates match/mismatch status only. It does not upgrade Agents, rebuild containers, replace template volumes, or start a remote deployment. Auto-update remains deferred.
 
-Agents report current installed inventory on authenticated heartbeat (`runtime_version`, `nuclei_version`, `nuclei_templates_version`, `naabu_version`, `httpx_version`). Pre-Tranche-C Agents stay usable and display **Not Reported** until they run a Tranche-C image. Derived comparison is computed at read time from current inventory plus current approved settings; it is not stored on the Agent row.
+Agents report current installed inventory on authenticated heartbeat (`runtime_version`, `nuclei_version`, `nuclei_templates_version`, `naabu_version`, `httpx_version`). Inventory is sent on startup, when it changes, and on the hourly refresh — not on every heartbeat. An ordinary heartbeat may be empty or include only `job_id` / `activity`. The Agent keeps an independent control/heartbeat loop while a single scan worker executes, so a long scan does not make a healthy Agent appear Offline. Pre-Tranche-C Agents stay usable and display **Not Reported** until they run a Tranche-C image. Derived comparison is computed at read time from current inventory plus current approved settings; it is not stored on the Agent row.
+
+`GET /api/agent/jobs` selects queued LAN jobs this Agent is snapshot-eligible for in SQL. It does not inspect a global first-25 window and then filter in Python. An Agent that already has a running ScanJob is treated as busy and is not offered another job.
 
 `ScanJob.runtime_provenance` is historical evidence for that run. Never infer it from the Agent's current inventory. Pre-Tranche-C Scan Runs display **Not Recorded**.
 

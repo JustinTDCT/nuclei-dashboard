@@ -203,6 +203,8 @@ LAN Networks can use:
 
 Agents still must be authorized for the Site/Network involved.
 
+A healthy Agent keeps sending heartbeats while a scan is running. Health is not based on scan completion. Job polling asks the server only for work that Agent is eligible to claim.
+
 ---
 
 ## Asset inventory and identity
@@ -1401,6 +1403,8 @@ Available dispatch models include:
 
 The Agent should eventually appear online/healthy.
 
+A running scan must not make the Agent look Offline. The Agent heartbeats on its own control loop while one scan worker executes.
+
 Check:
 
 ```bash
@@ -1433,6 +1437,8 @@ docker compose exec nuclei-agent pd-httpx -version
 ```
 
 The dashboard should receive Agent runtime inventory during heartbeat reporting.
+
+Inventory is sent when the Agent starts, when installed versions change, and on a periodic refresh. Ordinary heartbeats can be empty authenticated pings, or they can include the current job and activity while a scan is running.
 
 ---
 
@@ -1988,6 +1994,8 @@ Do not manually edit old/frozen Alembic migration files on an installed system.
 # Updating a Site Agent
 
 An Agent rebuild retrieves the current `scan_runtime` source used by its Compose build context and installs the pinned tool/template releases defined by that revision.
+
+Scale S1 lives in the Agent image (independent heartbeat/control loop, persistent HTTPS client, and scan-stage progress logs). After this change, rebuild the Agent image. A container restart of an old image is not enough.
 
 From the Agent directory:
 

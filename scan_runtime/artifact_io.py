@@ -4,12 +4,16 @@ import gzip
 import json
 import shutil
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 LogFn = Callable[[str], None]
 CHUNK_SIZE = 1024 * 1024
+PROGRESS_INTERVAL_SECONDS = 30.0
+MAX_PROGRESS_LOGS = 40
 
 
 def log_message(message: str, log: LogFn | None) -> None:
@@ -24,16 +28,35 @@ def run_command_to_file(cmd: list[str], dest: Path, log: LogFn | None = None) ->
     dest.parent.mkdir(parents=True, exist_ok=True)
     stderr_chunks: list[bytes] = []
     stderr_limit = 65536
-    with dest.open("wb") as out:
-        proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.PIPE)
-        assert proc.stderr is not None
+    started = time.monotonic()
+    progress_logs = 0
+    tool = Path(cmd[0]).name if cmd else "scanner"
+
+    def _drain_stderr(pipe) -> None:
         while True:
-            chunk = proc.stderr.read(8192)
+            chunk = pipe.read(8192)
             if not chunk:
                 break
             if sum(len(part) for part in stderr_chunks) < stderr_limit:
                 stderr_chunks.append(chunk)
-        returncode = proc.wait()
+
+    with dest.open("wb") as out:
+        proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.PIPE)
+        assert proc.stderr is not None
+        reader = threading.Thread(target=_drain_stderr, args=(proc.stderr,), daemon=True)
+        reader.start()
+        while True:
+            try:
+                returncode = proc.wait(timeout=PROGRESS_INTERVAL_SECONDS)
+                break
+            except subprocess.TimeoutExpired:
+                if progress_logs >= MAX_PROGRESS_LOGS:
+                    continue
+                elapsed = int(time.monotonic() - started)
+                size = dest.stat().st_size if dest.exists() else 0
+                log_message(f"{tool} still running ({elapsed}s, {size} bytes written)", log)
+                progress_logs += 1
+        reader.join(timeout=5)
     stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
     empty = dest.stat().st_size == 0
     if returncode != 0 and empty:
