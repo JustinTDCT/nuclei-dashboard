@@ -146,6 +146,24 @@ def recalculate_finding_age_priority() -> None:
         db.close()
 
 
+def cleanup_raw_artifacts() -> None:
+    db: Session = SessionLocal()
+    try:
+        from app.raw_artifacts import CLEANUP_BATCH_SIZE, cleanup_expired_artifacts
+
+        cleaned = cleanup_expired_artifacts(db, batch_size=CLEANUP_BATCH_SIZE)
+        if cleaned:
+            db.commit()
+            log.info("Retention-deleted %s raw scan artifacts", cleaned)
+        else:
+            db.commit()
+    except Exception:
+        log.exception("Raw artifact retention cleanup failed")
+        db.rollback()
+    finally:
+        db.close()
+
+
 def start_scheduler() -> None:
     if scheduler.running:
         return
@@ -197,6 +215,13 @@ def start_scheduler() -> None:
         "interval",
         seconds=20,
         id="alert-delivery",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        cleanup_raw_artifacts,
+        "interval",
+        hours=1,
+        id="raw-artifact-retention",
         replace_existing=True,
     )
     scheduler.start()

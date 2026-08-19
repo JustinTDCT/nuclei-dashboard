@@ -11,6 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
+from artifact_io import (
+    artifact_meta,
+    parse_jsonl_file,
+    run_command_to_file,
+    stream_gzip,
+)
 from classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
 from commands import (
     PORT_MODE_NONE,
@@ -27,6 +33,38 @@ from enrich import enrich_identities, usable_hostname
 LogFn = Callable[[str], None]
 
 
+class PipelineError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        artifacts: list[dict[str, Any]] | None = None,
+        staging_dir: str | Path | None = None,
+        devices: list[dict[str, Any]] | None = None,
+        findings: list[dict[str, Any]] | None = None,
+        provenance: dict[str, Any] | None = None,
+        detector_coverage: list[dict[str, Any]] | None = None,
+    ):
+        super().__init__(message)
+        self.artifacts = artifacts or []
+        self.staging_dir = str(staging_dir) if staging_dir else None
+        self.devices = devices or []
+        self.findings = findings or []
+        self.provenance = provenance or {}
+        self.detector_coverage = detector_coverage or []
+
+    def as_result(self) -> dict[str, Any]:
+        return {
+            "devices": self.devices,
+            "findings": self.findings,
+            "provenance": self.provenance,
+            "detector_coverage": self.detector_coverage,
+            "artifacts": self.artifacts,
+            "staging_dir": self.staging_dir,
+            "pipeline_error": str(self),
+        }
+
+
 def _log(message: str, log: LogFn | None) -> None:
     if log:
         log(message)
@@ -39,13 +77,13 @@ def _which(name: str) -> str | None:
 
 
 def _run(cmd: list[str], log: LogFn | None = None) -> str:
-    _log("$ " + " ".join(cmd), log)
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0 and not proc.stdout.strip():
-        raise RuntimeError(proc.stderr.strip() or f"command failed: {cmd[0]}")
-    if proc.stderr.strip():
-        _log(proc.stderr.strip(), log)
-    return proc.stdout
+    with tempfile.NamedTemporaryFile("wb", delete=False) as handle:
+        path = Path(handle.name)
+    try:
+        run_command_to_file(cmd, path, log)
+        return path.read_text(encoding="utf-8", errors="replace")
+    finally:
+        path.unlink(missing_ok=True)
 
 
 def _parse_jsonl(text: str) -> list[dict[str, Any]]:
@@ -59,6 +97,24 @@ def _parse_jsonl(text: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return rows
+
+
+def _execute_stage(
+    cmd: list[str],
+    staging_dir: Path,
+    *,
+    artifact_key: str,
+    stage: str,
+    tool: str,
+    log: LogFn | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    raw_path = staging_dir / f"{artifact_key}.jsonl"
+    gz_path = staging_dir / f"{artifact_key}.jsonl.gz"
+    run_command_to_file(cmd, raw_path, log)
+    rows = parse_jsonl_file(raw_path)
+    stream_gzip(raw_path, gz_path)
+    raw_path.unlink(missing_ok=True)
+    return rows, artifact_meta(artifact_key=artifact_key, stage=stage, tool=tool, gz_path=gz_path)
 
 
 def dry_run(cidrs: list[str], scope: str, profile: str) -> dict[str, Any]:
@@ -88,7 +144,20 @@ def dry_run(cidrs: list[str], scope: str, profile: str) -> dict[str, Any]:
                 "raw": {"dry_run": True, "cidrs": cidrs},
             }
         )
-    return {"devices": devices, "findings": findings}
+    return {
+        "devices": devices,
+        "findings": findings,
+        "artifacts": [],
+        "staging_dir": None,
+        "provenance": {},
+        "detector_coverage": [],
+    }
+
+
+def _unpack_stage(result: Any) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if isinstance(result, tuple) and len(result) == 2:
+        return result[0], result[1]
+    return result or [], None
 
 
 def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any]:
@@ -104,61 +173,110 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
     if not targets:
         raise RuntimeError("No targets configured for this scan")
 
-    port_mode = stages.get("port_mode") or PORT_MODE_NONE
+    staging_dir = Path(tempfile.mkdtemp(prefix="nd-raw-"))
+    artifacts: list[dict[str, Any]] = []
     hosts: list[dict[str, Any]] = []
-    if port_mode != PORT_MODE_NONE:
-        hosts = run_naabu(
-            [row["value"] for row in targets],
-            port_mode=port_mode,
-            custom_ports=stages.get("custom_ports") or [],
-            intensity=intensity,
-            exclude_hosts=_exclusion_hosts(job),
-            log=log,
-        )
-    elif stages.get("discovery"):
-        hosts = run_host_discovery(
-            targets,
-            intensity=intensity,
-            exclude_hosts=_exclusion_hosts(job),
-            log=log,
-        )
     http_info: list[dict[str, Any]] = []
-    if stages.get("fingerprint", True):
-        probe_hosts = hosts or [
-            {"ip": row["value"]} for row in targets if row["type"] in {"ip", "fqdn", "cidr"}
-        ]
-        http_info = run_httpx(probe_hosts, intensity=intensity, log=log)
-    devices = merge_devices(hosts, http_info, scope)
-    attach_hostnames(devices, log=log)
-    enrich_identities(devices, log=log)
+    devices: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
     nuclei_targets: list[str] = []
-    if stages.get("vulnerability"):
-        nuclei_targets = [h["url"] for h in http_info if h.get("url")]
-        if not nuclei_targets:
-            nuclei_targets = [f"{h['ip']}:{h['port']}" for h in hosts if h.get("ip") and h.get("port")]
-        if not nuclei_targets:
-            nuclei_targets = [row["value"] for row in targets]
-        findings = run_nuclei(
-            nuclei_targets,
-            severities=stages.get("nuclei_severities") or "critical,high,medium",
-            tags=stages.get("nuclei_tags") or "",
-            intensity=intensity,
-            log=log,
-        )
-        apply_nuclei_hostnames(devices, findings)
-    finalize_devices(devices)
-    named = sum(1 for d in devices if usable_hostname(d.get("hostname") or ""))
-    _log(f"Hostnames resolved on agent: {named}/{len(devices)}", log)
-    coverage = []
-    if stages.get("vulnerability"):
-        coverage.append({"detector_type": "nuclei", "targets": nuclei_targets})
-    return {
-        "devices": devices,
-        "findings": findings,
-        "provenance": collect_tool_versions(log=log),
-        "detector_coverage": coverage,
-    }
+    try:
+        port_mode = stages.get("port_mode") or PORT_MODE_NONE
+        if port_mode != PORT_MODE_NONE:
+            hosts, artifact = _unpack_stage(
+                run_naabu(
+                    [row["value"] for row in targets],
+                    port_mode=port_mode,
+                    custom_ports=stages.get("custom_ports") or [],
+                    intensity=intensity,
+                    exclude_hosts=_exclusion_hosts(job),
+                    log=log,
+                    staging_dir=staging_dir,
+                )
+            )
+            if artifact:
+                artifacts.append(artifact)
+        elif stages.get("discovery"):
+            hosts, artifact = _unpack_stage(
+                run_host_discovery(
+                    targets,
+                    intensity=intensity,
+                    exclude_hosts=_exclusion_hosts(job),
+                    log=log,
+                    staging_dir=staging_dir,
+                )
+            )
+            if artifact:
+                artifacts.append(artifact)
+        if stages.get("fingerprint", True):
+            probe_hosts = hosts or [
+                {"ip": row["value"]} for row in targets if row["type"] in {"ip", "fqdn", "cidr"}
+            ]
+            http_info, artifact = _unpack_stage(
+                run_httpx(probe_hosts, intensity=intensity, log=log, staging_dir=staging_dir)
+            )
+            if artifact:
+                artifacts.append(artifact)
+        devices = merge_devices(hosts, http_info, scope)
+        attach_hostnames(devices, log=log)
+        enrich_identities(devices, log=log)
+        if stages.get("vulnerability"):
+            nuclei_targets = [h["url"] for h in http_info if h.get("url")]
+            if not nuclei_targets:
+                nuclei_targets = [f"{h['ip']}:{h['port']}" for h in hosts if h.get("ip") and h.get("port")]
+            if not nuclei_targets:
+                nuclei_targets = [row["value"] for row in targets]
+            findings, artifact = _unpack_stage(
+                run_nuclei(
+                    nuclei_targets,
+                    severities=stages.get("nuclei_severities") or "critical,high,medium",
+                    tags=stages.get("nuclei_tags") or "",
+                    intensity=intensity,
+                    log=log,
+                    staging_dir=staging_dir,
+                )
+            )
+            if artifact:
+                artifacts.append(artifact)
+            apply_nuclei_hostnames(devices, findings)
+        finalize_devices(devices)
+        named = sum(1 for d in devices if usable_hostname(d.get("hostname") or ""))
+        _log(f"Hostnames resolved on agent: {named}/{len(devices)}", log)
+        if stages.get("vulnerability"):
+            coverage.append({"detector_type": "nuclei", "targets": nuclei_targets})
+        provenance = collect_tool_versions(log=log)
+        if not artifacts:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            staging_out = None
+        else:
+            staging_out = str(staging_dir)
+        return {
+            "devices": devices,
+            "findings": findings,
+            "provenance": provenance,
+            "detector_coverage": coverage,
+            "artifacts": artifacts,
+            "staging_dir": staging_out,
+        }
+    except PipelineError:
+        raise
+    except Exception as exc:
+        provenance = collect_tool_versions(log=log)
+        if not artifacts:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            staging_out = None
+        else:
+            staging_out = staging_dir
+        raise PipelineError(
+            str(exc),
+            artifacts=artifacts,
+            staging_dir=staging_out,
+            devices=devices,
+            findings=findings,
+            provenance=provenance,
+            detector_coverage=coverage,
+        ) from exc
 
 
 def resolve_execution_targets(job: dict[str, Any], log: LogFn | None = None) -> list[dict[str, str]]:
@@ -295,7 +413,10 @@ def run_naabu(
     custom_ports: list[str] | None = None,
     intensity: dict[str, Any] | None = None,
     exclude_hosts: list[str] | None = None,
-) -> list[dict[str, Any]]:
+    staging_dir: Path | None = None,
+    artifact_key: str = "port_discovery.naabu",
+    stage: str = "port_discovery",
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     binary = _which("naabu")
     if not binary:
         raise RuntimeError("naabu is not installed")
@@ -308,8 +429,10 @@ def run_naabu(
         exclude_hosts=exclude_hosts,
     )
     if cmd is None:
-        return []
-    return _parse_jsonl(_run(cmd, log))
+        return [], None
+    if staging_dir is None:
+        return _parse_jsonl(_run(cmd, log)), None
+    return _execute_stage(cmd, staging_dir, artifact_key=artifact_key, stage=stage, tool="naabu", log=log)
 
 
 def run_host_discovery(
@@ -318,7 +441,8 @@ def run_host_discovery(
     *,
     intensity: dict[str, Any] | None = None,
     exclude_hosts: list[str] | None = None,
-) -> list[dict[str, Any]]:
+    staging_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     values = [row["value"] for row in targets]
     binary = _which("naabu")
     if binary:
@@ -330,7 +454,16 @@ def run_host_discovery(
         )
         if cmd:
             _log("Discovery enabled with port mode none; running Naabu host discovery (-sn)", log)
-            return _parse_jsonl(_run(cmd, log))
+            if staging_dir is None:
+                return _parse_jsonl(_run(cmd, log)), None
+            return _execute_stage(
+                cmd,
+                staging_dir,
+                artifact_key="discovery.naabu",
+                stage="discovery",
+                tool="naabu",
+                log=log,
+            )
     hosts: list[dict[str, Any]] = []
     for row in targets:
         kind = row.get("type") or "cidr"
@@ -342,7 +475,7 @@ def run_host_discovery(
     if not hosts:
         raise RuntimeError("Host discovery produced no hosts")
     _log(f"Host discovery recorded {len(hosts)} explicit IP/FQDN target(s)", log)
-    return hosts
+    return hosts, None
 
 
 def _pd_httpx() -> str | None:
@@ -364,13 +497,14 @@ def run_httpx(
     log: LogFn | None = None,
     *,
     intensity: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+    staging_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     if not hosts:
-        return []
+        return [], None
     binary = _pd_httpx()
     if not binary:
         _log("ProjectDiscovery httpx not found; skipping HTTP fingerprinting", log)
-        return []
+        return [], None
     with tempfile.NamedTemporaryFile("w", delete=False) as handle:
         for row in hosts:
             ip = row.get("ip")
@@ -383,11 +517,29 @@ def run_httpx(
     try:
         cmd = build_httpx_command(binary, path, intensity=intensity, tls_grab=True)
         try:
-            return _parse_jsonl(_run(cmd, log))
+            if staging_dir is None:
+                return _parse_jsonl(_run(cmd, log)), None
+            return _execute_stage(
+                cmd,
+                staging_dir,
+                artifact_key="fingerprint.httpx",
+                stage="fingerprint",
+                tool="httpx",
+                log=log,
+            )
         except RuntimeError as exc:
             _log(f"httpx tls-grab failed ({exc}); retrying without it", log)
             cmd = build_httpx_command(binary, path, intensity=intensity, tls_grab=False)
-            return _parse_jsonl(_run(cmd, log))
+            if staging_dir is None:
+                return _parse_jsonl(_run(cmd, log)), None
+            return _execute_stage(
+                cmd,
+                staging_dir,
+                artifact_key="fingerprint.httpx",
+                stage="fingerprint",
+                tool="httpx",
+                log=log,
+            )
     finally:
         Path(path).unlink(missing_ok=True)
 
@@ -399,18 +551,30 @@ def run_nuclei(
     log: LogFn | None = None,
     *,
     intensity: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+    staging_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     if not targets:
-        return []
+        return [], None
     binary = _which("nuclei")
     if not binary:
         raise RuntimeError("nuclei is not installed")
     with tempfile.NamedTemporaryFile("w", delete=False) as handle:
         handle.write("\n".join(targets) + "\n")
         path = handle.name
+    artifact = None
     try:
         cmd = build_nuclei_command(binary, path, severities=severities, tags=tags, intensity=intensity)
-        rows = _parse_jsonl(_run(cmd, log))
+        if staging_dir is None:
+            rows = _parse_jsonl(_run(cmd, log))
+        else:
+            rows, artifact = _execute_stage(
+                cmd,
+                staging_dir,
+                artifact_key="vulnerability.nuclei",
+                stage="vulnerability",
+                tool="nuclei",
+                log=log,
+            )
     finally:
         Path(path).unlink(missing_ok=True)
     findings = []
@@ -427,7 +591,7 @@ def run_nuclei(
                 "raw": raw,
             }
         )
-    return findings
+    return findings, artifact
 
 
 def merge_devices(hosts: list[dict[str, Any]], http_info: list[dict[str, Any]], scope: str) -> list[dict[str, Any]]:

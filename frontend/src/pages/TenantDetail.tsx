@@ -15,6 +15,7 @@ import type {
   Network,
   Scan,
   ScanExclusion,
+  ScanArtifact,
   ScanJob,
   Site,
   PolicyEvaluation,
@@ -313,6 +314,7 @@ function Scans({ tenantId }: { tenantId: number }) {
   const [wanTargets, setWanTargets] = useState<AuthorizedWanTarget[]>([]);
   const [exclusions, setExclusions] = useState<ScanExclusion[]>([]);
   const [selectedJob, setSelectedJob] = useState<ScanJob | null>(null);
+  const [jobArtifacts, setJobArtifacts] = useState<ScanArtifact[]>([]);
   const [step, setStep] = useState(1);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -367,6 +369,15 @@ function Scans({ tenantId }: { tenantId: number }) {
     const id = setInterval(load, 8000);
     return () => clearInterval(id);
   }, [tenantId]);
+  useEffect(() => {
+    if (!selectedJob) {
+      setJobArtifacts([]);
+      return;
+    }
+    api<ScanArtifact[]>(`/api/jobs/${selectedJob.id}/artifacts`)
+      .then(setJobArtifacts)
+      .catch(() => setJobArtifacts([]));
+  }, [selectedJob]);
 
   const siteNetworks = useMemo(
     () => networks.filter((n) => !n.is_archived && String(n.site_id) === form.site_id),
@@ -835,6 +846,39 @@ function Scans({ tenantId }: { tenantId: number }) {
               2
             )}
           </pre>
+          <div>
+            <h4 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Raw evidence</h4>
+            {jobArtifacts.length === 0 ? (
+              <p className="text-slate-400">No retained raw artifacts are recorded for this run.</p>
+            ) : (
+              <div className="space-y-2">
+                {jobArtifacts.map((artifact) => (
+                  <div key={artifact.id} className="border border-slate-800 rounded-lg p-3 space-y-1">
+                    <div>Tool: {artifact.tool}</div>
+                    <div>Stage: {artifact.stage}</div>
+                    <div>Size: {artifact.size_bytes} bytes</div>
+                    <div>Created: {formatUtc(artifact.created_at, defaultTimezone)}</div>
+                    <div>Retain until: {formatUtc(artifact.retention_expires_at, defaultTimezone)}</div>
+                    <div>Status: {artifact.available ? "Available" : "Expired"}</div>
+                    <div className="break-all">SHA-256: {artifact.sha256}</div>
+                    {artifact.available && (
+                      <button
+                        className="text-cyan-400"
+                        onClick={() =>
+                          download(
+                            `/api/scan-artifacts/${artifact.id}/download`,
+                            artifact.download_filename
+                          )
+                        }
+                      >
+                        Download
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div>
             <h4 className="text-sm uppercase tracking-wide text-slate-400 mb-2">Related controls</h4>
             <ControlMapping tenantId={tenantId} subjectType="scan_job" subjectId={selectedJob.id} />

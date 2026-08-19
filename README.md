@@ -9,9 +9,10 @@ Staff log in (admins, users, viewers). **Tenants are clients you manage**, not s
 ## Architecture
 
 - **Caddy** terminates HTTP/HTTPS and routes `/api` to FastAPI and everything else to the React UI
-- **API** (FastAPI + PostgreSQL) stores tenants, agents, jobs, devices, findings, and alerts
-- **WAN scanner** claims WAN jobs and runs naabu → httpx → nuclei
-- **Site agent** (same image) enrolls with a UUID, waits for approval, then polls for LAN jobs
+- **API** (FastAPI + PostgreSQL) stores tenants, agents, jobs, devices, findings, alerts, and raw-artifact metadata
+- **scan-artifacts volume** holds gzip JSONL scanner output on the API host (not in PostgreSQL)
+- **WAN scanner** claims WAN jobs and runs naabu → httpx → nuclei, then uploads raw evidence to the API
+- **Site agent** (same image) enrolls with a UUID, waits for approval, then polls for LAN jobs and uploads raw evidence over HTTPS
 
 Agents only make **outbound HTTPS**. After approval they authenticate with an Ed25519 key bound to that UUID. A stolen UUID without the private key is rejected and raises an impersonation alert.
 
@@ -72,7 +73,9 @@ The agent stores its private key on a Docker volume. Losing that volume after ap
 - **Discovery only** — naabu + httpx, inventory only
 - **Discovery + Nuclei** — same, then nuclei JSONL findings
 
-Set `SCAN_DRY_RUN=1` on the scanner (or agent) to emit sample results without touching the network.
+Set `SCAN_DRY_RUN=1` on the scanner (or agent) to emit sample results without touching the network. Dry-run jobs do not fabricate genuine scanner artifacts.
+
+Raw scanner JSONL is retained on the central `scan-artifacts` volume for 365 days by default (Admin → Settings). Normalized findings and scan history remain after raw files expire. Viewer download access follows Tenant grants. Include the artifact volume in backups if raw evidence must survive host failure.
 
 ## Roles
 

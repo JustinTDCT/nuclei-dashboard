@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.access import apply_tenant_scope, require_object_tenant, require_visible_tenant
@@ -8,6 +9,16 @@ from app.database import get_db
 from app.jobs import create_job, has_active_job
 from app.locality import LanScanInvalidError, get_tenant
 from app.models import TRIGGER_MANUAL, Scan, ScanJob, User
+from app.raw_artifacts import (
+    ArtifactError,
+    download_filename,
+    get_artifact,
+    list_job_artifacts,
+    raise_http,
+    readable_artifact_path,
+    serialize_artifact,
+    site_id_from_job,
+)
 from app.scan_definitions import (
     DEFINITION_ERRORS,
     ScanDefinitionError,
@@ -16,7 +27,7 @@ from app.scan_definitions import (
     validate_definition,
 )
 from app.scan_dispatch import resolve_dispatch_policy
-from app.schemas import ScanIn, ScanJobOut, ScanOut
+from app.schemas import ScanArtifactOut, ScanIn, ScanJobOut, ScanOut
 
 router = APIRouter(tags=["scans"])
 
@@ -219,3 +230,52 @@ def read_job(job_id: int, user: User = Depends(require_any), db: Session = Depen
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
     require_object_tenant(db, user, job, tenant_id=job.tenant_id if job else None, detail="Job not found")
     return job_out(job, include_snapshot=True)
+
+
+@router.get("/jobs/{job_id}/artifacts", response_model=list[ScanArtifactOut])
+def list_artifacts(job_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    require_object_tenant(db, user, job, tenant_id=job.tenant_id if job else None, detail="Job not found")
+    return [serialize_artifact(row) for row in list_job_artifacts(db, job)]
+
+
+@router.get("/scan-artifacts/{artifact_id}/download")
+def download_artifact(artifact_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    artifact = get_artifact(db, artifact_id)
+    require_object_tenant(
+        db,
+        user,
+        artifact,
+        tenant_id=artifact.tenant_id if artifact else None,
+        detail="Artifact not found",
+    )
+    try:
+        path = readable_artifact_path(artifact)
+    except ArtifactError as exc:
+        raise_http(exc)
+    job = db.get(ScanJob, artifact.scan_job_id)
+    record_audit(
+        db,
+        actor=user,
+        action="scan_artifact.download",
+        object_type="scan_artifact",
+        object_id=artifact.id,
+        tenant_id=artifact.tenant_id,
+        site_id=site_id_from_job(job),
+        details={
+            "artifact_id": artifact.id,
+            "scan_job_id": artifact.scan_job_id,
+            "tenant_id": artifact.tenant_id,
+            "site_id": site_id_from_job(job),
+            "tool": artifact.tool,
+            "stage": artifact.stage,
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes,
+        },
+        commit=True,
+    )
+    return FileResponse(
+        path,
+        filename=download_filename(artifact),
+        media_type="application/gzip",
+    )

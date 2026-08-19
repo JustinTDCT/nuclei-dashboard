@@ -161,6 +161,26 @@ export interface ScanJob {
   runtime_provenance?: Record<string, unknown> | null;
 }
 
+export interface ScanArtifact {
+  id: number;
+  scan_job_id: number;
+  tenant_id: number;
+  artifact_key: string;
+  tool: string;
+  stage: string;
+  media_type: string;
+  content_encoding: string;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+  retention_expires_at: string;
+  deleted_at: string | null;
+  delete_reason: string | null;
+  available: boolean;
+  provenance: Record<string, unknown>;
+  download_filename: string;
+}
+
 export interface AuthorizedWanTarget {
   id: number;
   tenant_id: number;
@@ -639,6 +659,7 @@ export interface Settings {
   scan_cap_nuclei_retries?: number;
   finding_resolution_clean_scans?: number;
   vulnerability_intelligence_enabled?: boolean;
+  raw_scan_artifact_retention_days?: number;
 }
 
 export interface IntelligenceSourceStatus {

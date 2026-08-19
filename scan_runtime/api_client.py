@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+ARTIFACT_UPLOAD_TIMEOUT = 300.0
+ARTIFACT_UPLOAD_RETRIES = 3
 
 
 class ApiError(RuntimeError):
@@ -109,6 +114,14 @@ class CentralClient:
             "POST", f"/api/agent/jobs/{job_id}/complete", headers=_auth(token), params=params
         ).json()
 
+    def upload_artifact(self, token: str, job_id: int, artifact: dict[str, Any]) -> dict:
+        return _upload_artifact(
+            self._request,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            artifact,
+            headers=_auth(token),
+        )
+
 
 class ScannerClient:
     def __init__(self, base_url: str, token: str, timeout: float = 30.0):
@@ -154,6 +167,9 @@ class ScannerClient:
             params["error"] = error
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/complete", params=params).json()
 
+    def upload_artifact(self, job_id: int, artifact: dict[str, Any]) -> dict:
+        return _upload_artifact(self._request, f"/api/internal/scanner/jobs/{job_id}/artifacts", artifact)
+
 
 def wait(seconds: float) -> None:
     time.sleep(seconds)
@@ -161,3 +177,39 @@ def wait(seconds: float) -> None:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _transient_upload_error(exc: ApiError) -> bool:
+    text = str(exc)
+    return any(token in text for token in (" 500 ", " 502 ", " 503 ", " 504 ", "timeout", "Timeout", "connect"))
+
+
+def _upload_artifact(request_fn, path: str, artifact: dict[str, Any], *, headers: dict[str, str] | None = None) -> dict:
+    file_path = Path(artifact["path"])
+    last_error: ApiError | None = None
+    for attempt in range(ARTIFACT_UPLOAD_RETRIES):
+        try:
+            with file_path.open("rb") as handle:
+                files = {"file": (file_path.name, handle, "application/gzip")}
+                data = {
+                    "artifact_key": artifact["artifact_key"],
+                    "stage": artifact["stage"],
+                    "tool": artifact["tool"],
+                    "media_type": artifact.get("media_type") or "application/x-ndjson",
+                    "content_encoding": artifact.get("content_encoding") or "gzip",
+                    "provenance": json.dumps(artifact.get("provenance") or {}, default=str),
+                }
+                kwargs: dict[str, Any] = {
+                    "files": files,
+                    "data": data,
+                    "timeout": ARTIFACT_UPLOAD_TIMEOUT,
+                }
+                if headers:
+                    kwargs["headers"] = headers
+                return request_fn("POST", path, **kwargs).json()
+        except ApiError as exc:
+            last_error = exc
+            if attempt >= ARTIFACT_UPLOAD_RETRIES - 1 or not _transient_upload_error(exc):
+                raise
+            time.sleep(1.0 * (attempt + 1))
+    raise last_error or ApiError("artifact upload failed")

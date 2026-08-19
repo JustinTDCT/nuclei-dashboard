@@ -511,10 +511,12 @@ def test_tranche_a_does_not_change_migrations(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE3C_HEAD
+    from tests.test_migrations import TRANCHE_B_HEAD
+
+    assert revision == head_revision() == current_revision() == TRANCHE_B_HEAD
     assert hashlib.sha256(MIGRATION_0014.read_bytes()).hexdigest() == PHASE3C_SHA256
     assert FROZEN_MIGRATION_HASHES["0014_reports_auditor_access.py"] == PHASE3C_SHA256
     blob = subprocess.check_output(["git", "hash-object", str(MIGRATION_0014)], cwd=REPO_ROOT, text=True).strip()
     assert blob == PHASE3C_GIT_BLOB
-    assert not list((BACKEND_ROOT / "alembic" / "versions").glob("0015*"))
+    assert (BACKEND_ROOT / "alembic" / "versions" / "0015_raw_scan_evidence.py").is_file()
     assert "viewer_tenant_grants" in inspect(engine).get_table_names()

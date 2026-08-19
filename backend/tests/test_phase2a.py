@@ -28,7 +28,7 @@ PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0014_reports_auditor_access"
+PHASE3A_HEAD = "0015_raw_scan_evidence"
 FROZEN = (
     "0001_baseline_current_schema.py",
     "0002_sites_networks.py",
@@ -810,7 +810,7 @@ def test_httpx_urls_become_nuclei_coverage_targets():
     import runner as runtime_runner
     from unittest.mock import patch
 
-    def _httpx(hosts, log=None, intensity=None):
+    def _httpx(hosts, log=None, intensity=None, **_kwargs):
         return [{"ip": "10.1.0.11", "url": "https://10.1.0.11"}]
 
     def _nuclei(targets, **kwargs):

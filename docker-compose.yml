@@ -30,6 +30,10 @@ services:
       AGENT_TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118}
       NVD_API_KEY: ${NVD_API_KEY:-}
+      RAW_ARTIFACT_DIR: ${RAW_ARTIFACT_DIR:-/var/lib/nuclei-dashboard/raw-artifacts}
+      RAW_ARTIFACT_MAX_BYTES: ${RAW_ARTIFACT_MAX_BYTES:-268435456}
+    volumes:
+      - scan-artifacts:/var/lib/nuclei-dashboard/raw-artifacts
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,3 +112,4 @@ volumes:
   caddy-config:
   nuclei-templates:
   agent-keys:
+  scan-artifacts:

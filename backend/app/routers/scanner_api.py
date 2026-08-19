@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -13,8 +13,9 @@ from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
 from app.scan_dispatch import CENTRAL_WORKER
 from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_wan_start
+from app.raw_artifacts import ArtifactError, ingest_upload_file, raise_http, serialize_artifact
 from app.scan_snapshot import merge_provenance
-from app.schemas import DetectorCoverageIn, DeviceReport, FindingReport
+from app.schemas import DetectorCoverageIn, DeviceReport, FindingReport, ScanArtifactOut
 
 router = APIRouter(prefix="/internal/scanner", tags=["scanner"])
 
@@ -160,6 +161,38 @@ def post_provenance(
     job.runtime_provenance = merge_provenance(job.runtime_provenance, body)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/jobs/{job_id}/artifacts", response_model=ScanArtifactOut)
+def post_artifact(
+    job_id: int,
+    file: UploadFile = File(...),
+    artifact_key: str = Form(...),
+    stage: str = Form(...),
+    tool: str = Form(...),
+    media_type: str = Form("application/x-ndjson"),
+    content_encoding: str = Form("gzip"),
+    provenance: str = Form(""),
+    _: None = Depends(require_scanner),
+    db: Session = Depends(get_db),
+):
+    job = _owned(db, job_id)
+    try:
+        artifact = ingest_upload_file(
+            db,
+            job,
+            upload=file,
+            artifact_key=artifact_key,
+            stage=stage,
+            tool=tool,
+            media_type=media_type,
+            content_encoding=content_encoding,
+            provenance=provenance,
+        )
+    except ArtifactError as exc:
+        raise_http(exc)
+    db.commit()
+    return serialize_artifact(artifact)
 
 
 def _owned(db: Session, job_id: int) -> ScanJob:

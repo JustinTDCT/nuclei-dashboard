@@ -61,7 +61,9 @@ def test_fresh_db_reaches_0014_and_freezes_0013(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE3C_HEAD
+    from tests.test_migrations import TRANCHE_B_HEAD
+
+    assert revision == head_revision() == current_revision() == TRANCHE_B_HEAD
     assert "viewer_tenant_grants" in inspect(engine).get_table_names()
     for name, sha256, blob_id in (
         ("0013_event_alert_engine.py", PHASE3B_SHA256, PHASE3B_GIT_BLOB),

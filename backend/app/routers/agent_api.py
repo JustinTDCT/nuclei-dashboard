@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -25,8 +25,9 @@ from app.models import (
 from app.scan_dispatch import agent_may_claim_now, atomic_claim_job, is_agent_healthy
 from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_lan_claim
+from app.raw_artifacts import ArtifactError, ingest_upload_file, raise_http, serialize_artifact
 from app.scan_snapshot import merge_provenance
-from app.schemas import AgentTokenIn, DetectorCoverageIn, DeviceReport, EnrollIn, FindingReport
+from app.schemas import AgentTokenIn, DetectorCoverageIn, DeviceReport, EnrollIn, FindingReport, ScanArtifactOut
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 bearer = HTTPBearer(auto_error=False)
@@ -352,6 +353,40 @@ def post_provenance(
     job.runtime_provenance = merge_provenance(job.runtime_provenance, body)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/jobs/{job_id}/artifacts", response_model=ScanArtifactOut)
+def post_artifact(
+    job_id: int,
+    file: UploadFile = File(...),
+    artifact_key: str = Form(...),
+    stage: str = Form(...),
+    tool: str = Form(...),
+    media_type: str = Form("application/x-ndjson"),
+    content_encoding: str = Form("gzip"),
+    provenance: str = Form(""),
+    agent: Agent = Depends(current_agent),
+    db: Session = Depends(get_db),
+):
+    job = _owned_job(db, job_id, agent.uuid)
+    if job.tenant_id != agent.tenant_id:
+        raise HTTPException(status_code=409, detail="Job is not an active Phase 1D run")
+    try:
+        artifact = ingest_upload_file(
+            db,
+            job,
+            upload=file,
+            artifact_key=artifact_key,
+            stage=stage,
+            tool=tool,
+            media_type=media_type,
+            content_encoding=content_encoding,
+            provenance=provenance,
+        )
+    except ArtifactError as exc:
+        raise_http(exc)
+    db.commit()
+    return serialize_artifact(artifact)
 
 
 def _agent_in_job_pool(job: ScanJob, agent: Agent) -> bool:

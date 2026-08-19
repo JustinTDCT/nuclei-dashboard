@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0014_reports_auditor_access` (after frozen `0001_baseline` through `0013_event_alert_engine`).
+Current head revision: `0015_raw_scan_evidence` (after frozen `0001_baseline` through `0014_reports_auditor_access`).
 
-`0001_baseline` through `0013_event_alert_engine` are immutable. Phase 3C reports and auditor access live in `0014_reports_auditor_access`.
+`0001_baseline` through `0014_reports_auditor_access` are immutable. Candidate Tranche B raw scan evidence metadata lives in `0015_raw_scan_evidence`. 0015 remains reviewable until independently frozen.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -48,6 +48,21 @@ Current head revision: `0014_reports_auditor_access` (after frozen `0001_baselin
 `alembic downgrade` from `0013_event_alert_engine` is **refused when Phase 3B history exists** (queue, deliveries, routes, alerting policies, or populated new event/alert columns). Empty Phase 3B tables and unused new columns may downgrade.
 
 `alembic downgrade` from `0014_reports_auditor_access` is **refused when Viewer authorization is configured** (`viewer_all_tenants = TRUE`, any `viewer_expires_at`, or any `viewer_tenant_grants` rows). An empty/unconfigured 0014 may downgrade.
+
+`alembic downgrade` from `0015_raw_scan_evidence` is **refused when `scan_artifacts` contains rows**. Empty metadata may downgrade to 0014. Downgrade never deletes filesystem artifact bytes.
+
+## Raw scan evidence
+
+The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`scan_artifacts`). Artifact bytes are gzip JSONL files on a dedicated Docker volume.
+
+- `RAW_ARTIFACT_DIR` defaults to `/var/lib/nuclei-dashboard/raw-artifacts`.
+- `RAW_ARTIFACT_MAX_BYTES` defaults to 268435456 (256 MiB). Oversized uploads are rejected; artifacts are never silently truncated.
+- Compose volume `scan-artifacts` is mounted only on the API. Remote LAN agents upload over HTTPS; they do not receive the volume.
+- Default retention is 365 days (`raw_scan_artifact_retention_days` in Admin → Settings). The value at upload time sets that artifact's `retention_expires_at`. Changing the setting does not bulk-delete existing artifacts.
+- Hourly cleanup deletes expired bytes, keeps the metadata row, and records `scan_artifact.retention_delete`. Normalized Assets, Observations, Findings, history, and ScanJobs are untouched.
+- Viewer access follows Tenant grants. Direct IDs for other tenants fail closed as 404. Successful downloads record `scan_artifact.download`.
+- Existing Scan Runs created before 0015 have no artifact rows because raw bytes were never retained. Do not treat that as “the scanner produced no output”.
+- Backup operators who need recoverable raw evidence after host failure must include the `scan-artifacts` volume as well as `postgres-data`.
 
 ### Fresh install
 

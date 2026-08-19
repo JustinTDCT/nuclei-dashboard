@@ -17,7 +17,7 @@ from tests.test_phase2a import _finding_payload, _run_clean, _run_detected
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
 PHASE3A_HEAD = "0012_policy_engine"
-PHASE3B_HEAD = "0014_reports_auditor_access"
+PHASE3B_HEAD = "0015_raw_scan_evidence"
 PHASE2C_GIT_BLOB = "430857e2a96017a43ffffd164eb78b0ab684918e"
 PHASE2C_SHA256 = "f78ddcd7fb8753ec652ef8377d74758f737394c505012c4786b6b71868fb22d1"
 

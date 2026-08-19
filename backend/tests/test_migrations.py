@@ -23,6 +23,7 @@ PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
 PHASE3A_HEAD = "0012_policy_engine"
 PHASE3B_HEAD = "0013_event_alert_engine"
 PHASE3C_HEAD = "0014_reports_auditor_access"
+TRANCHE_B_HEAD = "0015_raw_scan_evidence"
 FROZEN_MIGRATION_HASHES = {
     "0001_baseline_current_schema.py": "8daecbb5da9582ebdd2f6b13c157cadcb91368879532dd121a3804a49c99ed03",
     "0002_sites_networks.py": "e0988e97238ffd6d00f32cf1f1d3ea59cfb1f3acad17c3db6b3deaf586472278",
@@ -67,7 +68,7 @@ def test_fresh_database_reaches_head(reset_db):
 
     assert "users" not in _tables(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE3C_HEAD
+    assert revision == head_revision() == current_revision() == TRANCHE_B_HEAD
     expected = {
         "alembic_version",
         "users",
@@ -112,6 +113,7 @@ def test_fresh_database_reaches_head(reset_db):
         "alert_deliveries",
         "alert_event_routes",
         "viewer_tenant_grants",
+        "scan_artifacts",
     }.issubset(_tables(engine))
     assert "viewer_all_tenants" in _columns(engine, "users")
     assert "viewer_expires_at" in _columns(engine, "users")
@@ -209,7 +211,7 @@ def test_existing_schema_adoption_preserves_data(reset_db):
         }
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE3C_HEAD
+    assert revision == head_revision() == current_revision() == TRANCHE_B_HEAD
 
     db = SessionLocal()
     try:
@@ -367,7 +369,7 @@ def test_legacy_compatibility_restores_missing_columns_without_dropping_rows(res
         conn.execute(text("ALTER TABLE devices DROP COLUMN IF EXISTS description"))
 
     revision = apply_schema()
-    assert revision == PHASE3C_HEAD
+    assert revision == TRANCHE_B_HEAD
     assert "hostname" in _columns(engine, "findings")
     assert "description" in _columns(engine, "devices")
 
@@ -534,8 +536,134 @@ def test_phase1a_and_baseline_revisions_remain_frozen():
     assert "from app.database import Base" not in phase3c
     assert "import app.models" not in phase3c
     assert 'down_revision: str | None = "0013_event_alert_engine"' in phase3c
+    phase_tranche_b = (BACKEND_ROOT / "alembic" / "versions" / "0015_raw_scan_evidence.py").read_text()
+    assert "from app.database import Base" not in phase_tranche_b
+    assert "import app.models" not in phase_tranche_b
+    assert 'down_revision: str | None = "0014_reports_auditor_access"' in phase_tranche_b
+    assert "open(" not in phase_tranche_b
+    assert "Path(" not in phase_tranche_b
+    assert "os.remove" not in phase_tranche_b
+    assert "shutil" not in phase_tranche_b
+    assert "socket" not in phase_tranche_b
     import hashlib
 
     for name, digest in FROZEN_MIGRATION_HASHES.items():
         content = (BACKEND_ROOT / "alembic" / "versions" / name).read_bytes()
         assert hashlib.sha256(content).hexdigest() == digest, f"{name} must remain frozen"
+
+
+@requires_postgres
+def test_0014_to_0015_preserves_jobs_and_fabricates_no_artifacts(reset_db):
+    from alembic import command
+
+    from app.database import SessionLocal, engine
+    from app.migrate import alembic_config, apply_schema, current_revision
+    from app.models import Scan, ScanArtifact, ScanJob, Tenant
+
+    command.upgrade(alembic_config(), PHASE3C_HEAD)
+    assert current_revision() == PHASE3C_HEAD
+    assert "scan_artifacts" not in _tables(engine)
+    with engine.begin() as conn:
+        tenant_id = conn.execute(text("INSERT INTO tenants (name, notes) VALUES ('Pre-15', '') RETURNING id")).scalar_one()
+        scan_id = conn.execute(
+            text(
+                """
+                INSERT INTO scans (tenant_id, name, scope, profile, nuclei_severities, nuclei_tags, subnet_ids, is_enabled)
+                VALUES (:tid, 'Legacy Run', 'wan', 'discovery', 'critical,high,medium', '', '[]'::jsonb, true)
+                RETURNING id
+                """
+            ),
+            {"tid": tenant_id},
+        ).scalar_one()
+        job_id = conn.execute(
+            text(
+                """
+                INSERT INTO scan_jobs (scan_id, tenant_id, status, hosts_found, findings_count)
+                VALUES (:sid, :tid, 'done', 1, 0)
+                RETURNING id
+                """
+            ),
+            {"sid": scan_id, "tid": tenant_id},
+        ).scalar_one()
+
+    revision = apply_schema()
+    assert revision == TRANCHE_B_HEAD
+    assert "scan_artifacts" in _tables(engine)
+    assert {
+        "id",
+        "scan_job_id",
+        "tenant_id",
+        "artifact_key",
+        "stage",
+        "tool",
+        "media_type",
+        "content_encoding",
+        "storage_key",
+        "size_bytes",
+        "sha256",
+        "created_at",
+        "retention_expires_at",
+        "deleted_at",
+        "delete_reason",
+        "provenance",
+    }.issubset(_columns(engine, "scan_artifacts"))
+
+    db = SessionLocal()
+    try:
+        assert db.get(Tenant, tenant_id) is not None
+        assert db.get(Scan, scan_id) is not None
+        assert db.get(ScanJob, job_id) is not None
+        assert db.query(ScanArtifact).count() == 0
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_0015_empty_downgrade_succeeds_and_populated_refuses(reset_db):
+    from alembic import command
+
+    from app.database import SessionLocal, engine
+    from app.migrate import alembic_config, apply_schema, current_revision
+    from app.models import Scan, ScanArtifact, ScanJob, Tenant
+
+    apply_schema()
+    command.downgrade(alembic_config(), PHASE3C_HEAD)
+    assert current_revision() == PHASE3C_HEAD
+    assert "scan_artifacts" not in _tables(engine)
+
+    apply_schema()
+    db = SessionLocal()
+    try:
+        tenant = Tenant(name="Evidence Tenant", notes="")
+        db.add(tenant)
+        db.flush()
+        scan = Scan(tenant_id=tenant.id, name="Evidence Scan", scope="wan")
+        db.add(scan)
+        db.flush()
+        job = ScanJob(scan_id=scan.id, tenant_id=tenant.id, status="done")
+        db.add(job)
+        db.flush()
+        db.add(
+            ScanArtifact(
+                scan_job_id=job.id,
+                tenant_id=tenant.id,
+                artifact_key="vulnerability.nuclei",
+                stage="vulnerability",
+                tool="nuclei",
+                media_type="application/x-ndjson",
+                content_encoding="gzip",
+                storage_key=f"tenant/{tenant.id}/job/{job.id}/deadbeef.jsonl.gz",
+                size_bytes=12,
+                sha256="a" * 64,
+                retention_expires_at=datetime.now(timezone.utc),
+                provenance={},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    with pytest.raises(Exception, match="Refusing to downgrade 0015_raw_scan_evidence"):
+        command.downgrade(alembic_config(), PHASE3C_HEAD)
+    assert current_revision() == TRANCHE_B_HEAD
+    assert "scan_artifacts" in _tables(engine)

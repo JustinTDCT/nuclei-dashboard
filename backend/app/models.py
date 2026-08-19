@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    BigInteger,
     Numeric,
     String,
     Table,
@@ -682,6 +683,43 @@ class ScanJob(Base):
     detector_coverage: Mapped[list["ScanRunDetectorCoverage"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
+    artifacts: Mapped[list["ScanArtifact"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class ScanArtifact(Base):
+    __tablename__ = "scan_artifacts"
+    __table_args__ = (
+        UniqueConstraint("scan_job_id", "artifact_key", name="uq_scan_artifacts_job_id_artifact_key"),
+        UniqueConstraint("storage_key", name="uq_scan_artifacts_storage_key"),
+        Index("ix_scan_artifacts_scan_job_id_created_at", "scan_job_id", "created_at"),
+        Index("ix_scan_artifacts_tenant_id_created_at", "tenant_id", "created_at"),
+        Index(
+            "ix_scan_artifacts_retention_expires_at_active",
+            "retention_expires_at",
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scan_job_id: Mapped[int] = mapped_column(ForeignKey("scan_jobs.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    artifact_key: Mapped[str] = mapped_column(String(128))
+    stage: Mapped[str] = mapped_column(String(64))
+    tool: Mapped[str] = mapped_column(String(64))
+    media_type: Mapped[str] = mapped_column(String(128))
+    content_encoding: Mapped[str] = mapped_column(String(32))
+    storage_key: Mapped[str] = mapped_column(String(512))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    retention_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delete_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    job: Mapped["ScanJob"] = relationship(back_populates="artifacts")
 
 
 class AuthorizedWanTarget(Base):

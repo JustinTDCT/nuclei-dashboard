@@ -61,6 +61,18 @@ def write_settings(body: SettingsIn, user: User = Depends(require_admin), db: Se
             object_id=None,
             details=cap_changes,
         )
+    if current.get("raw_scan_artifact_retention_days") != saved.get("raw_scan_artifact_retention_days"):
+        record_audit(
+            db,
+            actor=user,
+            action="settings.raw_artifact_retention_change",
+            object_type="settings",
+            object_id=None,
+            details={
+                "before": current.get("raw_scan_artifact_retention_days"),
+                "after": saved.get("raw_scan_artifact_retention_days"),
+            },
+        )
     db.commit()
     return SettingsOut(**saved)
 

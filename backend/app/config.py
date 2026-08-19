@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     agent_tls_verify: str = "1"
     cors_origins: str = "http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118"
     nvd_api_key: str = ""
+    raw_artifact_dir: str = "/var/lib/nuclei-dashboard/raw-artifacts"
+    raw_artifact_max_bytes: int = 268435456
 
 
 settings = Settings()

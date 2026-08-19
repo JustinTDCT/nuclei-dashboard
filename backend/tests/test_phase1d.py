@@ -20,7 +20,7 @@ PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0014_reports_auditor_access"
+PHASE3A_HEAD = "0015_raw_scan_evidence"
 RUNTIME_ROOT = BACKEND_ROOT.parent / "scan_runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
@@ -1475,7 +1475,7 @@ def test_fingerprint_only_cidr_invokes_httpx():
 
     captured = {}
 
-    def _fake_httpx(hosts, log=None, intensity=None):
+    def _fake_httpx(hosts, log=None, intensity=None, **_kwargs):
         captured["hosts"] = hosts
         return []
 

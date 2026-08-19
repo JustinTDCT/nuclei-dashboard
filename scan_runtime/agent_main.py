@@ -4,8 +4,10 @@ import time
 import traceback
 
 from api_client import ApiError, CentralClient, wait
+from job_finish import finish_pipeline_run
 from keys import load_or_create_keypair, sign
-from runner import run_pipeline
+from runner import PipelineError, run_pipeline
+from artifact_io import cleanup_staging
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -31,27 +33,44 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token) -> None
     job_id = job["job_id"]
     print(f"Starting job {job_id}", flush=True)
     started = client.start(token, job_id)
+    result: dict = {"artifacts": [], "staging_dir": None}
     try:
         result = run_pipeline(started, log=lambda message: print(message, flush=True))
         token = refresh_token() or token
-        if result.get("provenance"):
-            try:
-                client.provenance(token, job_id, result["provenance"])
-            except ApiError:
-                pass
-        if result["devices"]:
-            client.devices(token, job_id, result["devices"])
-        for coverage in result.get("detector_coverage") or []:
-            try:
-                client.detector_coverage(token, job_id, coverage)
-            except ApiError:
-                pass
-        if result["findings"]:
-            client.findings(token, job_id, result["findings"])
-        client.complete(token, job_id, ok=True)
+        finish_pipeline_run(
+            result=result,
+            upload=lambda artifact: client.upload_artifact(token, job_id, artifact),
+            complete=lambda ok, error: client.complete(token, job_id, ok=ok, error=error),
+            provenance_fn=lambda payload: client.provenance(token, job_id, payload),
+            devices_fn=lambda devices: client.devices(token, job_id, devices),
+            coverage_fn=lambda payload: client.detector_coverage(token, job_id, payload),
+            findings_fn=lambda findings: client.findings(token, job_id, findings),
+        )
         print(f"Finished job {job_id}", flush=True)
+    except PipelineError as exc:
+        token = refresh_token() or token
+        result = exc.as_result()
+        try:
+            finish_pipeline_run(
+                result=result,
+                upload=lambda artifact: client.upload_artifact(token, job_id, artifact),
+                complete=lambda ok, error: client.complete(token, job_id, ok=ok, error=error),
+                provenance_fn=lambda payload: client.provenance(token, job_id, payload),
+                devices_fn=lambda devices: client.devices(token, job_id, devices),
+                coverage_fn=lambda payload: client.detector_coverage(token, job_id, payload),
+                findings_fn=lambda findings: client.findings(token, job_id, findings),
+                pipeline_error=str(exc),
+            )
+        except Exception as persist_exc:
+            traceback.print_exc()
+            cleanup_staging(result.get("staging_dir"))
+            try:
+                client.complete(token, job_id, ok=False, error=str(persist_exc))
+            except ApiError:
+                pass
     except Exception as exc:
         traceback.print_exc()
+        cleanup_staging(result.get("staging_dir"))
         try:
             token = refresh_token() or token
             client.complete(token, job_id, ok=False, error=str(exc))

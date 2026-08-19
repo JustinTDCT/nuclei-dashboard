@@ -33,6 +33,7 @@ const empty: Settings = {
   scan_cap_nuclei_retries: 5,
   finding_resolution_clean_scans: 2,
   vulnerability_intelligence_enabled: true,
+  raw_scan_artifact_retention_days: 365,
 };
 
 export function AdminSettings() {
@@ -135,6 +136,16 @@ export function AdminSettings() {
           value={String(form.finding_resolution_clean_scans ?? 2)}
           onChange={(v) => setForm({ ...form, finding_resolution_clean_scans: Number(v) || 0 })}
         />
+        <Field
+          label="Raw scan artifact retention (days)"
+          value={String(form.raw_scan_artifact_retention_days ?? 365)}
+          onChange={(v) => setForm({ ...form, raw_scan_artifact_retention_days: Number(v) || 0 })}
+        />
+        <div className="md:col-span-2 text-sm text-slate-400">
+          Raw scanner files (Naabu, httpx, Nuclei JSONL) are deleted after this many days. Normalized
+          historical findings, assets, and scan history remain. Changing this value applies to newly
+          stored artifacts.
+        </div>
         <label className="flex items-center gap-2 text-sm text-slate-300 mt-6">
           <input
             type="checkbox"

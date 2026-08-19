@@ -258,6 +258,28 @@ class ScanJobOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ScanArtifactOut(BaseModel):
+    id: int
+    scan_job_id: int
+    tenant_id: int
+    artifact_key: str
+    tool: str
+    stage: str
+    media_type: str
+    content_encoding: str
+    size_bytes: int
+    sha256: str
+    created_at: datetime
+    retention_expires_at: datetime
+    deleted_at: datetime | None = None
+    delete_reason: str | None = None
+    available: bool
+    provenance: dict[str, Any] = {}
+    download_filename: str
+
+    model_config = {"from_attributes": True}
+
+
 class AuthorizedWanTargetIn(BaseModel):
     name: str = ""
     target_type: str = Field(pattern="^(ip|cidr|fqdn)$")
@@ -438,12 +460,20 @@ class SettingsOut(BaseModel):
     scan_cap_nuclei_retries: int = 5
     finding_resolution_clean_scans: int = 2
     vulnerability_intelligence_enabled: bool = True
+    raw_scan_artifact_retention_days: int = 365
 
     @field_validator("finding_resolution_clean_scans")
     @classmethod
     def _positive_clean_scans(cls, value: int) -> int:
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError("finding_resolution_clean_scans must be a positive integer")
+        return value
+
+    @field_validator("raw_scan_artifact_retention_days")
+    @classmethod
+    def _positive_raw_retention(cls, value: int) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1 or value > 3650:
+            raise ValueError("raw_scan_artifact_retention_days must be an integer from 1 to 3650")
         return value
 
 
