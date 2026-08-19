@@ -54,10 +54,10 @@ export function Reports() {
 
   function query(extra = "") {
     const params = new URLSearchParams();
-    if (tenantId) params.set("tenant_id", tenantId);
-    if (siteId) params.set("site_id", siteId);
-    if (dateFrom) params.set("date_from", new Date(dateFrom).toISOString());
-    if (dateTo) params.set("date_to", new Date(dateTo).toISOString());
+    if (hasFilter("tenant_id") && tenantId) params.set("tenant_id", tenantId);
+    if (hasFilter("site_id") && siteId) params.set("site_id", siteId);
+    if (hasFilter("date_from") && dateFrom) params.set("date_from", new Date(dateFrom).toISOString());
+    if (hasFilter("date_to") && dateTo) params.set("date_to", new Date(dateTo).toISOString());
     if (hasFilter("severity") && severity) params.set("severity", severity);
     if (hasFilter("priority") && priority) params.set("priority", priority);
     if (hasFilter("kev") && kev) params.set("kev", kev);
@@ -130,36 +130,44 @@ export function Reports() {
         ))}
       </div>
       <form onSubmit={onPreview} className="bg-slate-900 border border-slate-800 rounded-xl p-4 grid md:grid-cols-4 gap-3 items-end">
-        <div>
-          <label>Tenant</label>
-          <select className="w-full" value={tenantId} onChange={(e) => setTenantId(e.target.value)} required={spec?.key === "control_evidence"}>
-            <option value="">{spec?.key === "control_evidence" ? "Select one tenant" : "Authorized scope"}</option>
-            {tenants.map((tenant) => (
-              <option key={tenant.id} value={tenant.id}>
-                {tenant.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label>Site</label>
-          <select className="w-full" value={siteId} onChange={(e) => setSiteId(e.target.value)} disabled={!tenantId}>
-            <option value="">{tenantId ? "All sites" : "Select a tenant first"}</option>
-            {sites.map((site) => (
-              <option key={site.id} value={site.id}>
-                {site.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label>From</label>
-          <input className="w-full" type="datetime-local" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-        </div>
-        <div>
-          <label>To</label>
-          <input className="w-full" type="datetime-local" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-        </div>
+        {hasFilter("tenant_id") && (
+          <div>
+            <label>Tenant</label>
+            <select className="w-full" value={tenantId} onChange={(e) => setTenantId(e.target.value)} required={spec?.key === "control_evidence"}>
+              <option value="">{spec?.key === "control_evidence" ? "Select one tenant" : "Authorized scope"}</option>
+              {tenants.map((tenant) => (
+                <option key={tenant.id} value={tenant.id}>
+                  {tenant.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {hasFilter("site_id") && (
+          <div>
+            <label>Site</label>
+            <select className="w-full" value={siteId} onChange={(e) => setSiteId(e.target.value)} disabled={!tenantId}>
+              <option value="">{tenantId ? "All sites" : "Select a tenant first"}</option>
+              {sites.map((site) => (
+                <option key={site.id} value={site.id}>
+                  {site.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {hasFilter("date_from") && (
+          <div>
+            <label>From</label>
+            <input className="w-full" type="datetime-local" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+          </div>
+        )}
+        {hasFilter("date_to") && (
+          <div>
+            <label>To</label>
+            <input className="w-full" type="datetime-local" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+          </div>
+        )}
         {hasFilter("severity") && (
           <div>
             <label>Severity</label>

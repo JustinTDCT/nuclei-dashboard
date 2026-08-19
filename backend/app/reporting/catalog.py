@@ -136,3 +136,27 @@ def get_spec(report_key: str) -> ReportSpec:
 
         raise HTTPException(status_code=404, detail="Report not found")
     return spec
+
+
+RESERVED_QUERY_KEYS = frozenset({"page", "page_size", "format"})
+
+
+def supported_filter_keys(spec: ReportSpec) -> set[str]:
+    return {item.key for item in spec.filters}
+
+
+def assert_supported_filters(spec: ReportSpec, query_params) -> None:
+    allowed = supported_filter_keys(spec)
+    unsupported = sorted(key for key in query_params if key not in RESERVED_QUERY_KEYS and key not in allowed)
+    if unsupported:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported filter(s) for this report: {', '.join(unsupported)}",
+        )
+
+
+def scoped_filters(spec: ReportSpec, values: dict) -> dict:
+    allowed = supported_filter_keys(spec)
+    return {key: value for key, value in values.items() if key in allowed}

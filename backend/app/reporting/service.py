@@ -5,9 +5,9 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.audit import record_audit
-from app.reporting.catalog import catalog, get_spec
+from app.reporting.catalog import catalog, get_spec, scoped_filters, supported_filter_keys
 from app.reporting.csv_export import csv_response_from_spool, spool_csv
-from app.reporting.pdf_export import build_pdf_bytes, pdf_response
+from app.reporting.pdf_export import pdf_response, render_pdf
 from app.reporting.queries import (
     agent_health_query,
     agent_health_rows,
@@ -251,8 +251,43 @@ def _dataset(ctx: ReportContext, report_key: str, *, offset: int | None = None, 
     return spec, summary, rows, total
 
 
+def _assert_context_matches_catalog(ctx: ReportContext, spec) -> None:
+    allowed = supported_filter_keys(spec)
+    unexpected: list[str] = []
+    if ctx.site_id is not None and "site_id" not in allowed:
+        unexpected.append("site_id")
+    if ctx.date_from is not None and "date_from" not in allowed:
+        unexpected.append("date_from")
+    if ctx.date_to is not None and "date_to" not in allowed:
+        unexpected.append("date_to")
+    unexpected.extend(
+        key
+        for key, value in ctx.filters.items()
+        if key not in allowed and value not in (None, "", False)
+    )
+    if unexpected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported filter(s) for this report: {', '.join(sorted(set(unexpected)))}",
+        )
+
+
+def _declared_filters(ctx: ReportContext, spec) -> dict[str, Any]:
+    return scoped_filters(
+        spec,
+        {
+            "tenant_id": ctx.requested_tenant_id,
+            "site_id": ctx.site_id,
+            "date_from": ctx.date_from.isoformat() if ctx.date_from else None,
+            "date_to": ctx.date_to.isoformat() if ctx.date_to else None,
+            **ctx.filters,
+        },
+    )
+
+
 def preview_report(ctx: ReportContext, report_key: str, *, page: int, page_size: int) -> dict[str, Any]:
     spec = get_spec(report_key)
+    _assert_context_matches_catalog(ctx, spec)
     page_size = min(max(page_size, 1), spec.max_page_size)
     page = max(page, 1)
     offset = (page - 1) * page_size
@@ -270,13 +305,7 @@ def preview_report(ctx: ReportContext, report_key: str, *, page: int, page_size:
             else ctx.authorized_tenant_ids
             or ([tid for (tid,) in ctx.db.query(Tenant.id).all()] if ctx.all_tenants else [])
         ),
-        "filters": {
-            "tenant_id": ctx.requested_tenant_id,
-            "site_id": ctx.site_id,
-            "date_from": ctx.date_from.isoformat() if ctx.date_from else None,
-            "date_to": ctx.date_to.isoformat() if ctx.date_to else None,
-            **ctx.filters,
-        },
+        "filters": _declared_filters(ctx, spec),
         "summary": summary,
         "columns": COLUMNS[report_key],
         "rows": rows,
@@ -395,6 +424,7 @@ def _audit_export(ctx: ReportContext, report_key: str, fmt: str) -> None:
 
 def export_report(ctx: ReportContext, report_key: str, fmt: str):
     spec = get_spec(report_key)
+    _assert_context_matches_catalog(ctx, spec)
     if fmt not in spec.formats:
         raise HTTPException(status_code=400, detail=f"Format {fmt} is not supported for this report")
     columns = COLUMNS[report_key]
@@ -405,22 +435,16 @@ def export_report(ctx: ReportContext, report_key: str, fmt: str):
         return csv_response_from_spool(filename, spool)
     summary = report_summary(ctx, report_key)
     disclaimer = summary.get("disclaimer") if report_key in {"control_evidence", "executive"} else None
-    content = build_pdf_bytes(
+    spool = render_pdf(
         title=spec.title,
         scope=ctx.scope_label(),
         generated_at=ctx.generated_at.isoformat(),
         timezone_label=ctx.display_timezone,
-        filters={
-            "tenant_id": ctx.requested_tenant_id,
-            "site_id": ctx.site_id,
-            "date_from": ctx.date_from.isoformat() if ctx.date_from else None,
-            "date_to": ctx.date_to.isoformat() if ctx.date_to else None,
-            **ctx.filters,
-        },
+        filters=_declared_filters(ctx, spec),
         summary=summary,
         columns=columns,
         rows=_iter_rows(ctx, report_key),
         disclaimer=disclaimer,
     )
     _audit_export(ctx, report_key, fmt)
-    return pdf_response(filename, content)
+    return pdf_response(filename, spool)

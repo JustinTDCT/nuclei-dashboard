@@ -1,20 +1,43 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.auth import require_any
 from app.database import get_db
 from app.models import User
-from app.reporting.catalog import get_spec
+from app.reporting.catalog import assert_supported_filters, get_spec, scoped_filters, supported_filter_keys
 from app.reporting.scope import build_context
 from app.reporting.service import export_report, preview_report, report_catalog
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
-def _bool(value: bool | None) -> bool | None:
-    return value
+def _context(
+    request: Request,
+    report_key: str,
+    *,
+    tenant_id: int | None,
+    site_id: int | None,
+    date_from: datetime | None,
+    date_to: datetime | None,
+    extra: dict,
+    user: User,
+    db: Session,
+):
+    spec = get_spec(report_key)
+    assert_supported_filters(spec, request.query_params)
+    allowed = supported_filter_keys(spec)
+    return spec, build_context(
+        db,
+        user,
+        tenant_id=tenant_id if "tenant_id" in allowed else None,
+        site_id=site_id if "site_id" in allowed else None,
+        date_from=date_from if "date_from" in allowed else None,
+        date_to=date_to if "date_to" in allowed else None,
+        require_single_tenant=spec.require_single_tenant,
+        extra=scoped_filters(spec, extra),
+    )
 
 
 @router.get("/catalog")
@@ -24,6 +47,7 @@ def catalog(_: User = Depends(require_any)):
 
 @router.get("/{report_key}/preview")
 def preview(
+    request: Request,
     report_key: str,
     tenant_id: int | None = None,
     site_id: int | None = None,
@@ -46,15 +70,13 @@ def preview(
     user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    spec = get_spec(report_key)
-    ctx = build_context(
-        db,
-        user,
+    spec, ctx = _context(
+        request,
+        report_key,
         tenant_id=tenant_id,
         site_id=site_id,
         date_from=date_from,
         date_to=date_to,
-        require_single_tenant=spec.require_single_tenant,
         extra={
             "severity": severity,
             "priority": priority,
@@ -69,12 +91,15 @@ def preview(
             "framework_id": framework_id,
             "include_removed": include_removed,
         },
+        user=user,
+        db=db,
     )
-    return preview_report(ctx, report_key, page=page, page_size=page_size)
+    return preview_report(ctx, spec.key, page=page, page_size=page_size)
 
 
 @router.get("/{report_key}/export")
 def export(
+    request: Request,
     report_key: str,
     format: str = Query(default="csv", alias="format"),
     tenant_id: int | None = None,
@@ -96,15 +121,13 @@ def export(
     user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    spec = get_spec(report_key)
-    ctx = build_context(
-        db,
-        user,
+    spec, ctx = _context(
+        request,
+        report_key,
         tenant_id=tenant_id,
         site_id=site_id,
         date_from=date_from,
         date_to=date_to,
-        require_single_tenant=spec.require_single_tenant,
         extra={
             "severity": severity,
             "priority": priority,
@@ -119,5 +142,7 @@ def export(
             "framework_id": framework_id,
             "include_removed": include_removed,
         },
+        user=user,
+        db=db,
     )
-    return export_report(ctx, report_key, format.lower())
+    return export_report(ctx, spec.key, format.lower())

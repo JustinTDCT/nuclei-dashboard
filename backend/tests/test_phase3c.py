@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -796,7 +797,11 @@ def test_viewer_expiration_datetime_local_round_trip():
 def test_auditor_ui_exposes_site_pagination_and_filters():
     reports = (FRONTEND_SRC / "pages" / "Reports.tsx").read_text()
     history = (FRONTEND_SRC / "pages" / "History.tsx").read_text()
-    assert 'params.set("site_id"' in reports
+    assert 'hasFilter("site_id") && siteId' in reports
+    assert 'hasFilter("date_from") && dateFrom' in reports
+    assert 'hasFilter("date_to") && dateTo' in reports
+    assert '{hasFilter("site_id") && (' in reports
+    assert '{hasFilter("date_from") && (' in reports
     assert "unauthorized" in reports
     assert '["low", "normal", "high", "critical"]' in reports
     assert "Previous" in reports and "Next" in reports
@@ -1163,7 +1168,7 @@ def test_pdf_export_is_chunked_and_audit_follows_success(reset_db):
             before = db.query(AuditLog).filter(AuditLog.action == "report.export").count()
         finally:
             db.close()
-        with patch.object(report_service, "build_pdf_bytes", side_effect=RuntimeError("forced render failure")):
+        with patch.object(report_service, "render_pdf", side_effect=RuntimeError("forced render failure")):
             with pytest.raises(RuntimeError, match="forced render failure"):
                 client.get(
                     f"/api/reports/asset_inventory/export?format=pdf&tenant_id={tenant_id}",
@@ -1175,3 +1180,90 @@ def test_pdf_export_is_chunked_and_audit_follows_success(reset_db):
         finally:
             db.close()
         assert after == before
+
+
+def test_pdf_renderer_is_page_buffered():
+    from app.reporting.pdf_export import render_pdf
+
+    src = (BACKEND_ROOT / "app" / "reporting" / "pdf_export.py").read_text()
+    service_src = (BACKEND_ROOT / "app" / "reporting" / "service.py").read_text()
+    assert "SimpleDocTemplate" not in src
+    assert "doc.build" not in src
+    assert "canvas.Canvas" in src
+    assert "return spool.read()" not in src
+    assert "build_pdf_bytes" not in service_src
+    live = 0
+    peak = 0
+
+    def rows():
+        nonlocal live, peak
+        for idx in range(250):
+            live += 1
+            peak = max(peak, live)
+            yield {"name": f"row-{idx}"}
+            live -= 1
+
+    spool = render_pdf(
+        title="Buffered",
+        scope="Tenant",
+        generated_at="2026-08-19T00:00:00Z",
+        timezone_label="UTC",
+        filters={"tenant_id": 1},
+        summary={"rows": 250},
+        columns=["name"],
+        rows=rows(),
+    )
+    assert not isinstance(spool, (bytes, bytearray))
+    assert peak == 1
+    content = spool.read()
+    spool.close()
+    assert content[:4] == b"%PDF"
+    assert len(re.findall(rb"/Type\s*/Page(?!s)", content)) >= 2
+
+
+@requires_postgres
+def test_catalog_rejects_unsupported_report_filters(reset_db):
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        tenant_id = world["tenant"]["id"]
+        site_id = world["site"]["id"]
+        viewer, _ = _create_viewer(client, admin, "filter-guard", tenant_ids=[tenant_id])
+        framework = client.get("/api/compliance/frameworks", headers=_headers(admin)).json()
+        framework_id = framework[0]["id"] if framework else None
+        if framework_id is None:
+            from app.database import SessionLocal
+            from app.models import ComplianceFramework
+
+            db = SessionLocal()
+            try:
+                item = ComplianceFramework(slug="guard-3c", name="Guard", version="1", builtin=False)
+                db.add(item)
+                db.commit()
+                framework_id = item.id
+            finally:
+                db.close()
+        denied_site = client.get(
+            f"/api/reports/control_evidence/preview?tenant_id={tenant_id}&framework_id={framework_id}&site_id={site_id}",
+            headers=_headers(viewer),
+        )
+        assert denied_site.status_code == 400
+        assert "site_id" in denied_site.json()["detail"]
+        denied_export = client.get(
+            f"/api/reports/control_evidence/export?format=pdf&tenant_id={tenant_id}&framework_id={framework_id}&site_id={site_id}",
+            headers=_headers(viewer),
+        )
+        assert denied_export.status_code == 400
+        denied_dates = client.get(
+            f"/api/reports/agent_health/preview?tenant_id={tenant_id}&date_from=2026-08-01T00:00:00Z",
+            headers=_headers(viewer),
+        )
+        assert denied_dates.status_code == 400
+        assert "date_from" in denied_dates.json()["detail"]
+        allowed = client.get(
+            f"/api/reports/agent_health/preview?tenant_id={tenant_id}&site_id={site_id}",
+            headers=_headers(viewer),
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["filters"].get("site_id") == site_id
+        assert "date_from" not in allowed.json()["filters"]
