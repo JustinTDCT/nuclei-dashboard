@@ -401,7 +401,7 @@ You need:
 - TCP port **8118** reachable by the administrators who use the dashboard
 - TCP port **8118** reachable by remote Agents
 - Outbound Internet access during image builds so the scanner image can retrieve its pinned ProjectDiscovery releases
-- A TLS certificate and matching private key
+- A TLS certificate and matching private key — public CA, internal CA, or self-signed
 
 The scanner build supports:
 
@@ -543,7 +543,187 @@ The certificate must be valid for the hostname or IP address users and Agents ac
 
 If the certificate chains to a CA trusted by the Agent's operating system/container, no extra Agent CA file is required.
 
+### Self-signed certificate
+
+A self-signed certificate is suitable for a lab, test environment, small internal deployment, or another environment where you can explicitly trust the certificate on every browser and Agent that connects to the dashboard.
+
+A self-signed certificate is **not automatically trusted**. The connection is still encrypted, but clients must be told to trust the certificate.
+
+The most important requirement is that the certificate's **Subject Alternative Name (SAN)** contains the exact hostname and/or IP address used to reach Nuclei Dashboard.
+
+For example, if the dashboard will be reached as:
+
+```text
+https://nuclei-dashboard.example.local:8118
+```
+
+and its server IP is:
+
+```text
+10.20.30.40
+```
+
+generate the certificate from the repository root with:
+
+```bash
+mkdir -p certs
+
+openssl req -x509   -newkey rsa:4096   -sha256   -days 825   -nodes   -keyout certs/key.pem   -out certs/cert.pem   -subj "/CN=nuclei-dashboard.example.local"   -addext "subjectAltName=DNS:nuclei-dashboard.example.local,IP:10.20.30.40"   -addext "keyUsage=critical,digitalSignature,keyEncipherment"   -addext "extendedKeyUsage=serverAuth"
+```
+
+Replace:
+
+```text
+nuclei-dashboard.example.local
+10.20.30.40
+```
+
+with the actual hostname and IP address for your installation.
+
+If the dashboard will only be accessed by hostname, the SAN can contain only the DNS name:
+
+```bash
+openssl req -x509   -newkey rsa:4096   -sha256   -days 825   -nodes   -keyout certs/key.pem   -out certs/cert.pem   -subj "/CN=nuclei-dashboard.example.local"   -addext "subjectAltName=DNS:nuclei-dashboard.example.local"   -addext "keyUsage=critical,digitalSignature,keyEncipherment"   -addext "extendedKeyUsage=serverAuth"
+```
+
+If the dashboard will only be accessed by IP address:
+
+```bash
+openssl req -x509   -newkey rsa:4096   -sha256   -days 825   -nodes   -keyout certs/key.pem   -out certs/cert.pem   -subj "/CN=10.20.30.40"   -addext "subjectAltName=IP:10.20.30.40"   -addext "keyUsage=critical,digitalSignature,keyEncipherment"   -addext "extendedKeyUsage=serverAuth"
+```
+
+After generation, protect the private key:
+
+```bash
+chmod 600 certs/key.pem
+chmod 644 certs/cert.pem
+```
+
+Verify that the certificate and key match:
+
+```bash
+openssl x509 -noout -modulus -in certs/cert.pem | openssl sha256
+openssl rsa  -noout -modulus -in certs/key.pem  | openssl sha256
+```
+
+The two SHA-256 results should match.
+
+Verify the SAN:
+
+```bash
+openssl x509 -in certs/cert.pem -noout -text | grep -A2 "Subject Alternative Name"
+```
+
+Then configure `.env` to use the same hostname or IP that appears in the SAN:
+
+```dotenv
+PUBLIC_URL=https://nuclei-dashboard.example.local:8118
+SITE_ADDRESS=https://nuclei-dashboard.example.local:8118
+```
+
+Start or restart the central stack:
+
+```bash
+docker compose up -d --build
+```
+
+Test the server certificate directly:
+
+```bash
+curl --cacert certs/cert.pem   https://nuclei-dashboard.example.local:8118/api/health
+```
+
+Expected response:
+
+```json
+{"ok":true}
+```
+
+#### Trusting the self-signed certificate on a Site Agent
+
+Because the certificate is self-signed, the Agent must explicitly trust it.
+
+On the Agent host:
+
+```bash
+cd ~/nuclei-agent
+mkdir -p agent-certs
+```
+
+Copy **only the public certificate** to the Agent host:
+
+```bash
+cp /path/to/cert.pem agent-certs/ca.pem
+```
+
+Do **not** copy `key.pem` to the Agent.
+
+In `agent.env`:
+
+```dotenv
+TLS_VERIFY=1
+TLS_CA_FILE=/certs/ca.pem
+```
+
+Then recreate the Agent:
+
+```bash
+docker compose --env-file agent.env up -d
+```
+
+Test from the Agent host:
+
+```bash
+curl --cacert ./agent-certs/ca.pem   https://nuclei-dashboard.example.local:8118/api/health
+```
+
+If the Agent still reports an HTTPS or certificate error, check:
+
+1. The hostname in `CENTRAL_URL` matches a DNS SAN in the certificate.
+2. If using an IP address, the IP appears as an `IP:` SAN.
+3. `agent-certs/ca.pem` contains the public self-signed certificate.
+4. `TLS_CA_FILE=/certs/ca.pem` is set in `agent.env`.
+5. The Agent Compose file mounts `./agent-certs` to `/certs`.
+6. The certificate has not expired.
+
+#### Trusting the certificate in a browser
+
+Browsers and operating systems will normally warn about a self-signed certificate until it is manually trusted.
+
+For an internal environment, import `certs/cert.pem` into the workstation or browser's trusted certificate store according to your organization's policy.
+
+Never distribute:
+
+```text
+certs/key.pem
+```
+
+Only the public certificate should be distributed for trust.
+
+A browser warning should not be treated as a normal permanent operating state. Either trust the self-signed certificate on managed workstations or use a certificate issued by your internal/public CA.
+
+#### Replacing or renewing a self-signed certificate
+
+The example certificate above is valid for 825 days.
+
+Before it expires, generate a replacement with the same required SANs, replace:
+
+```text
+certs/cert.pem
+certs/key.pem
+```
+
+and recreate Caddy:
+
+```bash
+docker compose up -d caddy
+```
+
+If the self-signed certificate itself changes, Agents and workstations that trusted the old certificate must also be updated to trust the new public certificate.
+
 ### Internal/private CA certificate
+
+If your organization already operates an internal CA, using a CA-issued server certificate is generally easier to manage than distributing a unique self-signed server certificate to every client.
 
 The central Caddy server still uses:
 
