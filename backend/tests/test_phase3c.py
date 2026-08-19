@@ -26,6 +26,9 @@ PHASE3B_HEAD = "0013_event_alert_engine"
 PHASE3C_HEAD = "0014_reports_auditor_access"
 PHASE3B_GIT_BLOB = "478c3be4f0cc0a4c62b03aabee48f4120379dd7c"
 PHASE3B_SHA256 = "72792866df1caf6a6a263bad8dc348b2abee8e507e2a4bd656cda97e8dba6578"
+PHASE3C_GIT_BLOB = "bf44ca9fcc7fdbbf76e42bee3453e9381dd232f9"
+PHASE3C_SHA256 = "4f8167d0c2f22c37eec0ae96fff5cdfe637977ab7b531bc0084270b09e46bfc5"
+FRONTEND_SRC = BACKEND_ROOT.parent / "frontend" / "src"
 
 
 def _create_viewer(client, admin, username, *, all_tenants=False, tenant_ids=None, expires_at=None) -> tuple[str, int]:
@@ -59,15 +62,15 @@ def test_fresh_db_reaches_0014_and_freezes_0013(reset_db):
     revision = apply_schema()
     assert revision == head_revision() == current_revision() == PHASE3C_HEAD
     assert "viewer_tenant_grants" in inspect(engine).get_table_names()
-    content = (BACKEND_ROOT / "alembic" / "versions" / "0013_event_alert_engine.py").read_bytes()
-    assert hashlib.sha256(content).hexdigest() == PHASE3B_SHA256
-    assert FROZEN_MIGRATION_HASHES["0013_event_alert_engine.py"] == PHASE3B_SHA256
-    blob = subprocess.check_output(
-        ["git", "hash-object", str(BACKEND_ROOT / "alembic" / "versions" / "0013_event_alert_engine.py")],
-        cwd=BACKEND_ROOT.parent,
-        text=True,
-    ).strip()
-    assert blob == PHASE3B_GIT_BLOB
+    for name, sha256, blob_id in (
+        ("0013_event_alert_engine.py", PHASE3B_SHA256, PHASE3B_GIT_BLOB),
+        ("0014_reports_auditor_access.py", PHASE3C_SHA256, PHASE3C_GIT_BLOB),
+    ):
+        path = BACKEND_ROOT / "alembic" / "versions" / name
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == sha256
+        assert FROZEN_MIGRATION_HASHES[name] == sha256
+        blob = subprocess.check_output(["git", "hash-object", str(path)], cwd=BACKEND_ROOT.parent, text=True).strip()
+        assert blob == blob_id
 
 
 @requires_postgres
@@ -540,6 +543,12 @@ def test_control_evidence_disclaimer_and_query_bound(reset_db):
         assert "no mapped evidence in the application" in text_blob
         assert "evidence/reference is mapped" in text_blob
         assert preview["summary"]["disclaimer"]
+        page = client.get(
+            f"/api/reports/control_evidence/preview?tenant_id={world['tenant']['id']}&framework_id={framework_id}&page=1&page_size=1",
+            headers=_headers(viewer),
+        ).json()
+        assert page["total"] >= 2
+        assert len(page["rows"]) == 1
         assert client.get(
             f"/api/reports/control_evidence/preview?tenant_id={other['id']}&framework_id={framework_id}",
             headers=_headers(viewer),
@@ -753,3 +762,416 @@ def test_resolved_pending_scan_history_and_query_bound(reset_db):
         finally:
             event.remove(engine, "before_cursor_execute", before_cursor)
         assert len(statements) < 40
+
+
+def test_0014_is_frozen_byte_for_byte():
+    path = BACKEND_ROOT / "alembic" / "versions" / "0014_reports_auditor_access.py"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == PHASE3C_SHA256
+    assert FROZEN_MIGRATION_HASHES["0014_reports_auditor_access.py"] == PHASE3C_SHA256
+    blob = subprocess.check_output(["git", "hash-object", str(path)], cwd=BACKEND_ROOT.parent, text=True).strip()
+    assert blob == PHASE3C_GIT_BLOB
+
+
+def test_viewer_expiration_datetime_local_round_trip():
+    from zoneinfo import ZoneInfo
+
+    utc = datetime(2026, 8, 20, 21, 0, tzinfo=timezone.utc)
+    local = utc.astimezone(ZoneInfo("America/New_York"))
+    local_value = f"{local.year:04d}-{local.month:02d}-{local.day:02d}T{local.hour:02d}:{local.minute:02d}"
+    assert local_value == "2026-08-20T17:00"
+    parsed = datetime.fromisoformat(local_value).replace(tzinfo=ZoneInfo("America/New_York"))
+    assert parsed.astimezone(timezone.utc) == utc
+    sliced = utc.isoformat().replace("+00:00", "Z")[:16]
+    assert sliced == "2026-08-20T21:00"
+    assert sliced != local_value
+    admin = (FRONTEND_SRC / "pages" / "AdminUsers.tsx").read_text()
+    helper = (FRONTEND_SRC / "datetimeLocal.ts").read_text()
+    assert "utcToDatetimeLocal" in admin
+    assert "datetimeLocalToUtc" in admin
+    assert "viewer_expires_at.slice(0, 16)" not in admin
+    assert "export function utcToDatetimeLocal" in helper
+    assert "export function datetimeLocalToUtc" in helper
+
+
+def test_auditor_ui_exposes_site_pagination_and_filters():
+    reports = (FRONTEND_SRC / "pages" / "Reports.tsx").read_text()
+    history = (FRONTEND_SRC / "pages" / "History.tsx").read_text()
+    assert 'params.set("site_id"' in reports
+    assert "unauthorized" in reports
+    assert '["low", "normal", "high", "critical"]' in reports
+    assert "Previous" in reports and "Next" in reports
+    assert "page_size=50" in reports
+    assert "offset" in history
+    assert "Previous" in history and "Next" in history
+
+
+def _site_asset(db, tenant_id: int, site_id: int, name: str):
+    from app.models import Asset
+
+    asset = Asset(
+        tenant_id=tenant_id,
+        site_id=site_id,
+        display_name=name,
+        classification="Server",
+        description="",
+        lifecycle_state="active",
+        disposition="unreviewed",
+        criticality="critical",
+        is_expected=False,
+    )
+    db.add(asset)
+    db.flush()
+    return asset
+
+
+def _open_critical(db, tenant_id: int, asset, key: str, *, priority="p1"):
+    from app.models import TECHNICAL_OPEN, AssetFinding, Finding, Vulnerability
+
+    now = datetime.now(timezone.utc)
+    vuln = Vulnerability(canonical_key=key, title=key)
+    db.add(vuln)
+    db.flush()
+    finding = AssetFinding(
+        tenant_id=tenant_id,
+        asset_id=asset.id,
+        vulnerability_id=vuln.id,
+        technical_state=TECHNICAL_OPEN,
+        treatment_state="unaddressed",
+        first_seen=now - timedelta(days=5),
+        last_seen=now,
+        priority=priority,
+    )
+    db.add(finding)
+    db.flush()
+    db.add(
+        Finding(
+            tenant_id=tenant_id,
+            asset_id=asset.id,
+            asset_finding_id=finding.id,
+            template_id=key,
+            name=key,
+            severity="critical",
+            hostname=asset.display_name,
+            host=asset.display_name,
+            found_at=now,
+            evidence_key=f"ev-{key}",
+            raw_json={},
+        )
+    )
+    return finding
+
+
+@requires_postgres
+def test_executive_site_scope_and_history_resolution(reset_db):
+    from app.database import SessionLocal
+    from app.models import HISTORY_REOPENED, HISTORY_RESOLVED, TECHNICAL_OPEN, TECHNICAL_RESOLVED, AssetFindingHistory
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        tenant_id = world["tenant"]["id"]
+        hartford = client.post(
+            f"/api/tenants/{tenant_id}/sites",
+            headers=_headers(admin),
+            json={"name": "Hartford", "timezone": "America/New_York"},
+        ).json()
+        boston = client.post(
+            f"/api/tenants/{tenant_id}/sites",
+            headers=_headers(admin),
+            json={"name": "Boston", "timezone": "America/New_York"},
+        ).json()
+        now = datetime.now(timezone.utc)
+        db = SessionLocal()
+        try:
+            hart_asset = _site_asset(db, tenant_id, hartford["id"], "Hartford Host")
+            bos_asset = _site_asset(db, tenant_id, boston["id"], "Boston Host")
+            hart_finding = _open_critical(db, tenant_id, hart_asset, "nuclei:hartford-crit")
+            for idx in range(10):
+                _open_critical(db, tenant_id, bos_asset, f"nuclei:boston-crit-{idx}")
+            db.add(
+                AssetFindingHistory(
+                    asset_finding_id=hart_finding.id,
+                    tenant_id=tenant_id,
+                    transition_type=HISTORY_RESOLVED,
+                    previous_technical_state=TECHNICAL_OPEN,
+                    new_technical_state=TECHNICAL_RESOLVED,
+                    occurred_at=now - timedelta(days=2),
+                    details={},
+                    idempotence_key="3c-hart-resolved",
+                )
+            )
+            db.add(
+                AssetFindingHistory(
+                    asset_finding_id=hart_finding.id,
+                    tenant_id=tenant_id,
+                    transition_type=HISTORY_REOPENED,
+                    previous_technical_state=TECHNICAL_RESOLVED,
+                    new_technical_state=TECHNICAL_OPEN,
+                    occurred_at=now - timedelta(days=1),
+                    details={},
+                    idempotence_key="3c-hart-reopened",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+        viewer, _ = _create_viewer(client, admin, "site-exec", tenant_ids=[tenant_id])
+        hart = client.get(
+            f"/api/reports/executive/preview?tenant_id={tenant_id}&site_id={hartford['id']}",
+            headers=_headers(viewer),
+        ).json()
+        bos = client.get(
+            f"/api/reports/executive/preview?tenant_id={tenant_id}&site_id={boston['id']}",
+            headers=_headers(viewer),
+        ).json()
+        assert hart["summary"]["open_by_severity"]["critical"] == 1
+        assert bos["summary"]["open_by_severity"]["critical"] == 10
+        assert hart["summary"]["open_by_priority"]["p1"] == 1
+        assert bos["summary"]["open_by_priority"]["p1"] == 10
+        assert hart["summary"]["reopened_in_period"] == 1
+        assert bos["summary"]["reopened_in_period"] == 0
+        assert hart["summary"]["resolved_in_period"] == 1
+        assert bos["summary"]["resolved_in_period"] == 0
+
+
+@requires_postgres
+def test_scan_history_uses_immutable_snapshot_site(reset_db):
+    from app.database import SessionLocal
+    from app.models import Scan, ScanJob
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        tenant_id = world["tenant"]["id"]
+        hartford = client.post(
+            f"/api/tenants/{tenant_id}/sites",
+            headers=_headers(admin),
+            json={"name": "Hartford", "timezone": "America/New_York"},
+        ).json()
+        boston = client.post(
+            f"/api/tenants/{tenant_id}/sites",
+            headers=_headers(admin),
+            json={"name": "Boston", "timezone": "America/New_York"},
+        ).json()
+        now = datetime.now(timezone.utc)
+        db = SessionLocal()
+        try:
+            scan = Scan(
+                tenant_id=tenant_id,
+                site_id=hartford["id"],
+                name="Moved Scan",
+                scope="lan",
+                profile="discovery",
+                is_enabled=True,
+            )
+            db.add(scan)
+            db.flush()
+            db.add(
+                ScanJob(
+                    scan_id=scan.id,
+                    tenant_id=tenant_id,
+                    status="done",
+                    started_at=now - timedelta(hours=1),
+                    finished_at=now,
+                    execution_snapshot={
+                        "scope": "lan",
+                        "site": {"id": hartford["id"], "name": "Hartford", "timezone": "America/New_York"},
+                    },
+                    snapshot_version="snap-site",
+                    definition_revision=1,
+                )
+            )
+            scan.site_id = boston["id"]
+            db.commit()
+        finally:
+            db.close()
+        viewer, _ = _create_viewer(client, admin, "scan-site", tenant_ids=[tenant_id])
+        hart = client.get(
+            f"/api/reports/scan_history/preview?tenant_id={tenant_id}&site_id={hartford['id']}",
+            headers=_headers(viewer),
+        ).json()
+        bos = client.get(
+            f"/api/reports/scan_history/preview?tenant_id={tenant_id}&site_id={boston['id']}",
+            headers=_headers(viewer),
+        ).json()
+        assert any(row["site"] == "Hartford" and row["scan_name"] == "Moved Scan" for row in hart["rows"])
+        assert not any(row["scan_name"] == "Moved Scan" for row in bos["rows"])
+
+
+@requires_postgres
+def test_resolved_findings_filter_uses_resolution_timestamp(reset_db):
+    from app.database import SessionLocal
+    from app.models import HISTORY_RESOLVED, TECHNICAL_RESOLVED, AssetFinding, AssetFindingHistory, Vulnerability
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        tenant_id = world["tenant"]["id"]
+        now = datetime.now(timezone.utc)
+        db = SessionLocal()
+        try:
+            asset = _site_asset(db, tenant_id, world["site"]["id"], "Old First Seen")
+            vuln = Vulnerability(canonical_key="cve:CVE-2024-3333", cve_id="CVE-2024-3333", title="Old CVE")
+            db.add(vuln)
+            db.flush()
+            finding = AssetFinding(
+                tenant_id=tenant_id,
+                asset_id=asset.id,
+                vulnerability_id=vuln.id,
+                technical_state=TECHNICAL_RESOLVED,
+                treatment_state="unaddressed",
+                first_seen=now - timedelta(days=200),
+                last_seen=now - timedelta(days=1),
+                resolved_at=now - timedelta(days=1),
+            )
+            db.add(finding)
+            db.flush()
+            db.add(
+                AssetFindingHistory(
+                    asset_finding_id=finding.id,
+                    tenant_id=tenant_id,
+                    transition_type=HISTORY_RESOLVED,
+                    previous_technical_state="open",
+                    new_technical_state=TECHNICAL_RESOLVED,
+                    occurred_at=now - timedelta(days=1),
+                    details={"source": "policy"},
+                    idempotence_key="3c-old-first-seen-resolved",
+                )
+            )
+            db.commit()
+            finding_id = finding.id
+        finally:
+            db.close()
+        start = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        viewer, _ = _create_viewer(client, admin, "resolved-date", tenant_ids=[tenant_id])
+        preview = client.get(
+            f"/api/reports/resolved_findings/preview?tenant_id={tenant_id}&date_from={start}",
+            headers=_headers(viewer),
+        )
+        assert preview.status_code == 200, preview.text
+        assert any(row["asset_finding_id"] == finding_id for row in preview.json()["rows"])
+
+
+@requires_postgres
+def test_finding_preview_uses_latest_evidence_sql(reset_db):
+    from app.database import SessionLocal, engine
+    from app.models import Finding
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        tenant_id = world["tenant"]["id"]
+        db = SessionLocal()
+        try:
+            asset = _site_asset(db, tenant_id, world["site"]["id"], "Evidence Host")
+            finding = _open_critical(db, tenant_id, asset, "nuclei:evidence-bound")
+            now = datetime.now(timezone.utc)
+            for idx in range(80):
+                db.add(
+                    Finding(
+                        tenant_id=tenant_id,
+                        asset_id=asset.id,
+                        asset_finding_id=finding.id,
+                        template_id="hist",
+                        name="hist",
+                        severity="high",
+                        hostname=asset.display_name,
+                        host=asset.display_name,
+                        found_at=now - timedelta(minutes=idx),
+                        evidence_key=f"bound-ev-{idx}",
+                        raw_json={},
+                    )
+                )
+            db.commit()
+        finally:
+            db.close()
+        viewer, _ = _create_viewer(client, admin, "ev-bound", tenant_ids=[tenant_id])
+        statements: list[str] = []
+
+        def before_cursor(conn, cursor, statement, parameters, context, executemany):  # noqa: ARG001
+            statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", before_cursor)
+        try:
+            preview = client.get(
+                f"/api/reports/open_findings/preview?tenant_id={tenant_id}&page_size=50",
+                headers=_headers(viewer),
+            )
+            assert preview.status_code == 200
+            assert preview.json()["rows"]
+        finally:
+            event.remove(engine, "before_cursor_execute", before_cursor)
+        finding_sql = [stmt for stmt in statements if "from findings" in stmt.lower()]
+        assert finding_sql
+        for stmt in finding_sql:
+            upper = stmt.upper()
+            assert "DISTINCT ON" in upper or "COUNT(" in upper
+
+
+@requires_postgres
+def test_pdf_export_is_chunked_and_audit_follows_success(reset_db):
+    from app.database import SessionLocal
+    from app.models import AuditLog, DomainEvent
+    from app.reporting import service as report_service
+
+    with _client() as client:
+        admin = _login(client)
+        world = _world(client, admin)
+        tenant_id = world["tenant"]["id"]
+        now = datetime.now(timezone.utc)
+        db = SessionLocal()
+        try:
+            for idx in range(3):
+                db.add(
+                    DomainEvent(
+                        event_type="new_asset",
+                        tenant_id=tenant_id,
+                        site_id=world["site"]["id"],
+                        occurred_at=now - timedelta(minutes=idx),
+                        source="manual",
+                        details={"display_name": f"Change {idx}"},
+                        idempotence_key=f"3c-change-{idx}",
+                    )
+                )
+            db.commit()
+        finally:
+            db.close()
+        viewer, _ = _create_viewer(client, admin, "pdf-bound", tenant_ids=[tenant_id])
+        dataset_calls = []
+        original = report_service._dataset
+
+        def wrapped(ctx, report_key, *, offset=None, limit=None):
+            dataset_calls.append((report_key, offset, limit))
+            return original(ctx, report_key, offset=offset, limit=limit)
+
+        with patch.object(report_service, "_dataset", wrapped):
+            pdf = client.get(
+                f"/api/reports/asset_inventory/export?format=pdf&tenant_id={tenant_id}",
+                headers=_headers(viewer),
+            )
+        assert pdf.status_code == 200
+        assert pdf.content[:4] == b"%PDF"
+        assert dataset_calls == []
+        changes = client.get(
+            f"/api/reports/asset_changes/preview?tenant_id={tenant_id}&page=1&page_size=1",
+            headers=_headers(viewer),
+        ).json()
+        assert changes["total"] >= 3
+        assert len(changes["rows"]) == 1
+        db = SessionLocal()
+        try:
+            before = db.query(AuditLog).filter(AuditLog.action == "report.export").count()
+        finally:
+            db.close()
+        with patch.object(report_service, "build_pdf_bytes", side_effect=RuntimeError("forced render failure")):
+            with pytest.raises(RuntimeError, match="forced render failure"):
+                client.get(
+                    f"/api/reports/asset_inventory/export?format=pdf&tenant_id={tenant_id}",
+                    headers=_headers(viewer),
+                )
+        db = SessionLocal()
+        try:
+            after = db.query(AuditLog).filter(AuditLog.action == "report.export").count()
+        finally:
+            db.close()
+        assert after == before

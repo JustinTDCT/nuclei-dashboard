@@ -1,15 +1,17 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { api, download } from "../api";
 import { useAuth } from "../auth";
-import type { ComplianceFramework, ReportCatalogItem, ReportPreview, Tenant } from "../types";
+import type { ComplianceFramework, ReportCatalogItem, ReportPreview, Site, Tenant } from "../types";
 
 export function Reports() {
   const { user } = useAuth();
   const [catalog, setCatalog] = useState<ReportCatalogItem[]>([]);
   const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [sites, setSites] = useState<Site[]>([]);
   const [frameworks, setFrameworks] = useState<ComplianceFramework[]>([]);
   const [selected, setSelected] = useState("");
   const [tenantId, setTenantId] = useState("");
+  const [siteId, setSiteId] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [severity, setSeverity] = useState("");
@@ -39,6 +41,13 @@ export function Reports() {
     api<ComplianceFramework[]>("/api/compliance/frameworks").then(setFrameworks).catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    setSiteId("");
+    setSites([]);
+    if (!tenantId) return;
+    api<Site[]>(`/api/tenants/${tenantId}/sites`).then(setSites).catch(() => setSites([]));
+  }, [tenantId]);
+
   function hasFilter(key: string) {
     return Boolean(spec?.supported_filters.some((item) => item.key === key));
   }
@@ -46,6 +55,7 @@ export function Reports() {
   function query(extra = "") {
     const params = new URLSearchParams();
     if (tenantId) params.set("tenant_id", tenantId);
+    if (siteId) params.set("site_id", siteId);
     if (dateFrom) params.set("date_from", new Date(dateFrom).toISOString());
     if (dateTo) params.set("date_to", new Date(dateTo).toISOString());
     if (hasFilter("severity") && severity) params.set("severity", severity);
@@ -63,19 +73,23 @@ export function Reports() {
     return `${params.toString()}${extra ? `&${extra}` : ""}`;
   }
 
-  async function onPreview(e: FormEvent) {
-    e.preventDefault();
+  async function loadPreview(nextPage = 1) {
     if (!selected) return;
     setError("");
     setLoading(true);
     try {
-      const data = await api<ReportPreview>(`/api/reports/${selected}/preview?${query("page=1&page_size=50")}`);
+      const data = await api<ReportPreview>(`/api/reports/${selected}/preview?${query(`page=${nextPage}&page_size=50`)}`);
       setPreview(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Preview failed");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function onPreview(e: FormEvent) {
+    e.preventDefault();
+    await loadPreview(1);
   }
 
   function exportReport(format: string) {
@@ -123,6 +137,17 @@ export function Reports() {
             {tenants.map((tenant) => (
               <option key={tenant.id} value={tenant.id}>
                 {tenant.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label>Site</label>
+          <select className="w-full" value={siteId} onChange={(e) => setSiteId(e.target.value)} disabled={!tenantId}>
+            <option value="">{tenantId ? "All sites" : "Select a tenant first"}</option>
+            {sites.map((site) => (
+              <option key={site.id} value={site.id}>
+                {site.name}
               </option>
             ))}
           </select>
@@ -188,6 +213,7 @@ export function Reports() {
               <option value="">Any</option>
               <option value="unreviewed">Unreviewed</option>
               <option value="approved">Approved</option>
+              <option value="unauthorized">Unauthorized</option>
               <option value="ignored">Ignored</option>
             </select>
           </div>
@@ -197,7 +223,7 @@ export function Reports() {
             <label>Criticality</label>
             <select className="w-full" value={criticality} onChange={(e) => setCriticality(e.target.value)}>
               <option value="">Any</option>
-              {["normal", "high", "critical"].map((item) => (
+              {["low", "normal", "high", "critical"].map((item) => (
                 <option key={item} value={item}>
                   {item}
                 </option>
@@ -319,6 +345,25 @@ export function Reports() {
               </tbody>
             </table>
             {preview.rows.length === 0 && <div className="text-slate-500 text-sm py-4">No rows in this authorized scope.</div>}
+          </div>
+          <div className="flex items-center gap-3 text-sm text-slate-400">
+            <button
+              className="text-cyan-400 disabled:text-slate-600"
+              disabled={loading || preview.page <= 1}
+              onClick={() => loadPreview(preview.page - 1)}
+            >
+              Previous
+            </button>
+            <span>
+              Page {preview.page} of {Math.max(1, Math.ceil(preview.total / preview.page_size))}
+            </span>
+            <button
+              className="text-cyan-400 disabled:text-slate-600"
+              disabled={loading || preview.page * preview.page_size >= preview.total}
+              onClick={() => loadPreview(preview.page + 1)}
+            >
+              Next
+            </button>
           </div>
         </section>
       )}

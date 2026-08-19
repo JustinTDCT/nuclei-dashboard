@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_
+from sqlalchemy import Integer, and_, cast, func, literal, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.access import tenant_scope_clause
 from app.compliance import COMPLIANCE_MAPPING_DISCLAIMER
-from app.finding_lifecycle import apply_severity_filter, open_finding_severity_counts
+from app.finding_lifecycle import apply_severity_filter, load_asset_finding_display, open_finding_severity_counts
 from app.intel.priority import open_finding_priority_counts
 from app.models import (
     EVENT_ASSET_BECAME_INACTIVE,
@@ -34,9 +34,7 @@ from app.models import (
     AuditLog,
     ComplianceControl,
     ComplianceControlReference,
-    ComplianceFramework,
     DomainEvent,
-    Finding,
     FindingTreatment,
     Scan,
     ScanJob,
@@ -233,10 +231,22 @@ def _finding_query(ctx: ReportContext, *, technical_state: str | None, require_c
             selectinload(AssetFinding.asset).selectinload(Asset.site),
             selectinload(AssetFinding.asset).selectinload(Asset.tenant),
             selectinload(AssetFinding.vulnerability).selectinload(Vulnerability.intelligence),
-            selectinload(AssetFinding.evidence),
         )
     )
-    query = apply_common(query, ctx, AssetFinding.tenant_id, Asset.site_id, AssetFinding.first_seen)
+    time_column = AssetFinding.first_seen
+    if technical_state == TECHNICAL_RESOLVED:
+        latest_resolved = (
+            ctx.db.query(
+                AssetFindingHistory.asset_finding_id.label("asset_finding_id"),
+                func.max(AssetFindingHistory.occurred_at).label("resolved_at"),
+            )
+            .filter(AssetFindingHistory.transition_type == HISTORY_RESOLVED)
+            .group_by(AssetFindingHistory.asset_finding_id)
+            .subquery()
+        )
+        query = query.outerjoin(latest_resolved, latest_resolved.c.asset_finding_id == AssetFinding.id)
+        time_column = func.coalesce(AssetFinding.resolved_at, latest_resolved.c.resolved_at)
+    query = apply_common(query, ctx, AssetFinding.tenant_id, Asset.site_id, time_column)
     if technical_state:
         query = query.filter(AssetFinding.technical_state == technical_state)
     if require_cve:
@@ -249,19 +259,9 @@ def _finding_query(ctx: ReportContext, *, technical_state: str | None, require_c
         query = query.filter(VulnerabilityIntelligence.kev.is_(True))
     if ctx.filters.get("kev") is False:
         query = query.filter(or_(VulnerabilityIntelligence.kev.is_(False), VulnerabilityIntelligence.kev.is_(None)))
+    if technical_state == TECHNICAL_RESOLVED:
+        return query.order_by(time_column.asc().nulls_last(), AssetFinding.id.asc())
     return query.order_by(AssetFinding.first_seen.asc(), AssetFinding.id.asc())
-
-
-def _evidence_counts(db: Session, finding_ids: list[int]) -> dict[int, int]:
-    if not finding_ids:
-        return {}
-    rows = (
-        db.query(Finding.asset_finding_id, func.count(Finding.id))
-        .filter(Finding.asset_finding_id.in_(finding_ids))
-        .group_by(Finding.asset_finding_id)
-        .all()
-    )
-    return {finding_id: int(count) for finding_id, count in rows}
 
 
 def _active_treatments(db: Session, finding_ids: list[int]) -> dict[int, FindingTreatment]:
@@ -279,13 +279,18 @@ def _active_treatments(db: Session, finding_ids: list[int]) -> dict[int, Finding
     return latest
 
 
-def serialize_finding_row(ctx: ReportContext, row: AssetFinding, *, evidence_count: int, treatment: FindingTreatment | None) -> dict[str, Any]:
+def serialize_finding_row(
+    ctx: ReportContext,
+    row: AssetFinding,
+    *,
+    evidence_count: int,
+    treatment: FindingTreatment | None,
+    severity: str = "info",
+) -> dict[str, Any]:
     vuln = row.vulnerability
     intel = vuln.intelligence if vuln else None
     asset = row.asset
     days = _age_days(row.first_seen, ctx.generated_at)
-    evidence = sorted(row.evidence or [], key=lambda item: (item.found_at or datetime.min.replace(tzinfo=timezone.utc), item.id), reverse=True)
-    severity = evidence[0].severity if evidence and evidence[0].severity else "info"
     return {
         "asset_finding_id": row.id,
         "asset_id": row.asset_id,
@@ -331,11 +336,17 @@ def finding_rows(ctx: ReportContext, *, technical_state: str | None, require_cve
     if limit is not None:
         query = query.limit(limit)
     rows = query.all()
-    evidence = _evidence_counts(ctx.db, [row.id for row in rows])
+    display = load_asset_finding_display(ctx.db, rows)
     treatments = _active_treatments(ctx.db, [row.id for row in rows])
     out = []
     for row in rows:
-        packed = serialize_finding_row(ctx, row, evidence_count=evidence.get(row.id, 0), treatment=treatments.get(row.id))
+        packed = serialize_finding_row(
+            ctx,
+            row,
+            evidence_count=int(display.get(row.id, {}).get("evidence_count") or 0),
+            treatment=treatments.get(row.id),
+            severity=str(display.get(row.id, {}).get("severity") or "info"),
+        )
         if packed:
             out.append(packed)
     return out
@@ -359,10 +370,16 @@ def finding_iter(ctx: ReportContext, *, technical_state: str | None, require_cve
 
 
 def _pack_findings(ctx: ReportContext, rows: list[AssetFinding]):
-    evidence = _evidence_counts(ctx.db, [row.id for row in rows])
+    display = load_asset_finding_display(ctx.db, rows)
     treatments = _active_treatments(ctx.db, [row.id for row in rows])
     for row in rows:
-        packed = serialize_finding_row(ctx, row, evidence_count=evidence.get(row.id, 0), treatment=treatments.get(row.id))
+        packed = serialize_finding_row(
+            ctx,
+            row,
+            evidence_count=int(display.get(row.id, {}).get("evidence_count") or 0),
+            treatment=treatments.get(row.id),
+            severity=str(display.get(row.id, {}).get("severity") or "info"),
+        )
         if packed:
             yield packed
 
@@ -399,23 +416,24 @@ def executive_summary(ctx: ReportContext) -> dict[str, Any]:
         AssetFinding.tenant_id,
         Asset.site_id,
     ).filter(AssetFinding.technical_state == TECHNICAL_OPEN)
-    resolved_q = apply_common(
-        ctx.db.query(func.count(AssetFinding.id)).join(Asset, Asset.id == AssetFinding.asset_id),
-        ctx,
-        AssetFinding.tenant_id,
-        Asset.site_id,
-        AssetFinding.resolved_at,
-    ).filter(AssetFinding.technical_state == TECHNICAL_RESOLVED)
-    reopened = apply_common(
-        ctx.db.query(func.count(AssetFindingHistory.id)).join(AssetFinding, AssetFinding.id == AssetFindingHistory.asset_finding_id),
+    resolved_history = apply_common(
+        ctx.db.query(func.count(AssetFindingHistory.id))
+        .join(AssetFinding, AssetFinding.id == AssetFindingHistory.asset_finding_id)
+        .join(Asset, Asset.id == AssetFinding.asset_id),
         ctx,
         AssetFindingHistory.tenant_id,
-        None,
+        Asset.site_id,
+        AssetFindingHistory.occurred_at,
+    ).filter(AssetFindingHistory.transition_type == HISTORY_RESOLVED)
+    reopened = apply_common(
+        ctx.db.query(func.count(AssetFindingHistory.id))
+        .join(AssetFinding, AssetFinding.id == AssetFindingHistory.asset_finding_id)
+        .join(Asset, Asset.id == AssetFinding.asset_id),
+        ctx,
+        AssetFindingHistory.tenant_id,
+        Asset.site_id,
         AssetFindingHistory.occurred_at,
     ).filter(AssetFindingHistory.transition_type == HISTORY_REOPENED)
-    finding_filter = and_(ctx.tenant_clause(AssetFinding.tenant_id), AssetFinding.technical_state == TECHNICAL_OPEN)
-    if ctx.requested_tenant_id is not None:
-        finding_filter = and_(AssetFinding.tenant_id == ctx.requested_tenant_id, AssetFinding.technical_state == TECHNICAL_OPEN)
     kev = (
         apply_common(
             ctx.db.query(func.count(AssetFinding.id))
@@ -490,15 +508,25 @@ def executive_summary(ctx: ReportContext) -> dict[str, Any]:
     return {
         "assets_in_scope": assets.scalar() or 0,
         "open_asset_findings": open_total,
-        "open_by_severity": open_finding_severity_counts(ctx.db, tenant_id, tenant_filter=ctx.tenant_clause(AssetFinding.tenant_id) if tenant_id is None else None),
-        "open_by_priority": open_finding_priority_counts(ctx.db, tenant_id, tenant_filter=ctx.tenant_clause(AssetFinding.tenant_id) if tenant_id is None else None),
+        "open_by_severity": open_finding_severity_counts(
+            ctx.db,
+            tenant_id,
+            tenant_filter=ctx.tenant_clause(AssetFinding.tenant_id) if tenant_id is None else None,
+            site_id=ctx.site_id,
+        ),
+        "open_by_priority": open_finding_priority_counts(
+            ctx.db,
+            tenant_id,
+            tenant_filter=ctx.tenant_clause(AssetFinding.tenant_id) if tenant_id is None else None,
+            site_id=ctx.site_id,
+        ),
         "open_kev": kev,
         "open_cve": cve,
         "open_non_cve": max(0, open_total - cve),
         "open_treatment_status": {str(key): int(value) for key, value in treatments.items()},
         "open_age_buckets": buckets,
         "high_criticality_assets_with_open_findings": critical_assets,
-        "resolved_in_period": resolved_q.scalar() or 0,
+        "resolved_in_period": resolved_history.scalar() or 0,
         "reopened_in_period": reopened.scalar() or 0,
         "disclaimer": "These metrics describe recorded technical state. They do not rate posture, certify a framework, or invent a risk score.",
     }
@@ -556,61 +584,105 @@ def executive_rows(ctx: ReportContext, *, offset=None, limit=None):
     return [serialize_asset_row(asset, counts.get(asset.id, 0)) for asset in assets]
 
 
-def asset_change_rows(ctx: ReportContext, *, offset=None, limit=None) -> tuple[int, list[dict[str, Any]]]:
-    events = apply_common(
-        ctx.db.query(DomainEvent).options(selectinload(DomainEvent.site)),
+def executive_iter(ctx: ReportContext, *, chunk: int = 200):
+    offset = 0
+    while True:
+        batch = executive_rows(ctx, offset=offset, limit=chunk)
+        if not batch:
+            return
+        yield from batch
+        if len(batch) < chunk:
+            return
+        offset += chunk
+
+
+def _asset_change_event_query(ctx: ReportContext):
+    return apply_common(
+        ctx.db.query(
+            DomainEvent.occurred_at.label("sort_at"),
+            DomainEvent.id.label("sort_id"),
+            literal("domain_event").label("source"),
+            DomainEvent.event_type.label("change_type"),
+            DomainEvent.tenant_id.label("tenant_id"),
+            DomainEvent.site_id.label("site_id"),
+            DomainEvent.asset_id.label("asset_id"),
+            DomainEvent.source.label("actor"),
+            DomainEvent.details.label("details"),
+        ),
         ctx,
         DomainEvent.tenant_id,
         DomainEvent.site_id,
         DomainEvent.occurred_at,
     ).filter(DomainEvent.event_type.in_(CHANGE_EVENTS))
-    audits = apply_common(
-        ctx.db.query(AuditLog),
+
+
+def _asset_change_audit_query(ctx: ReportContext):
+    return apply_common(
+        ctx.db.query(
+            AuditLog.created_at.label("sort_at"),
+            AuditLog.id.label("sort_id"),
+            literal("audit").label("source"),
+            AuditLog.action.label("change_type"),
+            AuditLog.tenant_id.label("tenant_id"),
+            AuditLog.site_id.label("site_id"),
+            AuditLog.object_id.label("asset_id"),
+            AuditLog.actor_username.label("actor"),
+            AuditLog.details.label("details"),
+        ),
         ctx,
         AuditLog.tenant_id,
         AuditLog.site_id,
         AuditLog.created_at,
     ).filter(AuditLog.action.in_(ASSET_AUDIT_ACTIONS), AuditLog.object_type == "asset")
-    event_rows = [
-        {
-            "source": "domain_event",
-            "occurred_at": _iso(row.occurred_at),
-            "sort_at": row.occurred_at,
-            "sort_id": row.id,
-            "change_type": row.event_type,
-            "tenant_id": row.tenant_id,
-            "site_id": row.site_id,
-            "asset_id": row.asset_id,
-            "actor": row.source,
-            "summary": (row.details or {}).get("display_name") or row.event_type,
-        }
-        for row in events.all()
-    ]
-    audit_rows = [
-        {
-            "source": "audit",
-            "occurred_at": _iso(row.created_at),
-            "sort_at": row.created_at,
-            "sort_id": row.id,
-            "change_type": row.action,
-            "tenant_id": row.tenant_id,
-            "site_id": row.site_id,
-            "asset_id": row.object_id,
-            "actor": row.actor_username or "",
-            "summary": row.action,
-        }
-        for row in audits.all()
-    ]
-    combined = sorted(event_rows + audit_rows, key=lambda item: (item["sort_at"], item["sort_id"]), reverse=True)
-    total = len(combined)
-    if offset is None:
-        sliced = combined
-    else:
-        sliced = combined[offset : offset + (limit or len(combined))]
-    for item in sliced:
-        item.pop("sort_at", None)
-        item.pop("sort_id", None)
-    return total, sliced
+
+
+def _asset_change_subquery(ctx: ReportContext):
+    events = _asset_change_event_query(ctx)
+    audits = _asset_change_audit_query(ctx)
+    return events.union_all(audits).subquery()
+
+
+def asset_change_count(ctx: ReportContext) -> int:
+    stmt = _asset_change_subquery(ctx)
+    return int(ctx.db.query(func.count()).select_from(stmt).scalar() or 0)
+
+
+def _serialize_asset_change(row) -> dict[str, Any]:
+    details = row.details or {}
+    summary = details.get("display_name") if row.source == "domain_event" and isinstance(details, dict) else None
+    return {
+        "source": row.source,
+        "occurred_at": _iso(row.sort_at),
+        "change_type": row.change_type,
+        "tenant_id": row.tenant_id,
+        "site_id": row.site_id,
+        "asset_id": row.asset_id,
+        "actor": row.actor or "",
+        "summary": summary or row.change_type,
+    }
+
+
+def asset_change_rows(ctx: ReportContext, *, offset=None, limit=None) -> tuple[int, list[dict[str, Any]]]:
+    stmt = _asset_change_subquery(ctx)
+    total = int(ctx.db.query(func.count()).select_from(stmt).scalar() or 0)
+    query = ctx.db.query(stmt).order_by(stmt.c.sort_at.desc(), stmt.c.sort_id.desc())
+    if offset is not None:
+        query = query.offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    return total, [_serialize_asset_change(row) for row in query.all()]
+
+
+def asset_change_iter(ctx: ReportContext, *, chunk: int = 200):
+    offset = 0
+    while True:
+        _total, rows = asset_change_rows(ctx, offset=offset, limit=chunk)
+        if not rows:
+            return
+        yield from rows
+        if len(rows) < chunk:
+            return
+        offset += chunk
 
 
 def treatment_query(ctx: ReportContext):
@@ -689,26 +761,47 @@ def _provenance(job: ScanJob, key: str) -> str:
     return NOT_RECORDED
 
 
+def _snapshot_site(snapshot: dict | None) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return {}
+    site = snapshot.get("site")
+    return site if isinstance(site, dict) else {}
+
+
 def scan_history_query(ctx: ReportContext):
     query = (
         ctx.db.query(ScanJob)
         .outerjoin(Scan, Scan.id == ScanJob.scan_id)
-        .options(selectinload(ScanJob.scan), selectinload(ScanJob.claimed_agent))
+        .options(selectinload(ScanJob.scan).selectinload(Scan.site), selectinload(ScanJob.claimed_agent))
     )
     query = apply_common(query, ctx, ScanJob.tenant_id, None, ScanJob.created_at)
     if ctx.site_id is not None:
-        query = query.filter(Scan.site_id == ctx.site_id)
+        snapshot_site_id = ScanJob.execution_snapshot["site"]["id"].astext
+        has_snapshot_site = and_(
+            ScanJob.execution_snapshot.isnot(None),
+            snapshot_site_id.isnot(None),
+            snapshot_site_id != "",
+            snapshot_site_id != "null",
+        )
+        query = query.filter(
+            or_(
+                and_(has_snapshot_site, cast(snapshot_site_id, Integer) == ctx.site_id),
+                and_(~has_snapshot_site, Scan.site_id == ctx.site_id),
+            )
+        )
     return query.order_by(ScanJob.created_at.desc(), ScanJob.id.desc())
 
 
 def serialize_scan_row(ctx: ReportContext, job: ScanJob, tenants: dict[int, str]) -> dict[str, Any]:
     scan = job.scan
     snapshot = job.execution_snapshot or {}
+    snap_site = _snapshot_site(snapshot)
+    site_name = snap_site.get("name") or (scan.site.name if scan and getattr(scan, "site", None) else "")
     return {
         "job_id": job.id,
         "tenant": tenants.get(job.tenant_id, ""),
         "tenant_id": job.tenant_id,
-        "site": snapshot.get("site_name") or (scan.site.name if scan and getattr(scan, "site", None) else ""),
+        "site": site_name,
         "scan_name": scan.name if scan else "",
         "trigger_type": job.trigger_type or NOT_RECORDED,
         "scheduled_for": _iso(job.scheduled_for) or NOT_RECORDED,
@@ -821,88 +914,151 @@ def _subject_summary(row: ComplianceControlReference, lookups: dict[str, dict[in
     return "Unknown subject"
 
 
-def control_evidence_rows(ctx: ReportContext, *, offset=None, limit=None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    tenant_id = ctx.requested_tenant_id
-    controls = control_evidence_controls(ctx)
-    include_removed = bool(ctx.filters.get("include_removed"))
-    ref_q = ctx.db.query(ComplianceControlReference).filter(ComplianceControlReference.tenant_id == tenant_id)
-    if not include_removed:
-        ref_q = ref_q.filter(ComplianceControlReference.removed_at.is_(None))
-    refs = ref_q.order_by(ComplianceControlReference.id).all()
-    from app.usernames import load_usernames
+def _control_ref_query(ctx: ReportContext):
+    query = ctx.db.query(ComplianceControlReference).filter(ComplianceControlReference.tenant_id == ctx.requested_tenant_id)
+    if not ctx.filters.get("include_removed"):
+        query = query.filter(ComplianceControlReference.removed_at.is_(None))
+    return query
 
-    names = load_usernames(ctx.db, [row.created_by_user_id for row in refs])
-    lookups = _subject_lookups(ctx.db, refs)
-    by_control: dict[int, list[ComplianceControlReference]] = {}
-    for ref in refs:
-        by_control.setdefault(ref.control_id, []).append(ref)
-    rows: list[dict[str, Any]] = []
-    for control in controls:
-        mapped = by_control.get(control.id, [])
-        if not mapped:
-            rows.append(
-                {
-                    "framework": control.framework.name if control.framework else "",
-                    "framework_version": control.framework.version if control.framework else "",
-                    "control_key": control.control_key,
-                    "family": control.family or "",
-                    "title": control.title,
-                    "description": control.description,
-                    "mapped_evidence_count": 0,
-                    "evidence_status": "No mapped evidence in the application",
-                    "subject_type": "",
-                    "subject_id": "",
-                    "subject_summary": "",
-                    "reference_type": "",
-                    "notes": "",
-                    "created_by": "",
-                    "created_at": "",
-                    "removed": False,
-                    "removal_reason": "",
-                }
-            )
-            continue
-        for ref in mapped:
-            subject_type = (
-                "asset"
-                if ref.asset_id
-                else "asset_finding"
-                if ref.asset_finding_id
-                else "finding"
-                if ref.finding_id
-                else "treatment"
-                if ref.treatment_id
-                else "scan_job"
-            )
-            subject_id = ref.asset_id or ref.asset_finding_id or ref.finding_id or ref.treatment_id or ref.scan_job_id
-            rows.append(
-                {
-                    "framework": control.framework.name if control.framework else "",
-                    "framework_version": control.framework.version if control.framework else "",
-                    "control_key": control.control_key,
-                    "family": control.family or "",
-                    "title": control.title,
-                    "description": control.description,
-                    "mapped_evidence_count": len(mapped),
-                    "evidence_status": "Evidence/reference is mapped",
-                    "subject_type": subject_type,
-                    "subject_id": subject_id,
-                    "subject_summary": _subject_summary(ref, lookups),
-                    "reference_type": ref.reference_type,
-                    "notes": ref.notes or "",
-                    "created_by": names.get(ref.created_by_user_id or 0, ""),
-                    "created_at": _iso(ref.created_at),
-                    "removed": ref.removed_at is not None,
-                    "removal_reason": ref.removal_reason or "",
-                }
-            )
+
+def control_evidence_summary(ctx: ReportContext) -> tuple[dict[str, Any], list[ComplianceControl], dict[int, int], int]:
+    controls = control_evidence_controls(ctx)
+    counts = dict(
+        _control_ref_query(ctx)
+        .with_entities(ComplianceControlReference.control_id, func.count(ComplianceControlReference.id))
+        .group_by(ComplianceControlReference.control_id)
+        .all()
+    )
+    mapped_counts = {control.id: int(counts.get(control.id, 0)) for control in controls}
+    mapped = sum(1 for control in controls if mapped_counts.get(control.id))
+    total_rows = sum(mapped_counts.get(control.id, 0) or 1 for control in controls)
     summary = {
         "controls": len(controls),
-        "mapped_controls": sum(1 for control in controls if by_control.get(control.id)),
-        "unmapped_controls": sum(1 for control in controls if not by_control.get(control.id)),
+        "mapped_controls": mapped,
+        "unmapped_controls": len(controls) - mapped,
         "disclaimer": COMPLIANCE_MAPPING_DISCLAIMER,
     }
-    total = len(rows)
-    if offset is not None:
-        rows = rows[offset : offset + (limit or total)]
+    return summary, controls, mapped_counts, total_rows
+
+
+def _control_placeholder(control: ComplianceControl) -> dict[str, Any]:
+    return {
+        "framework": control.framework.name if control.framework else "",
+        "framework_version": control.framework.version if control.framework else "",
+        "control_key": control.control_key,
+        "family": control.family or "",
+        "title": control.title,
+        "description": control.description,
+        "mapped_evidence_count": 0,
+        "evidence_status": "No mapped evidence in the application",
+        "subject_type": "",
+        "subject_id": "",
+        "subject_summary": "",
+        "reference_type": "",
+        "notes": "",
+        "created_by": "",
+        "created_at": "",
+        "removed": False,
+        "removal_reason": "",
+    }
+
+
+def _serialize_control_ref(
+    control: ComplianceControl,
+    ref: ComplianceControlReference,
+    mapped_count: int,
+    names: dict[int, str],
+    lookups: dict[str, dict[int, str]],
+) -> dict[str, Any]:
+    subject_type = (
+        "asset"
+        if ref.asset_id
+        else "asset_finding"
+        if ref.asset_finding_id
+        else "finding"
+        if ref.finding_id
+        else "treatment"
+        if ref.treatment_id
+        else "scan_job"
+    )
+    subject_id = ref.asset_id or ref.asset_finding_id or ref.finding_id or ref.treatment_id or ref.scan_job_id
+    return {
+        "framework": control.framework.name if control.framework else "",
+        "framework_version": control.framework.version if control.framework else "",
+        "control_key": control.control_key,
+        "family": control.family or "",
+        "title": control.title,
+        "description": control.description,
+        "mapped_evidence_count": mapped_count,
+        "evidence_status": "Evidence/reference is mapped",
+        "subject_type": subject_type,
+        "subject_id": subject_id,
+        "subject_summary": _subject_summary(ref, lookups),
+        "reference_type": ref.reference_type,
+        "notes": ref.notes or "",
+        "created_by": names.get(ref.created_by_user_id or 0, ""),
+        "created_at": _iso(ref.created_at),
+        "removed": ref.removed_at is not None,
+        "removal_reason": ref.removal_reason or "",
+    }
+
+
+def _control_ref_page(ctx: ReportContext, control_id: int, *, offset: int, limit: int):
+    from app.usernames import load_usernames
+
+    refs = (
+        _control_ref_query(ctx)
+        .filter(ComplianceControlReference.control_id == control_id)
+        .order_by(ComplianceControlReference.id)
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    names = load_usernames(ctx.db, [row.created_by_user_id for row in refs])
+    lookups = _subject_lookups(ctx.db, refs)
+    return refs, names, lookups
+
+
+def control_evidence_rows(ctx: ReportContext, *, offset=None, limit=None) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
+    summary, controls, counts, total = control_evidence_summary(ctx)
+    start = 0 if offset is None else offset
+    end = total if limit is None else start + limit
+    rows: list[dict[str, Any]] = []
+    pos = 0
+    for control in controls:
+        mapped_count = counts.get(control.id, 0)
+        span = mapped_count if mapped_count else 1
+        if pos + span <= start:
+            pos += span
+            continue
+        if pos >= end:
+            break
+        skip = max(0, start - pos)
+        take = min(span - skip, end - max(pos, start))
+        if mapped_count == 0:
+            rows.append(_control_placeholder(control))
+        else:
+            refs, names, lookups = _control_ref_page(ctx, control.id, offset=skip, limit=take)
+            for ref in refs:
+                rows.append(_serialize_control_ref(control, ref, mapped_count, names, lookups))
+        pos += span
     return rows, summary, total
+
+
+def control_evidence_iter(ctx: ReportContext, *, chunk: int = 200):
+    _summary, controls, counts, _total = control_evidence_summary(ctx)
+    for control in controls:
+        mapped_count = counts.get(control.id, 0)
+        if not mapped_count:
+            yield _control_placeholder(control)
+            continue
+        offset = 0
+        while True:
+            refs, names, lookups = _control_ref_page(ctx, control.id, offset=offset, limit=chunk)
+            if not refs:
+                break
+            for ref in refs:
+                yield _serialize_control_ref(control, ref, mapped_count, names, lookups)
+            if len(refs) < chunk:
+                break
+            offset += chunk

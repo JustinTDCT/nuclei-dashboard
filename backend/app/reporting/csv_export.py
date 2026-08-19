@@ -45,20 +45,20 @@ def write_csv(output, headers: Sequence[str], rows: Iterable[Sequence[Any] | dic
         writer.writerow(values)
 
 
-def csv_streaming_response(
-    filename: str,
-    headers: Sequence[str],
-    rows: Iterable[Sequence[Any] | dict[str, Any]],
-) -> StreamingResponse:
-    name = safe_filename(filename)
-    if not name.lower().endswith(".csv"):
-        name = f"{name}.csv"
+def spool_csv(headers: Sequence[str], rows: Iterable[Sequence[Any] | dict[str, Any]]):
     spool = tempfile.SpooledTemporaryFile(max_size=2_000_000)
     text = io.TextIOWrapper(spool, encoding="utf-8", newline="")
     write_csv(text, headers, rows)
     text.flush()
     text.detach()
     spool.seek(0)
+    return spool
+
+
+def csv_response_from_spool(filename: str, spool) -> StreamingResponse:
+    name = safe_filename(filename)
+    if not name.lower().endswith(".csv"):
+        name = f"{name}.csv"
 
     def chunks():
         try:
@@ -75,3 +75,11 @@ def csv_streaming_response(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{name}"'},
     )
+
+
+def csv_streaming_response(
+    filename: str,
+    headers: Sequence[str],
+    rows: Iterable[Sequence[Any] | dict[str, Any]],
+) -> StreamingResponse:
+    return csv_response_from_spool(filename, spool_csv(headers, rows))

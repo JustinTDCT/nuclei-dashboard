@@ -6,17 +6,21 @@ from fastapi import HTTPException
 
 from app.audit import record_audit
 from app.reporting.catalog import catalog, get_spec
-from app.reporting.csv_export import csv_streaming_response
+from app.reporting.csv_export import csv_response_from_spool, spool_csv
 from app.reporting.pdf_export import build_pdf_bytes, pdf_response
 from app.reporting.queries import (
     agent_health_query,
     agent_health_rows,
+    asset_change_iter,
     asset_change_rows,
     asset_inventory_iter,
     asset_inventory_query,
     asset_inventory_rows,
+    control_evidence_iter,
     control_evidence_rows,
+    control_evidence_summary,
     executive_count,
+    executive_iter,
     executive_rows,
     executive_summary,
     finding_count,
@@ -282,25 +286,44 @@ def preview_report(ctx: ReportContext, report_key: str, *, page: int, page_size:
     }
 
 
+def report_summary(ctx: ReportContext, report_key: str) -> dict[str, Any]:
+    if report_key == "executive":
+        return executive_summary(ctx)
+    if report_key == "asset_changes":
+        return {"service_change_history": "Not implemented. Service open/close transitions are not currently recorded."}
+    if report_key == "cve_aging":
+        return {"age_basis": "AssetFinding.first_seen", "risk_model": "Existing P1-P4 only. No additional score."}
+    if report_key == "agent_health":
+        return {"enrollment_secret": "never included"}
+    if report_key == "control_evidence":
+        summary, _controls, _counts, _total = control_evidence_summary(ctx)
+        return summary
+    return {}
+
+
 def _iter_rows(ctx: ReportContext, report_key: str):
     if report_key == "executive":
-        for row in executive_rows(ctx):
-            yield row
+        yield from executive_iter(ctx)
         return
     if report_key == "asset_inventory":
         yield from asset_inventory_iter(ctx)
         return
     if report_key == "asset_changes":
-        _, rows = asset_change_rows(ctx)
-        yield from rows
+        yield from asset_change_iter(ctx)
         return
     if report_key == "open_findings":
         yield from finding_iter(ctx, technical_state="open")
         return
     if report_key == "resolved_findings":
-        rows = list(finding_iter(ctx, technical_state="resolved"))
-        yield from resolved_extra(ctx, rows)
-        return
+        offset = 0
+        while True:
+            batch = finding_rows(ctx, technical_state="resolved", offset=offset, limit=200)
+            if not batch:
+                return
+            yield from resolved_extra(ctx, batch)
+            if len(batch) < 200:
+                return
+            offset += 200
     if report_key == "treatments":
         offset = 0
         while True:
@@ -344,8 +367,7 @@ def _iter_rows(ctx: ReportContext, report_key: str):
                 return
             offset += 200
     if report_key == "control_evidence":
-        rows, _summary, _total = control_evidence_rows(ctx)
-        yield from rows
+        yield from control_evidence_iter(ctx)
         return
     raise HTTPException(status_code=404, detail="Report not found")
 
@@ -375,18 +397,14 @@ def export_report(ctx: ReportContext, report_key: str, fmt: str):
     spec = get_spec(report_key)
     if fmt not in spec.formats:
         raise HTTPException(status_code=400, detail=f"Format {fmt} is not supported for this report")
-    _audit_export(ctx, report_key, fmt)
     columns = COLUMNS[report_key]
     filename = f"{report_key}-{ctx.generated_at.strftime('%Y%m%dT%H%M%SZ')}"
     if fmt == "csv":
-        return csv_streaming_response(filename, columns, _iter_rows(ctx, report_key))
-    spec, summary, _preview_rows, _total = _dataset(ctx, report_key)
-    rows = list(_iter_rows(ctx, report_key))
-    disclaimer = None
-    if report_key == "control_evidence":
-        disclaimer = summary.get("disclaimer")
-    elif report_key == "executive":
-        disclaimer = summary.get("disclaimer")
+        spool = spool_csv(columns, _iter_rows(ctx, report_key))
+        _audit_export(ctx, report_key, fmt)
+        return csv_response_from_spool(filename, spool)
+    summary = report_summary(ctx, report_key)
+    disclaimer = summary.get("disclaimer") if report_key in {"control_evidence", "executive"} else None
     content = build_pdf_bytes(
         title=spec.title,
         scope=ctx.scope_label(),
@@ -401,7 +419,8 @@ def export_report(ctx: ReportContext, report_key: str, fmt: str):
         },
         summary=summary,
         columns=columns,
-        rows=rows,
+        rows=_iter_rows(ctx, report_key),
         disclaimer=disclaimer,
     )
+    _audit_export(ctx, report_key, fmt)
     return pdf_response(filename, content)

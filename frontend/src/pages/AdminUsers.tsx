@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { Badge } from "../components/Badge";
+import { datetimeLocalToUtc, utcToDatetimeLocal } from "../datetimeLocal";
 import type { Role, StaffUser, Tenant } from "../types";
 
 function viewerStatus(user: StaffUser) {
@@ -44,7 +45,7 @@ export function AdminUsers() {
     else if ((user.viewer_tenant_ids || []).length) setScope("selected");
     else setScope("none");
     setSelected(user.viewer_tenant_ids || []);
-    setExpires(user.viewer_expires_at ? user.viewer_expires_at.slice(0, 16) : "");
+    setExpires(user.viewer_expires_at ? utcToDatetimeLocal(user.viewer_expires_at) : "");
   }
 
   async function saveScope(user: StaffUser) {
@@ -55,7 +56,7 @@ export function AdminUsers() {
         body: JSON.stringify({
           viewer_all_tenants: scope === "all",
           viewer_tenant_ids: scope === "selected" ? selected : [],
-          viewer_expires_at: expires ? new Date(expires).toISOString() : null,
+          viewer_expires_at: expires ? datetimeLocalToUtc(expires) : null,
           clear_viewer_expiration: !expires,
         }),
       });

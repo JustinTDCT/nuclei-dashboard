@@ -1424,6 +1424,7 @@ def open_finding_severity_counts(
     tenant_id: int | None = None,
     *,
     tenant_filter=None,
+    site_id: int | None = None,
 ) -> dict[str, int]:
     latest = latest_evidence_subquery(db)
     mapping = VulnerabilityDetectorMapping
@@ -1444,6 +1445,8 @@ def open_finding_severity_counts(
         query = query.filter(AssetFinding.tenant_id == tenant_id)
     elif tenant_filter is not None:
         query = query.filter(tenant_filter)
+    if site_id is not None:
+        query = query.join(Asset, Asset.id == AssetFinding.asset_id).filter(Asset.site_id == site_id)
     counts = {key: 0 for key in ("critical", "high", "medium", "low", "info")}
     for severity, total in query.group_by(display_severity_sql(latest, mapping)).all():
         counts[str(severity or "info")] = counts.get(str(severity or "info"), 0) + int(total)

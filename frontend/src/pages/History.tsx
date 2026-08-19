@@ -36,8 +36,10 @@ export function History() {
   const [audit, setAudit] = useState<HistoryPage<AuditRow> | null>(null);
   const [events, setEvents] = useState<HistoryPage<EventRow> | null>(null);
   const [open, setOpen] = useState<number | null>(null);
+  const [offset, setOffset] = useState(0);
+  const pageSize = 50;
 
-  function load() {
+  function load(nextOffset = offset) {
     const auditQs = new URLSearchParams();
     const eventQs = new URLSearchParams();
     if (tenantId) {
@@ -55,6 +57,10 @@ export function History() {
       auditQs.set("date_to", new Date(dateTo).toISOString());
       eventQs.set("date_to", new Date(dateTo).toISOString());
     }
+    auditQs.set("limit", String(pageSize));
+    auditQs.set("offset", String(nextOffset));
+    eventQs.set("limit", String(pageSize));
+    eventQs.set("offset", String(nextOffset));
     api<HistoryPage<AuditRow>>(`/api/audit-history?${auditQs}`).then(setAudit);
     api<HistoryPage<EventRow>>(`/api/domain-events?${eventQs}`).then(setEvents);
   }
@@ -62,7 +68,10 @@ export function History() {
   useEffect(() => {
     api<Tenant[]>("/api/tenants").then(setTenants);
   }, []);
-  useEffect(load, [tenantId, actor, action, eventType, dateFrom, dateTo]);
+  useEffect(() => {
+    setOffset(0);
+    load(0);
+  }, [tenantId, actor, action, eventType, dateFrom, dateTo, tab]);
 
   if (user?.role === "viewer" && user.has_tenant_access === false) {
     return (
@@ -73,7 +82,9 @@ export function History() {
     );
   }
 
-  const rows = tab === "audit" ? audit?.items ?? [] : events?.items ?? [];
+  const page = tab === "audit" ? audit : events;
+  const rows = page?.items ?? [];
+  const total = page?.total ?? 0;
 
   return (
     <div className="space-y-6">
@@ -160,6 +171,33 @@ export function History() {
           </tbody>
         </table>
         {rows.length === 0 && <div className="p-4 text-slate-500 text-sm">No history in this authorized scope.</div>}
+      </div>
+      <div className="flex items-center gap-3 text-sm text-slate-400">
+        <button
+          className="text-cyan-400 disabled:text-slate-600"
+          disabled={offset <= 0}
+          onClick={() => {
+            const next = Math.max(0, offset - pageSize);
+            setOffset(next);
+            load(next);
+          }}
+        >
+          Previous
+        </button>
+        <span>
+          {total === 0 ? "0–0" : `${offset + 1}–${Math.min(offset + pageSize, total)}`} of {total}
+        </span>
+        <button
+          className="text-cyan-400 disabled:text-slate-600"
+          disabled={offset + pageSize >= total}
+          onClick={() => {
+            const next = offset + pageSize;
+            setOffset(next);
+            load(next);
+          }}
+        >
+          Next
+        </button>
       </div>
     </div>
   );

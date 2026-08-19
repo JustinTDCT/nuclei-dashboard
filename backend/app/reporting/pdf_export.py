@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from fastapi.responses import StreamingResponse
@@ -12,14 +12,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.platypus import (
-    PageBreak,
-    Paragraph,
-    SimpleDocTemplate,
-    Spacer,
-    Table,
-    TableStyle,
-)
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from app.reporting.csv_export import safe_filename
 
@@ -46,6 +39,28 @@ def _header_footer(title: str, scope: str, generated: str, timezone_label: str):
     return _draw
 
 
+def _table(columns: Sequence[str], rows: Sequence[dict[str, Any]], styles):
+    header = [Paragraph(str(col).replace("_", " "), styles["Cell"]) for col in columns]
+    data = [header]
+    for row in rows:
+        data.append([Paragraph(str(row.get(col, "") or ""), styles["Cell"]) for col in columns])
+    table = Table(data, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+            ]
+        )
+    )
+    return table
+
+
 def build_pdf_bytes(
     *,
     title: str,
@@ -55,7 +70,7 @@ def build_pdf_bytes(
     filters: dict[str, Any],
     summary: dict[str, Any] | None,
     columns: Sequence[str],
-    rows: Sequence[dict[str, Any]],
+    rows: Iterable[dict[str, Any]],
     disclaimer: str | None = None,
 ) -> bytes:
     styles = _style_sheet()
@@ -92,27 +107,17 @@ def build_pdf_bytes(
     if disclaimer:
         story.append(Paragraph(disclaimer, styles["Disclaimer"]))
         story.append(Spacer(1, 8))
-    if columns and rows:
-        header = [Paragraph(str(col).replace("_", " "), styles["Cell"]) for col in columns]
-        data = [header]
-        for row in rows:
-            data.append([Paragraph(str(row.get(col, "") or ""), styles["Cell"]) for col in columns])
-        table = Table(data, repeatRows=1)
-        table.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 7),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-                ]
-            )
-        )
-        story.append(table)
-    elif not rows:
+    chunk: list[dict[str, Any]] = []
+    any_rows = False
+    for row in rows:
+        any_rows = True
+        chunk.append(row)
+        if columns and len(chunk) >= 200:
+            story.append(_table(columns, chunk, styles))
+            chunk = []
+    if columns and chunk:
+        story.append(_table(columns, chunk, styles))
+    if not any_rows:
         story.append(Paragraph("No rows in authorized scope.", styles["Meta"]))
     doc.build(story, onFirstPage=_header_footer(title, scope, generated_at, timezone_label), onLaterPages=_header_footer(title, scope, generated_at, timezone_label))
     spool.seek(0)
