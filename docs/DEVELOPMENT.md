@@ -390,6 +390,10 @@ Families: Executive Vulnerability Summary, Asset Inventory, New / Changed Assets
 
 Both are paginated and ordered deterministically (`created_at`/`occurred_at` DESC, `id` DESC). Viewers only see permitted Tenant rows and never `tenant_id IS NULL` global Admin records.
 
+Security-relevant Agent enrollment, approval, revocation, and deployment-material access are audited (`agent.enroll`, `agent.enroll_denied`, `agent.approve`, `agent.revoke`, `agent.deployment_material_access`). Staff login success and denial are audited (`auth.login_success`, `auth.login_denied`). Tenant create/update are audited. AuditLog details never store enrollment secrets, passwords, tokens, or rendered compose/env.
+
+`DELETE /api/tenants/{id}` is intentionally refuse-closed (`409`) to preserve historical evidence. Physical Tenant deletion is disabled. Tenant archival is not implemented yet. Refused attempts are audited as `tenant.delete_refused`.
+
 ### Timezone
 
 Persisted timestamps remain UTC. Report filters use UTC boundaries. CSV prefers reproducible UTC. PDF labels the display timezone.

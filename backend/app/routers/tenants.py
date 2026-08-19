@@ -5,12 +5,18 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.access import require_visible_tenant, visible_tenant_query
+from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
 from app.intel.priority import open_finding_priority_counts
 from app.models import Agent, Alert, Asset, Device, ScanJob, Tenant, User
 from app.schemas import TenantIn, TenantOut
+
+TENANT_DELETE_DISABLED = (
+    "Physical Tenant deletion is disabled to preserve historical evidence. "
+    "Tenant archival is not implemented yet."
+)
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
 
@@ -21,11 +27,21 @@ def list_tenants(user: User = Depends(require_any), db: Session = Depends(get_db
 
 
 @router.post("", response_model=TenantOut)
-def create_tenant(body: TenantIn, _: User = Depends(require_user), db: Session = Depends(get_db)):
+def create_tenant(body: TenantIn, user: User = Depends(require_user), db: Session = Depends(get_db)):
     if db.query(Tenant).filter(Tenant.name == body.name).first():
         raise HTTPException(status_code=400, detail="Tenant name already exists")
     tenant = Tenant(name=body.name, notes=body.notes)
     db.add(tenant)
+    db.flush()
+    record_audit(
+        db,
+        actor=user,
+        action="tenant.create",
+        object_type="tenant",
+        object_id=tenant.id,
+        tenant_id=tenant.id,
+        details={"name": tenant.name, "notes_present": bool((tenant.notes or "").strip())},
+    )
     db.commit()
     db.refresh(tenant)
     return tenant
@@ -38,26 +54,49 @@ def get_tenant(tenant_id: int, user: User = Depends(require_any), db: Session = 
 
 @router.patch("/{tenant_id}", response_model=TenantOut)
 def update_tenant(
-    tenant_id: int, body: TenantIn, _: User = Depends(require_user), db: Session = Depends(get_db)
+    tenant_id: int, body: TenantIn, user: User = Depends(require_user), db: Session = Depends(get_db)
 ):
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    before_name = tenant.name
+    notes_changed = (tenant.notes or "") != (body.notes or "")
     tenant.name = body.name
     tenant.notes = body.notes
+    record_audit(
+        db,
+        actor=user,
+        action="tenant.update",
+        object_type="tenant",
+        object_id=tenant.id,
+        tenant_id=tenant.id,
+        details={
+            "before": {"name": before_name},
+            "after": {"name": tenant.name},
+            "notes_changed": notes_changed,
+        },
+    )
     db.commit()
     db.refresh(tenant)
     return tenant
 
 
 @router.delete("/{tenant_id}")
-def delete_tenant(tenant_id: int, _: User = Depends(require_user), db: Session = Depends(get_db)):
+def delete_tenant(tenant_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    db.delete(tenant)
-    db.commit()
-    return {"ok": True}
+    record_audit(
+        db,
+        actor=user,
+        action="tenant.delete_refused",
+        object_type="tenant",
+        object_id=tenant.id,
+        tenant_id=tenant.id,
+        details={"reason": "historical_integrity"},
+        commit=True,
+    )
+    raise HTTPException(status_code=409, detail=TENANT_DELETE_DISABLED)
 
 
 @router.get("/{tenant_id}/summary")

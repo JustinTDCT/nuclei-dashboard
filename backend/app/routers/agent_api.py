@@ -5,8 +5,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from app.alerts import impersonation_alert
+from app.audit import record_audit, request_source_ip
 from app.auth import create_agent_token, decode_token
-from app.crypto_util import new_nonce, verify_ed25519
+from app.crypto_util import new_nonce, public_key_fingerprint, verify_ed25519
 from app.database import get_db
 from app.finding_lifecycle import FindingLifecycleError, complete_scan_run, store_detector_coverage
 from app.inventory import store_findings, upsert_devices
@@ -37,10 +38,7 @@ def _now() -> datetime:
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    return request_source_ip(request)
 
 
 def _get_agent(db: Session, agent_uuid: str) -> Agent:
@@ -72,6 +70,21 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
         return {"status": agent.status, "approved": True}
 
     if not agent.enrollment_secret or body.enrollment_secret != agent.enrollment_secret:
+        record_audit(
+            db,
+            actor=None,
+            action="agent.enroll_denied",
+            object_type="agent",
+            object_id=agent.id,
+            tenant_id=agent.tenant_id,
+            site_id=agent.site_id,
+            details={
+                "reason": "invalid_enrollment_secret",
+                "source_ip": _client_ip(request),
+                "status": agent.status,
+            },
+            commit=True,
+        )
         raise HTTPException(status_code=403, detail="Invalid enrollment secret")
 
     if agent.public_key and agent.public_key != body.public_key:
@@ -84,11 +97,30 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
         db.commit()
         raise HTTPException(status_code=403, detail="Agent key mismatch")
 
+    previous = agent.status
     agent.public_key = body.public_key
     agent.hostname = body.hostname
     agent.container_id = body.container_id
     agent.last_ip = _client_ip(request)
     agent.status = "pending_approval"
+    if previous == "pending_enrollment":
+        record_audit(
+            db,
+            actor=None,
+            action="agent.enroll",
+            object_type="agent",
+            object_id=agent.id,
+            tenant_id=agent.tenant_id,
+            site_id=agent.site_id,
+            details={
+                "previous_status": previous,
+                "new_status": agent.status,
+                "hostname": agent.hostname or "",
+                "container_id": agent.container_id or "",
+                "source_ip": agent.last_ip or "",
+                "public_key_fingerprint": public_key_fingerprint(agent.public_key or ""),
+            },
+        )
     db.commit()
     return {"status": agent.status, "approved": False}
 

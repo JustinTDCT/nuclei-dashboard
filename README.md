@@ -82,6 +82,8 @@ Set `SCAN_DRY_RUN=1` on the scanner (or agent) to emit sample results without to
 | User   | Tenants, sites, networks, WAN targets, agents, scans, classification, acknowledge alerts |
 | Viewer | Read-only inventory, findings, reports, and history for **explicitly granted** tenants only. Existing Viewer upgrades start with no tenant access. Optional expiration is checked on every request. Cannot download enrollment secrets or agent compose/env. All-tenant Viewer is still not Admin. |
 
+Physical Tenant deletion is disabled (`DELETE /api/tenants/{id}` returns 409) so historical evidence cannot be cascaded away. Tenant create/update, Agent enroll/approve/revoke/deployment-material access, and login success/denial are audited.
+
 ## Local UI development
 
 ```bash

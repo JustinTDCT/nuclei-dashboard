@@ -1,7 +1,12 @@
+import hashlib
 import secrets
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+
+def public_key_fingerprint(public_key_hex: str) -> str:
+    return hashlib.sha256((public_key_hex or "").encode("utf-8")).hexdigest()
 
 
 def verify_ed25519(public_key_hex: str, message: str, signature_hex: str) -> bool:

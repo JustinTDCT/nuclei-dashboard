@@ -163,22 +163,49 @@ def approve_agent(
         raise HTTPException(status_code=400, detail="Agent is revoked")
     if not agent.public_key:
         raise HTTPException(status_code=400, detail="Agent has not connected yet")
+    previous = agent.status
+    approved_at = datetime.now(timezone.utc)
     agent.status = "approved"
-    agent.approved_at = datetime.now(timezone.utc)
+    agent.approved_at = approved_at
     agent.approved_by_id = user.id
     agent.enrollment_secret = None
+    record_audit(
+        db,
+        actor=user,
+        action="agent.approve",
+        object_type="agent",
+        object_id=agent.id,
+        tenant_id=agent.tenant_id,
+        site_id=agent.site_id,
+        details={
+            "before": {"status": previous},
+            "after": {"status": agent.status},
+            "approved_at": approved_at.isoformat(),
+        },
+    )
     db.commit()
     db.refresh(agent)
     return serialize(agent)
 
 
 @router.post("/agents/{agent_id}/revoke", response_model=AgentOut)
-def revoke_agent(agent_id: int, _: User = Depends(require_user), db: Session = Depends(get_db)):
+def revoke_agent(agent_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
+    previous = agent.status
     agent.status = "revoked"
     agent.enrollment_secret = None
+    record_audit(
+        db,
+        actor=user,
+        action="agent.revoke",
+        object_type="agent",
+        object_id=agent.id,
+        tenant_id=agent.tenant_id,
+        site_id=agent.site_id,
+        details={"before": {"status": previous}, "after": {"status": agent.status}},
+    )
     db.commit()
     db.refresh(agent)
     return serialize(agent)
@@ -191,23 +218,44 @@ def read_agent(agent_id: int, user: User = Depends(require_any), db: Session = D
     return serialize(agent)
 
 
+def _includes_active_enrollment_secret(agent: Agent, include_secret: bool) -> bool:
+    return bool(include_secret and agent.enrollment_secret)
+
+
+def _audit_deployment_material(db: Session, user: User, agent: Agent, *, fmt: str, include_secret: bool) -> None:
+    record_audit(
+        db,
+        actor=user,
+        action="agent.deployment_material_access",
+        object_type="agent",
+        object_id=agent.id,
+        tenant_id=agent.tenant_id,
+        site_id=agent.site_id,
+        details={
+            "format": fmt,
+            "included_active_enrollment_secret": _includes_active_enrollment_secret(agent, include_secret),
+        },
+        commit=True,
+    )
+
+
 @router.get("/agents/{agent_id}/compose", response_class=PlainTextResponse)
-def download_compose(agent_id: int, _: User = Depends(require_user), db: Session = Depends(get_db)):
+def download_compose(agent_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     include = agent.status in ("pending_enrollment", "pending_approval")
-    return PlainTextResponse(
-        agent_compose(agent, central_url(db), include_secret=include), media_type="text/yaml"
-    )
+    body = agent_compose(agent, central_url(db), include_secret=include)
+    _audit_deployment_material(db, user, agent, fmt="compose", include_secret=include)
+    return PlainTextResponse(body, media_type="text/yaml")
 
 
 @router.get("/agents/{agent_id}/env", response_class=PlainTextResponse)
-def download_env(agent_id: int, _: User = Depends(require_user), db: Session = Depends(get_db)):
+def download_env(agent_id: int, user: User = Depends(require_user), db: Session = Depends(get_db)):
     agent = db.query(Agent).filter(Agent.id == agent_id).first()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     include = agent.status in ("pending_enrollment", "pending_approval")
-    return PlainTextResponse(
-        agent_env(agent, central_url(db), include_secret=include), media_type="text/plain"
-    )
+    body = agent_env(agent, central_url(db), include_secret=include)
+    _audit_deployment_material(db, user, agent, fmt="env", include_secret=include)
+    return PlainTextResponse(body, media_type="text/plain")

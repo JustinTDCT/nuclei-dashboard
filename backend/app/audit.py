@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
+from fastapi import Request
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, User
@@ -8,6 +9,15 @@ from app.models import AuditLog, User
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def request_source_ip(request: Request | None) -> str:
+    if request is None:
+        return ""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else ""
 
 
 def record_audit(
