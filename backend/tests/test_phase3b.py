@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 from collections.abc import Iterator
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -256,10 +257,29 @@ def test_domain_event_emission_idempotence_and_new_types(reset_db):
         assert first.id == second.id
         assert db.query(DomainEvent).filter(DomainEvent.event_type == EVENT_NEW_ASSET).count() == 1
         assert db.query(EventAlertQueue).filter(EventAlertQueue.domain_event_id == first.id).count() == 1
-        assert emit_asset_disposition_changed(db, asset, previous="unreviewed", new="unreviewed", source="manual") is None
-        changed = emit_asset_disposition_changed(db, asset, previous="unreviewed", new="approved", source="manual")
+        from app.audit import record_audit
+
+        audit = record_audit(
+            db,
+            actor=None,
+            action="asset.disposition_change",
+            object_type="asset",
+            object_id=asset.id,
+            tenant_id=tenant.id,
+            site_id=site.id,
+            details={"before": "unreviewed", "after": "approved"},
+        )
+        db.flush()
+        assert emit_asset_disposition_changed(
+            db, asset, previous="unreviewed", new="unreviewed", source="manual", audit=audit
+        ) is None
+        changed = emit_asset_disposition_changed(
+            db, asset, previous="unreviewed", new="approved", source="manual", audit=audit
+        )
         assert changed is not None and changed[1] is True
-        assert emit_asset_disposition_changed(db, asset, previous="unreviewed", new="approved", source="manual")[1] is False
+        assert emit_asset_disposition_changed(
+            db, asset, previous="unreviewed", new="approved", source="manual", audit=audit
+        )[1] is False
 
         scan = Scan(tenant_id=tenant.id, name="s", scope="wan", profile="discovery")
         db.add(scan)
@@ -920,5 +940,486 @@ def test_routing_and_list_query_counts_are_bounded(reset_db):
             finally:
                 event.remove(listen_on, "before_cursor_execute", before_cursor)
         assert len(queries) <= 16
+    finally:
+        db.close()
+
+
+def _disposition_audit(db, asset, *, previous: str, new: str):
+    from app.audit import record_audit
+
+    row = record_audit(
+        db,
+        actor=None,
+        action="asset.disposition_change",
+        object_type="asset",
+        object_id=asset.id,
+        tenant_id=asset.tenant_id,
+        site_id=asset.site_id,
+        details={"before": previous, "after": new},
+    )
+    db.flush()
+    return row
+
+
+@requires_postgres
+def test_disposition_cycle_emits_distinct_events_and_retry_stays_idempotent(reset_db):
+    from app.events import emit_asset_disposition_changed
+    from app.migrate import apply_schema
+    from app.models import Asset, DomainEvent, Site, Tenant
+
+    from app.database import SessionLocal
+
+    apply_schema()
+    session = SessionLocal()
+    try:
+        tenant = Tenant(name="Cycle", notes="")
+        session.add(tenant)
+        session.flush()
+        site = Site(tenant_id=tenant.id, name="Hartford")
+        session.add(site)
+        session.flush()
+        asset = Asset(
+            tenant_id=tenant.id,
+            site_id=site.id,
+            display_name="loop",
+            classification="Unknown",
+            disposition="unreviewed",
+            first_seen=datetime.now(timezone.utc),
+        )
+        session.add(asset)
+        session.flush()
+        first_ab = _disposition_audit(session, asset, previous="unreviewed", new="approved")
+        ev1, created1 = emit_asset_disposition_changed(
+            session, asset, previous="unreviewed", new="approved", source="manual", audit=first_ab
+        )
+        assert created1 is True
+        ev_ba, created_ba = emit_asset_disposition_changed(
+            session,
+            asset,
+            previous="approved",
+            new="unreviewed",
+            source="manual",
+            audit=_disposition_audit(session, asset, previous="approved", new="unreviewed"),
+        )
+        assert created_ba is True
+        assert ev_ba.id != ev1.id
+        second_ab = _disposition_audit(session, asset, previous="unreviewed", new="approved")
+        ev2, created2 = emit_asset_disposition_changed(
+            session, asset, previous="unreviewed", new="approved", source="manual", audit=second_ab
+        )
+        assert created2 is True
+        assert ev2.id != ev1.id
+        retry, created_retry = emit_asset_disposition_changed(
+            session, asset, previous="unreviewed", new="approved", source="manual", audit=second_ab
+        )
+        assert created_retry is False
+        assert retry.id == ev2.id
+        events = (
+            session.query(DomainEvent)
+            .filter(DomainEvent.event_type == "asset_disposition_changed", DomainEvent.asset_id == asset.id)
+            .order_by(DomainEvent.id.asc())
+            .all()
+        )
+        assert [row.id for row in events] == [ev1.id, ev_ba.id, ev2.id]
+        assert events[0].details["audit_id"] == first_ab.id
+        assert events[2].details["audit_id"] == second_ab.id
+    finally:
+        session.close()
+
+
+@requires_postgres
+def test_stale_processing_delivery_is_reclaimed_recent_is_not(reset_db):
+    from app.database import SessionLocal
+    from app.emailer import MailResult
+    from app.events import emit_new_asset
+    from app.migrate import apply_schema
+    from app.models import (
+        DELIVERY_LEASE_SECONDS,
+        MAX_DELIVERY_ATTEMPTS,
+        Alert,
+        AlertDelivery,
+        Asset,
+        Site,
+        Tenant,
+    )
+
+    apply_schema()
+    db = SessionLocal()
+    try:
+        tenant = Tenant(name="Lease", notes="")
+        db.add(tenant)
+        db.flush()
+        site = Site(tenant_id=tenant.id, name="HQ")
+        db.add(site)
+        db.flush()
+        recent_asset = Asset(
+            tenant_id=tenant.id,
+            site_id=site.id,
+            display_name="recent",
+            classification="Unknown",
+            first_seen=datetime.now(timezone.utc),
+        )
+        stale_asset = Asset(
+            tenant_id=tenant.id,
+            site_id=site.id,
+            display_name="stale",
+            classification="Unknown",
+            first_seen=datetime.now(timezone.utc),
+        )
+        exhausted_asset = Asset(
+            tenant_id=tenant.id,
+            site_id=site.id,
+            display_name="exhausted",
+            classification="Unknown",
+            first_seen=datetime.now(timezone.utc),
+        )
+        db.add_all([recent_asset, stale_asset, exhausted_asset])
+        db.flush()
+        emit_new_asset(db, recent_asset)
+        emit_new_asset(db, stale_asset)
+        emit_new_asset(db, exhausted_asset)
+        _route(db)
+        now = datetime.now(timezone.utc)
+        by_asset = {row.asset_id: row for row in db.query(Alert).all()}
+        recent = db.query(AlertDelivery).filter(AlertDelivery.alert_id == by_asset[recent_asset.id].id).one()
+        stale = db.query(AlertDelivery).filter(AlertDelivery.alert_id == by_asset[stale_asset.id].id).one()
+        exhausted = db.query(AlertDelivery).filter(AlertDelivery.alert_id == by_asset[exhausted_asset.id].id).one()
+        recent.status = "processing"
+        recent.last_attempt_at = now
+        recent.updated_at = now
+        recent.attempt_count = 1
+        stale.status = "processing"
+        stale.last_attempt_at = now - timedelta(seconds=DELIVERY_LEASE_SECONDS + 5)
+        stale.updated_at = stale.last_attempt_at
+        stale.attempt_count = 1
+        exhausted.status = "processing"
+        exhausted.last_attempt_at = now - timedelta(seconds=DELIVERY_LEASE_SECONDS + 5)
+        exhausted.updated_at = exhausted.last_attempt_at
+        exhausted.attempt_count = MAX_DELIVERY_ATTEMPTS
+        db.commit()
+        sent: list[int] = []
+
+        def mail_ok(*_a, **_k):
+            sent.append(1)
+            return MailResult(ok=True)
+
+        _deliver(db, mail_send=mail_ok, webhook_post=lambda *_a, **_k: 200)
+        db2 = SessionLocal()
+        try:
+            recent2 = db2.get(AlertDelivery, recent.id)
+            stale2 = db2.get(AlertDelivery, stale.id)
+            exhausted2 = db2.get(AlertDelivery, exhausted.id)
+            assert recent2.status == "processing"
+            assert recent2.attempt_count == 1
+            assert stale2.status == "sent"
+            assert exhausted2.status == "failed"
+            assert len(sent) == 1
+        finally:
+            db2.close()
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_concurrent_router_coalesces_one_alert_and_one_delivery(reset_db):
+    from app.alert_engine import route_pending_events
+    from app.database import SessionLocal
+    from app.events import emit_domain_event, emit_new_asset
+    from app.migrate import apply_schema
+    from app.models import Alert, AlertDelivery, AlertEventRoute, Asset, DomainEvent, PolicyRule, Site, Tenant
+
+    apply_schema()
+    db = SessionLocal()
+    try:
+        tenant = Tenant(name="Race", notes="")
+        db.add(tenant)
+        db.flush()
+        site = Site(tenant_id=tenant.id, name="HQ")
+        db.add(site)
+        db.flush()
+        asset = Asset(
+            tenant_id=tenant.id,
+            site_id=site.id,
+            display_name="shared",
+            classification="Unknown",
+            first_seen=datetime.now(timezone.utc),
+        )
+        db.add(asset)
+        db.flush()
+        db.add(
+            PolicyRule(
+                name="suppress race",
+                category="alerting",
+                scope_type="global",
+                priority=10,
+                enabled=True,
+                conditions=[{"field": "event_type", "op": "equals", "value": "new_asset"}],
+                actions={"dashboard": True, "email": "staff", "suppress_for_minutes": 60, "severity": "high"},
+                revision=1,
+            )
+        )
+        db.flush()
+        first = emit_new_asset(db, asset)
+        second, created = emit_domain_event(
+            db,
+            event_type="new_asset",
+            tenant_id=tenant.id,
+            site_id=site.id,
+            asset_id=asset.id,
+            idempotence_key="new-asset-race-2",
+            details={"display_name": "shared"},
+        )
+        assert created is True
+        assert first.id != second.id
+        db.commit()
+        asset_id = asset.id
+    finally:
+        db.close()
+
+    barrier = threading.Barrier(2, timeout=15)
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        session = SessionLocal()
+        try:
+            route_pending_events(session, limit=1, after_claim=lambda _claimed: barrier.wait())
+            session.commit()
+        except BaseException as exc:  # noqa: BLE001 — collect worker failures
+            session.rollback()
+            errors.append(exc)
+            if not barrier.broken:
+                barrier.abort()
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: worker(), range(2)))
+    assert errors == []
+    db = SessionLocal()
+    try:
+        alerts = db.query(Alert).filter(Alert.asset_id == asset_id, Alert.type == "new_asset").all()
+        assert len(alerts) == 1
+        assert alerts[0].occurrence_count == 2
+        routes = db.query(AlertEventRoute).filter(AlertEventRoute.alert_id == alerts[0].id).all()
+        assert len(routes) == 2
+        assert {row.routing_result for row in routes} == {"alert_created", "alert_coalesced"}
+        deliveries = db.query(AlertDelivery).filter(AlertDelivery.alert_id == alerts[0].id).all()
+        assert len(deliveries) == 1
+        assert deliveries[0].channel == "email"
+        assert db.query(DomainEvent).filter(DomainEvent.asset_id == asset_id, DomainEvent.event_type == "new_asset").count() == 2
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_event_locality_fails_closed_and_finding_uses_trusted_network(reset_db):
+    from app.database import SessionLocal
+    from app.events import DomainEventError, emit_domain_event
+    from app.finding_lifecycle import DetectorIdentity, apply_detection
+    from app.migrate import apply_schema
+    from app.models import (
+        Agent,
+        Alert,
+        AlertEventRoute,
+        Asset,
+        AssetFinding,
+        DomainEvent,
+        Network,
+        PolicyRule,
+        Scan,
+        ScanJob,
+        Site,
+        Tenant,
+        Vulnerability,
+    )
+
+    apply_schema()
+    db = SessionLocal()
+    try:
+        tenant_a = Tenant(name="Tenant A", notes="")
+        tenant_b = Tenant(name="Tenant B", notes="")
+        db.add_all([tenant_a, tenant_b])
+        db.flush()
+        site_a = Site(tenant_id=tenant_a.id, name="Hartford")
+        site_b = Site(tenant_id=tenant_b.id, name="Boston")
+        db.add_all([site_a, site_b])
+        db.flush()
+        net_a = Network(tenant_id=tenant_a.id, site_id=site_a.id, name="User LAN", cidr="10.0.0.0/24")
+        net_b = Network(tenant_id=tenant_b.id, site_id=site_b.id, name="Other LAN", cidr="10.1.0.0/24")
+        db.add_all([net_a, net_b])
+        db.flush()
+        asset_a = Asset(
+            tenant_id=tenant_a.id,
+            site_id=site_a.id,
+            display_name="srv-a",
+            classification="Unknown",
+            first_seen=datetime.now(timezone.utc),
+        )
+        asset_b = Asset(
+            tenant_id=tenant_b.id,
+            site_id=site_b.id,
+            display_name="srv-b",
+            classification="Unknown",
+            first_seen=datetime.now(timezone.utc),
+        )
+        db.add_all([asset_a, asset_b])
+        db.flush()
+        agent_b = Agent(
+            tenant_id=tenant_b.id,
+            site_id=site_b.id,
+            name="agent-b",
+            uuid="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            status="approved",
+        )
+        db.add(agent_b)
+        db.flush()
+        scan_b = Scan(tenant_id=tenant_b.id, name="b-scan", scope="lan", profile="discovery")
+        db.add(scan_b)
+        db.flush()
+        job_b = ScanJob(scan_id=scan_b.id, tenant_id=tenant_b.id, status="running")
+        db.add(job_b)
+        db.flush()
+        vuln = Vulnerability(canonical_key="cve:CVE-2024-9", cve_id="CVE-2024-9", title="x")
+        db.add(vuln)
+        db.flush()
+        finding_b = AssetFinding(
+            tenant_id=tenant_b.id,
+            asset_id=asset_b.id,
+            vulnerability_id=vuln.id,
+            technical_state="open",
+            treatment_state="unaddressed",
+            first_seen=datetime.now(timezone.utc),
+            last_seen=datetime.now(timezone.utc),
+        )
+        db.add(finding_b)
+        db.flush()
+
+        def _emit(**kwargs):
+            kwargs.setdefault("event_type", "new_asset")
+            kwargs.setdefault("asset_id", None)
+            kwargs.setdefault("details", {})
+            kwargs.setdefault("source", "manual")
+            return emit_domain_event(db, **kwargs)
+
+        with pytest.raises(DomainEventError, match="site"):
+            _emit(tenant_id=tenant_a.id, site_id=site_b.id, idempotence_key="bad-site")
+        with pytest.raises(DomainEventError, match="network"):
+            _emit(
+                tenant_id=tenant_a.id,
+                site_id=site_a.id,
+                network_id=net_b.id,
+                asset_id=asset_a.id,
+                idempotence_key="bad-net",
+            )
+        with pytest.raises(DomainEventError, match="asset"):
+            _emit(tenant_id=tenant_a.id, site_id=site_a.id, asset_id=asset_b.id, idempotence_key="bad-asset")
+        with pytest.raises(DomainEventError, match="finding"):
+            _emit(
+                tenant_id=tenant_a.id,
+                site_id=site_a.id,
+                asset_id=asset_a.id,
+                asset_finding_id=finding_b.id,
+                idempotence_key="bad-finding",
+            )
+        with pytest.raises(DomainEventError, match="agent"):
+            _emit(
+                event_type="agent_identity_mismatch",
+                tenant_id=tenant_a.id,
+                site_id=site_a.id,
+                agent_id=agent_b.id,
+                idempotence_key="bad-agent",
+            )
+        with pytest.raises(DomainEventError, match="scan job"):
+            _emit(
+                event_type="scan_failed",
+                tenant_id=tenant_a.id,
+                site_id=site_a.id,
+                scan_job_id=job_b.id,
+                idempotence_key="bad-job",
+            )
+
+        scan_a = Scan(tenant_id=tenant_a.id, name="lan-scan", scope="lan", profile="discovery")
+        db.add(scan_a)
+        db.flush()
+        job_a = ScanJob(
+            scan_id=scan_a.id,
+            tenant_id=tenant_a.id,
+            status="running",
+            execution_snapshot={
+                "scope": "lan",
+                "site": {"id": site_a.id, "name": site_a.name},
+                "targets": {"networks": [{"id": net_a.id, "name": net_a.name, "cidr": net_a.cidr}]},
+            },
+        )
+        db.add(job_a)
+        db.flush()
+        db.add(
+            PolicyRule(
+                name="Global finding",
+                category="alerting",
+                scope_type="global",
+                priority=100,
+                enabled=True,
+                conditions=[{"field": "event_type", "op": "equals", "value": "new_finding"}],
+                actions={"dashboard": True, "email": "staff", "severity": "low"},
+                revision=1,
+            )
+        )
+        db.add(
+            PolicyRule(
+                name="LAN finding",
+                category="alerting",
+                scope_type="network",
+                tenant_id=tenant_a.id,
+                site_id=site_a.id,
+                network_id=net_a.id,
+                priority=50,
+                enabled=True,
+                conditions=[{"field": "event_type", "op": "equals", "value": "new_finding"}],
+                actions={"severity": "critical", "email": "off"},
+                revision=1,
+            )
+        )
+        db.flush()
+        identity = DetectorIdentity(
+            detector_type="nuclei",
+            detector_key="cve-2024-9",
+            cve_id="CVE-2024-9",
+            canonical_key="cve:CVE-2024-9",
+            title="x",
+            description="",
+            severity="high",
+            tags="",
+            host="10.0.0.5",
+            matched_at="host",
+            hostname="srv-a",
+            ip="10.0.0.5",
+            raw={},
+        )
+        finding, created = apply_detection(
+            db,
+            asset=asset_a,
+            vulnerability=vuln,
+            job=job_a,
+            identity=identity,
+            detected_at=datetime.now(timezone.utc),
+        )
+        assert created is True
+        event = (
+            db.query(DomainEvent)
+            .filter(DomainEvent.event_type == "new_finding", DomainEvent.asset_finding_id == finding.id)
+            .one()
+        )
+        assert event.site_id == site_a.id
+        assert event.network_id == net_a.id
+        _route(db)
+        alert = db.query(Alert).filter(Alert.asset_finding_id == finding.id).one()
+        assert alert.severity == "critical"
+        assert alert.network_id == net_a.id
+        route = db.query(AlertEventRoute).filter(AlertEventRoute.alert_id == alert.id).one()
+        assert route.effective_actions["severity"] == "critical"
+        assert route.effective_actions["email"] == "off"
+        assert route.effective_actions["dashboard"] is True
+        db.commit()
     finally:
         db.close()

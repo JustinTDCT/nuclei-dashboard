@@ -43,6 +43,7 @@ from app.models import (
     TREATMENT_STATUSES,
     Asset,
     AssetFinding,
+    AuditLog,
     AssetIdentifier,
     AssetObservation,
     AssetService,
@@ -1134,8 +1135,8 @@ def _audit_policy_asset_change(
     new: str,
     explanation: ActionExplanation,
     context: PolicyEvaluationContext,
-) -> None:
-    record_audit(
+) -> AuditLog:
+    return record_audit(
         db,
         actor=None,
         action=action,
@@ -1203,7 +1204,7 @@ def apply_asset_handling(
     if disposition.source == "policy" and disposition.value != asset.disposition:
         previous = asset.disposition
         asset.disposition = disposition.value
-        _audit_policy_asset_change(
+        audit = _audit_policy_asset_change(
             db,
             asset=asset,
             action="asset.policy_disposition_changed",
@@ -1221,6 +1222,7 @@ def apply_asset_handling(
             previous=previous,
             new=disposition.value,
             source="policy",
+            audit=audit,
             policy_rule_id=disposition.rule_id,
             policy_revision=disposition.revision,
             network_id=context.network_id,

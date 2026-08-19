@@ -471,7 +471,7 @@ def update_asset(
         if new_disposition != asset.disposition:
             previous = asset.disposition
             asset.disposition = new_disposition
-            record_audit(
+            audit = record_audit(
                 db,
                 actor=user,
                 action="asset.disposition_change",
@@ -489,6 +489,7 @@ def update_asset(
                 previous=previous,
                 new=new_disposition,
                 source="manual",
+                audit=audit,
             )
     if body.criticality is not None:
         try:

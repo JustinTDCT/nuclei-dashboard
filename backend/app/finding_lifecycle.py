@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.classify import identity_name, is_ip, normalize_hostname
 from app.correlation import canonical_asset_id
-from app.events import emit_domain_event
+from app.events import emit_domain_event, trusted_run_locality
 from app.models import (
     COVERAGE_KIND_CIDR,
     COVERAGE_KIND_FQDN,
@@ -705,7 +705,7 @@ def _emit_lifecycle_event(
     event_type: str,
     asset_finding: AssetFinding,
     vulnerability: Vulnerability,
-    scan_job_id: int | None,
+    job: ScanJob,
     occurred_at: datetime,
     extra: dict[str, Any] | None = None,
 ) -> None:
@@ -716,18 +716,20 @@ def _emit_lifecycle_event(
         "cve_id": vulnerability.cve_id,
         "technical_state": asset_finding.technical_state,
         "treatment_state": asset_finding.treatment_state,
-        "scan_job_id": scan_job_id,
+        "scan_job_id": job.id,
         **(extra or {}),
     }
+    site_id, network_id = trusted_run_locality(db, job, asset=asset_finding.asset)
     emit_domain_event(
         db,
         event_type=event_type,
         tenant_id=asset_finding.tenant_id,
-        site_id=asset_finding.asset.site_id if asset_finding.asset else None,
+        site_id=site_id,
+        network_id=network_id,
         asset_id=asset_finding.asset_id,
         asset_finding_id=asset_finding.id,
-        scan_job_id=scan_job_id,
-        idempotence_key=f"{event_type}:{asset_finding.id}:{scan_job_id or 0}",
+        scan_job_id=job.id,
+        idempotence_key=f"{event_type}:{asset_finding.id}:{job.id}",
         details=details,
         source=SOURCE_SCANNER,
         occurred_at=occurred_at,
@@ -788,7 +790,7 @@ def apply_detection(
             event_type=EVENT_NEW_FINDING,
             asset_finding=existing,
             vulnerability=vulnerability,
-            scan_job_id=job.id,
+            job=job,
             occurred_at=detected_at,
         )
     else:
@@ -819,7 +821,7 @@ def apply_detection(
                 event_type=EVENT_VULNERABILITY_REOPENED,
                 asset_finding=existing,
                 vulnerability=vulnerability,
-                scan_job_id=job.id,
+                job=job,
                 occurred_at=detected_at,
                 extra={"reopened_count": existing.reopened_count},
             )
@@ -1175,7 +1177,7 @@ def _resolve_if_threshold_reached(
             event_type=EVENT_VULNERABILITY_RESOLVED,
             asset_finding=asset_finding,
             vulnerability=asset_finding.vulnerability,
-            scan_job_id=job.id,
+            job=job,
             occurred_at=occurred_at,
             extra={"consecutive_clean_scans": asset_finding.consecutive_clean_scans},
         )

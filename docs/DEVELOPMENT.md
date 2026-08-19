@@ -313,7 +313,13 @@ System defaults, represented as `source = system_default` rather than seeded Pol
 
 Other events notify only when a matching alert policy sets an action. A routing-history row still records why no notification occurred.
 
-Suppression/dedupe is per tenant + event type + logical subject + route identity. It never deletes DomainEvents. An acknowledged Alert never swallows a later matching event.
+Suppression/dedupe is per tenant + event type + logical subject + route identity. It never deletes DomainEvents. An acknowledged Alert never swallows a later matching event. Coalesce/create is serialized with a transaction advisory lock on the dedupe key so concurrent routers cannot create two open Alerts for the same subject.
+
+Disposition-change events use the AuditLog row ID as the per-transition identity. Repeating unreviewed → approved after an intervening change is a new event; retrying the same AuditLog remains idempotent.
+
+A delivery left in `processing` after a crash becomes reclaimable after `DELIVERY_LEASE_SECONDS`. A recently claimed row is not stolen. Max-attempt rules still apply.
+
+Event emission fail-closes on Tenant/Site/Network/Asset/Finding/Agent/ScanJob/Treatment/Policy mismatches. Scan and finding events persist trusted Site/Network from the run snapshot or that run's observation; Network is not inferred from an IP.
 
 Upgrade never queues historical DomainEvents. Only events emitted through the Phase 3B outbox path are routed.
 

@@ -7,20 +7,23 @@ performs SMTP/webhook I/O in a separate step.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import ssl
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.assets import utcnow
 from app.emailer import MailDeliveryError, MailResult, admin_emails, deliver_mail, staff_emails
+from app.events import assert_event_locality
 from app.models import (
     ALERT_DELIVERY_BATCH_SIZE,
     ALERT_EMAIL_ADMINS,
@@ -35,6 +38,7 @@ from app.models import (
     DELIVERY_CHANNEL_EMAIL,
     DELIVERY_CHANNEL_WEBHOOK,
     DELIVERY_FAILED,
+    DELIVERY_LEASE_SECONDS,
     DELIVERY_PENDING,
     DELIVERY_PROCESSING,
     DELIVERY_SENT,
@@ -44,6 +48,7 @@ from app.models import (
     ROUTING_ALERT_COALESCED,
     ROUTING_ALERT_CREATED,
     ROUTING_NO_NOTIFICATION,
+    Agent,
     Alert,
     AlertDelivery,
     AlertEventRoute,
@@ -52,6 +57,11 @@ from app.models import (
     DomainEvent,
     EventAlertQueue,
     FindingTreatment,
+    Network,
+    PolicyRule,
+    ScanJob,
+    Site,
+    Tenant,
 )
 from app.policy import PolicyEvaluationContext, PolicyResolver, serialize_evaluation, system_default_alert_actions
 
@@ -132,10 +142,29 @@ def _safe_error(exc: Exception) -> str:
     return text[:400]
 
 
+def _ids(events: list[DomainEvent], attr: str) -> list[int]:
+    return list({getattr(row, attr) for row in events if getattr(row, attr)})
+
+
 def contexts_for_events(db: Session, events: list[DomainEvent]) -> dict[int, PolicyEvaluationContext]:
-    asset_ids = list({row.asset_id for row in events if row.asset_id})
-    finding_ids = list({row.asset_finding_id for row in events if row.asset_finding_id})
-    treatment_ids = list({row.treatment_id for row in events if row.treatment_id})
+    asset_ids = _ids(events, "asset_id")
+    finding_ids = _ids(events, "asset_finding_id")
+    treatment_ids = _ids(events, "treatment_id")
+    tenant_ids = _ids(events, "tenant_id")
+    site_ids = _ids(events, "site_id")
+    network_ids = _ids(events, "network_id")
+    agent_ids = _ids(events, "agent_id")
+    job_ids = _ids(events, "scan_job_id")
+    policy_ids = _ids(events, "policy_rule_id")
+    tenants = {
+        row.id: row for row in db.query(Tenant).filter(Tenant.id.in_(tenant_ids)).all()
+    } if tenant_ids else {}
+    sites = {
+        row.id: row for row in db.query(Site).filter(Site.id.in_(site_ids)).all()
+    } if site_ids else {}
+    networks = {
+        row.id: row for row in db.query(Network).filter(Network.id.in_(network_ids)).all()
+    } if network_ids else {}
     assets = {
         row.id: row
         for row in db.query(Asset).options(selectinload(Asset.tags)).filter(Asset.id.in_(asset_ids)).all()
@@ -155,6 +184,15 @@ def contexts_for_events(db: Session, events: list[DomainEvent]) -> dict[int, Pol
         row.id: row
         for row in db.query(FindingTreatment).filter(FindingTreatment.id.in_(treatment_ids)).all()
     } if treatment_ids else {}
+    agents = {
+        row.id: row for row in db.query(Agent).filter(Agent.id.in_(agent_ids)).all()
+    } if agent_ids else {}
+    jobs = {
+        row.id: row for row in db.query(ScanJob).filter(ScanJob.id.in_(job_ids)).all()
+    } if job_ids else {}
+    policies = {
+        row.id: row for row in db.query(PolicyRule).filter(PolicyRule.id.in_(policy_ids)).all()
+    } if policy_ids else {}
     from app.policy import contexts_for_assets, context_for_findings
 
     asset_contexts = contexts_for_assets(db, list(assets.values())) if assets else {}
@@ -162,14 +200,28 @@ def contexts_for_events(db: Session, events: list[DomainEvent]) -> dict[int, Pol
     contexts: dict[int, PolicyEvaluationContext] = {}
     for event in events:
         asset = assets.get(event.asset_id) if event.asset_id else None
-        if asset is not None and event.tenant_id is not None and asset.tenant_id != event.tenant_id:
-            raise ValueError("Cross-tenant event/asset relationship is not allowed")
         finding = findings.get(event.asset_finding_id) if event.asset_finding_id else None
-        if finding is not None and event.tenant_id is not None and finding.tenant_id != event.tenant_id:
-            raise ValueError("Cross-tenant event/finding relationship is not allowed")
         treatment = treatments.get(event.treatment_id) if event.treatment_id else None
-        if treatment is not None and event.tenant_id is not None and treatment.tenant_id != event.tenant_id:
-            raise ValueError("Cross-tenant event/treatment relationship is not allowed")
+        assert_event_locality(
+            tenant_id=event.tenant_id,
+            site_id=event.site_id,
+            network_id=event.network_id,
+            asset_id=event.asset_id,
+            asset_finding_id=event.asset_finding_id,
+            scan_job_id=event.scan_job_id,
+            agent_id=event.agent_id,
+            treatment_id=event.treatment_id,
+            policy_rule_id=event.policy_rule_id,
+            tenant=tenants.get(event.tenant_id) if event.tenant_id else None,
+            site=sites.get(event.site_id) if event.site_id else None,
+            network=networks.get(event.network_id) if event.network_id else None,
+            asset=asset,
+            finding=finding,
+            scan_job=jobs.get(event.scan_job_id) if event.scan_job_id else None,
+            agent=agents.get(event.agent_id) if event.agent_id else None,
+            treatment=treatment,
+            policy=policies.get(event.policy_rule_id) if event.policy_rule_id else None,
+        )
         base = None
         if finding is not None:
             base = finding_contexts.get(finding.id)
@@ -286,6 +338,13 @@ def _claim_queue(db: Session, *, limit: int) -> list[EventAlertQueue]:
     )
 
 
+def _dedupe_advisory_lock(db: Session, *, tenant_id: int | None, key: str) -> None:
+    material = f"{tenant_id if tenant_id is not None else 'global'}:{key}"
+    digest = hashlib.blake2b(material.encode("utf-8"), digest_size=8).digest()
+    lock_key = int.from_bytes(digest, "big", signed=True)
+    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
+
+
 def _open_alert_for_dedupe(db: Session, *, tenant_id: int | None, key: str, window_minutes: int) -> Alert | None:
     query = db.query(Alert).filter(
         Alert.dedupe_key == key,
@@ -395,8 +454,15 @@ def _record_route(
     )
 
 
-def route_pending_events(db: Session, *, limit: int = ALERT_ROUTE_BATCH_SIZE) -> int:
+def route_pending_events(
+    db: Session,
+    *,
+    limit: int = ALERT_ROUTE_BATCH_SIZE,
+    after_claim: Callable[[list[EventAlertQueue]], None] | None = None,
+) -> int:
     claimed = _claim_queue(db, limit=limit)
+    if after_claim is not None:
+        after_claim(claimed)
     if not claimed:
         return 0
     events = [row.domain_event for row in claimed if row.domain_event is not None]
@@ -444,6 +510,7 @@ def route_pending_events(db: Session, *, limit: int = ALERT_ROUTE_BATCH_SIZE) ->
                 continue
             key = dedupe_key_for(event, actions)
             suppress = int(actions.get("suppress_for_minutes") or 0)
+            _dedupe_advisory_lock(db, tenant_id=event.tenant_id, key=key)
             existing = _open_alert_for_dedupe(db, tenant_id=event.tenant_id, key=key, window_minutes=suppress)
             if existing is not None:
                 existing.occurrence_count = int(existing.occurrence_count or 1) + 1
@@ -548,11 +615,26 @@ def post_webhook(url: str, payload: dict[str, Any]) -> int:
 
 def _claim_deliveries(db: Session, *, limit: int) -> list[AlertDelivery]:
     now = utcnow()
+    lease_cutoff = now - timedelta(seconds=DELIVERY_LEASE_SECONDS)
     candidate_ids = (
         select(AlertDelivery.id)
         .where(
-            AlertDelivery.status == DELIVERY_PENDING,
-            AlertDelivery.next_attempt_at <= now,
+            or_(
+                and_(
+                    AlertDelivery.status == DELIVERY_PENDING,
+                    AlertDelivery.next_attempt_at <= now,
+                ),
+                and_(
+                    AlertDelivery.status == DELIVERY_PROCESSING,
+                    or_(
+                        AlertDelivery.last_attempt_at <= lease_cutoff,
+                        and_(
+                            AlertDelivery.last_attempt_at.is_(None),
+                            AlertDelivery.updated_at <= lease_cutoff,
+                        ),
+                    ),
+                ),
+            )
         )
         .order_by(AlertDelivery.id.asc())
         .limit(limit)
@@ -618,6 +700,17 @@ def process_pending_deliveries(
             if delivery is None:
                 continue
             try:
+                if delivery.attempt_count > MAX_DELIVERY_ATTEMPTS:
+                    _finish_delivery(
+                        delivery,
+                        success=False,
+                        error="max delivery attempts exceeded",
+                        status_code=None,
+                        permanent=True,
+                    )
+                    fresh.commit()
+                    handled += 1
+                    continue
                 if delivery.channel == DELIVERY_CHANNEL_EMAIL:
                     recipients = [item.strip() for item in (delivery.destination or "").split(",") if item.strip()]
                     result: MailResult = mail_send(
