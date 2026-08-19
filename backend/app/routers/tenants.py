@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.access import require_visible_tenant, visible_tenant_query
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
@@ -15,8 +16,8 @@ router = APIRouter(prefix="/tenants", tags=["tenants"])
 
 
 @router.get("", response_model=list[TenantOut])
-def list_tenants(_: User = Depends(require_any), db: Session = Depends(get_db)):
-    return db.query(Tenant).order_by(Tenant.name).all()
+def list_tenants(user: User = Depends(require_any), db: Session = Depends(get_db)):
+    return visible_tenant_query(db, user).all()
 
 
 @router.post("", response_model=TenantOut)
@@ -31,11 +32,8 @@ def create_tenant(body: TenantIn, _: User = Depends(require_user), db: Session =
 
 
 @router.get("/{tenant_id}", response_model=TenantOut)
-def get_tenant(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
+def get_tenant(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    return require_visible_tenant(db, user, tenant_id)
 
 
 @router.patch("/{tenant_id}", response_model=TenantOut)
@@ -63,10 +61,8 @@ def delete_tenant(tenant_id: int, _: User = Depends(require_user), db: Session =
 
 
 @router.get("/{tenant_id}/summary")
-def tenant_summary(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
+def tenant_summary(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    require_visible_tenant(db, user, tenant_id)
     online_cut = datetime.now(timezone.utc) - timedelta(seconds=90)
     devices = dict(
         db.query(Device.status, func.count(Device.id))

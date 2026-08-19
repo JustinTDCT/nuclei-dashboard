@@ -443,7 +443,36 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20), default="viewer")  # admin, user, viewer
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    viewer_all_tenants: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    viewer_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    viewer_tenant_grants: Mapped[list["ViewerTenantGrant"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="ViewerTenantGrant.user_id",
+    )
+
+
+class ViewerTenantGrant(Base):
+    __tablename__ = "viewer_tenant_grants"
+    __table_args__ = (
+        Index("ix_viewer_tenant_grants_tenant_id", "tenant_id"),
+        Index("ix_viewer_tenant_grants_user_id", "user_id"),
+    )
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+    granted_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped["User"] = relationship(
+        back_populates="viewer_tenant_grants",
+        foreign_keys=[user_id],
+    )
+    tenant: Mapped["Tenant"] = relationship()
 
 
 class Tenant(Base):
@@ -904,6 +933,9 @@ class Setting(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("ix_audit_logs_tenant_id_created_at_id", "tenant_id", "created_at", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
@@ -1182,6 +1214,7 @@ class DomainEvent(Base):
     __table_args__ = (
         UniqueConstraint("idempotence_key", name="uq_domain_events_idempotence_key"),
         Index("ix_domain_events_tenant_id_event_type_occurred_at", "tenant_id", "event_type", "occurred_at"),
+        Index("ix_domain_events_tenant_id_occurred_at_id", "tenant_id", "occurred_at", "id"),
         Index("ix_domain_events_site_id_event_type_occurred_at", "site_id", "event_type", "occurred_at"),
         Index("ix_domain_events_network_id_event_type_occurred_at", "network_id", "event_type", "occurred_at"),
         Index("ix_domain_events_asset_id_occurred_at", "asset_id", "occurred_at"),

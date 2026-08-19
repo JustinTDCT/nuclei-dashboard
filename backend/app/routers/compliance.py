@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 
+from app.access import require_visible_tenant
 from app.auth import require_admin, require_any, require_user
 from app.compliance import (
     COMPLIANCE_MAPPING_DISCLAIMER,
@@ -43,11 +44,8 @@ from app.schemas import (
 router = APIRouter(tags=["compliance"])
 
 
-def _require_tenant(db: Session, tenant_id: int) -> Tenant:
-    tenant = db.get(Tenant, tenant_id)
-    if tenant is None:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
+def _require_tenant(db: Session, tenant_id: int, user: User) -> Tenant:
+    return require_visible_tenant(db, user, tenant_id)
 
 
 def _run(fn, db: Session):
@@ -354,10 +352,10 @@ def get_references(
     subject_type: str = Query(...),
     subject_id: int = Query(...),
     include_removed: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     if subject_type not in CONTROL_SUBJECT_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported evidence object type")
     try:
@@ -380,7 +378,7 @@ def post_reference(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: add_control_reference(
             db,
@@ -411,7 +409,7 @@ def post_remove_reference(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: remove_control_reference(
             db,

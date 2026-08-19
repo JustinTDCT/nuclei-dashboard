@@ -30,6 +30,12 @@ export function Layout() {
           <NavLink to="/policies" className={link}>
             Policies
           </NavLink>
+          <NavLink to="/reports" className={link}>
+            Reports
+          </NavLink>
+          <NavLink to="/history" className={link}>
+            Audit & Events
+          </NavLink>
           {user?.role === "admin" && (
             <>
               <div className="pt-4 pb-1 px-3 text-[11px] uppercase tracking-wider text-slate-500">Admin</div>

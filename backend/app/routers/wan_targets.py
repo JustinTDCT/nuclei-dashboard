@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.access import require_visible_tenant
 from app.audit import record_audit, utcnow
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -16,10 +17,10 @@ router = APIRouter(tags=["wan-targets"])
 def list_wan_targets(
     tenant_id: int,
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    get_tenant(db, tenant_id)
+    require_visible_tenant(db, user, tenant_id)
     q = db.query(AuthorizedWanTarget).filter(AuthorizedWanTarget.tenant_id == tenant_id)
     if not include_archived:
         q = q.filter(AuthorizedWanTarget.archived_at.is_(None))

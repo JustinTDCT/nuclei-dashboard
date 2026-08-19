@@ -93,12 +93,25 @@ export function Alerts({ tenantId }: { tenantId?: number }) {
     setSelected(detail);
   }
 
+  if (!tenantId && user?.role === "viewer" && user.has_tenant_access === false) {
+    return (
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+        <h1 className="text-2xl font-semibold mb-2">Alerts</h1>
+        <p className="text-slate-400">No tenant access has been assigned to this account.</p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {!tenantId && (
         <div>
           <h1 className="text-2xl font-semibold">Alerts</h1>
-          <p className="text-slate-400 text-sm">Policy-driven dashboard alerts from domain events.</p>
+          <p className="text-slate-400 text-sm">
+            {user?.role === "viewer"
+              ? "Policy-driven dashboard alerts for tenants assigned to this account."
+              : "Policy-driven dashboard alerts from domain events."}
+          </p>
         </div>
       )}
       <div className="flex flex-wrap items-center gap-3">

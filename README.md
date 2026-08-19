@@ -80,7 +80,7 @@ Set `SCAN_DRY_RUN=1` on the scanner (or agent) to emit sample results without to
 |--------|--------|
 | Admin  | System settings, users, everything a user can do |
 | User   | Tenants, sites, networks, WAN targets, agents, scans, classification, acknowledge alerts |
-| Viewer | Read-only inventory, findings, agent status. Cannot download enrollment secrets or agent compose/env |
+| Viewer | Read-only inventory, findings, reports, and history for **explicitly granted** tenants only. Existing Viewer upgrades start with no tenant access. Optional expiration is checked on every request. Cannot download enrollment secrets or agent compose/env. All-tenant Viewer is still not Admin. |
 
 ## Local UI development
 

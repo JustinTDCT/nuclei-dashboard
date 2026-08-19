@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.access import require_visible_tenant
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.models import CompensatingControl, FindingTreatment, Tenant, User
@@ -32,11 +33,8 @@ from app.usernames import load_usernames
 router = APIRouter(tags=["treatments"])
 
 
-def _require_tenant(db: Session, tenant_id: int) -> Tenant:
-    tenant = db.get(Tenant, tenant_id)
-    if tenant is None:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
+def _require_tenant(db: Session, tenant_id: int, user: User) -> Tenant:
+    return require_visible_tenant(db, user, tenant_id)
 
 
 def _treatment_user_ids(rows: list[FindingTreatment]) -> list[int | None]:
@@ -130,10 +128,10 @@ def _run(fn, db: Session):
 def get_treatments(
     tenant_id: int,
     asset_finding_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     try:
         rows = list_treatments(db, tenant_id, asset_finding_id)
     except TreatmentError as exc:
@@ -152,7 +150,7 @@ def post_treatment(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: create_treatment(
             db,
@@ -183,7 +181,7 @@ def post_approve(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: approve_treatment(
             db,
@@ -210,7 +208,7 @@ def post_review(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: review_treatment(
             db,
@@ -238,7 +236,7 @@ def post_revoke(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: revoke_treatment(
             db,
@@ -265,7 +263,7 @@ def post_compensating(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: create_compensating_control(
             db,
@@ -295,7 +293,7 @@ def patch_compensating(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: update_compensating_control(
             db,
@@ -326,7 +324,7 @@ def post_retire_compensating(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     row = _run(
         lambda: retire_compensating_control(
             db,

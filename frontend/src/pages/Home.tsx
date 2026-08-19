@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import type { Dashboard } from "../types";
 
@@ -15,6 +16,7 @@ function Card({ label, value, to }: { label: string; value: number | string; to?
 }
 
 export function Home() {
+  const { user } = useAuth();
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
 
@@ -35,7 +37,13 @@ export function Home() {
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-semibold">Overview</h1>
-        <p className="text-slate-400 text-sm">Live status across all client tenants.</p>
+        <p className="text-slate-400 text-sm">
+          {user?.role === "viewer" && user.has_tenant_access === false
+            ? "No tenant access has been assigned to this account."
+            : user?.role === "viewer"
+              ? "Live status for tenants assigned to this account."
+              : "Live status across all client tenants."}
+        </p>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-7 gap-4">
         <Card label="Tenants" value={data.tenants} to="/tenants" />

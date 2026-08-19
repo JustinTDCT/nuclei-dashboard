@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import PlainTextResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.access import require_object_tenant, require_visible_tenant
+from app.reporting.csv_export import csv_streaming_response
 from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -12,11 +13,8 @@ from app.schemas import DEVICE_CLASSES, DeviceDetail, DeviceOut, DeviceUpdate, F
 router = APIRouter(tags=["devices"])
 
 
-def _tenant(db: Session, tenant_id: int) -> Tenant:
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
+def _tenant(db: Session, tenant_id: int, user: User) -> Tenant:
+    return require_visible_tenant(db, user, tenant_id)
 
 
 def _finding_out(finding: Finding, device: Device | None = None) -> FindingOut:
@@ -67,10 +65,10 @@ def list_devices(
     status: str | None = None,
     scope: str | None = None,
     q: str | None = None,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    _tenant(db, tenant_id)
+    _tenant(db, tenant_id, user)
     query = db.query(Device).filter(Device.tenant_id == tenant_id)
     if status:
         query = query.filter(Device.status == status)
@@ -90,10 +88,9 @@ def list_devices(
 
 
 @router.get("/devices/{device_id}", response_model=DeviceDetail)
-def get_device(device_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def get_device(device_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
     device = db.query(Device).filter(Device.id == device_id).first()
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not found")
+    require_object_tenant(db, user, device, tenant_id=device.tenant_id if device else None, detail="Device not found")
     findings = (
         db.query(Finding)
         .filter(Finding.device_id == device.id)
@@ -151,34 +148,38 @@ def update_device(
 @router.get("/tenants/{tenant_id}/devices/export")
 def export_devices(
     tenant_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    _tenant(db, tenant_id)
+    _tenant(db, tenant_id, user)
     rows = db.query(Device).filter(Device.tenant_id == tenant_id).order_by(Device.hostname, Device.ip).all()
-    lines = ["hostname,ip,scope,status,classification,description,auto_label,title,ports,first_seen,last_seen"]
-    for d in rows:
-        ports = ";".join(str(p) for p in (d.ports or []))
-        lines.append(
-            ",".join(
-                [
-                    _csv(d.hostname),
-                    d.ip,
-                    d.scope,
-                    d.status,
-                    _csv(d.classification),
-                    _csv(d.description),
-                    _csv(d.auto_label),
-                    _csv(d.title),
-                    _csv(ports),
-                    d.first_seen.isoformat() if d.first_seen else "",
-                    d.last_seen.isoformat() if d.last_seen else "",
-                ]
-            )
-        )
-    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/csv")
-
-
-def _csv(value: str) -> str:
-    text = (value or "").replace('"', '""')
-    return f'"{text}"'
+    headers = [
+        "hostname",
+        "ip",
+        "scope",
+        "status",
+        "classification",
+        "description",
+        "auto_label",
+        "title",
+        "ports",
+        "first_seen",
+        "last_seen",
+    ]
+    exported = (
+        [
+            d.hostname,
+            d.ip,
+            d.scope,
+            d.status,
+            d.classification,
+            d.description,
+            d.auto_label,
+            d.title,
+            ";".join(str(p) for p in (d.ports or [])),
+            d.first_seen.isoformat() if d.first_seen else "",
+            d.last_seen.isoformat() if d.last_seen else "",
+        ]
+        for d in rows
+    )
+    return csv_streaming_response(f"tenant-{tenant_id}-devices", headers, exported)

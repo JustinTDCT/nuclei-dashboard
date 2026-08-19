@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.access import apply_tenant_scope, require_object_tenant, require_visible_tenant
 from app.audit import record_audit, utcnow
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -59,10 +60,10 @@ def job_out(job: ScanJob, *, include_snapshot: bool = False) -> ScanJobOut:
 def list_scans(
     tenant_id: int,
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    get_tenant(db, tenant_id)
+    require_visible_tenant(db, user, tenant_id)
     q = db.query(Scan).filter(Scan.tenant_id == tenant_id)
     if not include_archived:
         q = q.filter(Scan.archived_at.is_(None))
@@ -95,10 +96,9 @@ def create_scan(tenant_id: int, body: ScanIn, user: User = Depends(require_user)
 
 
 @router.get("/scans/{scan_id}", response_model=ScanOut)
-def read_scan(scan_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def read_scan(scan_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    require_object_tenant(db, user, scan, tenant_id=scan.tenant_id if scan else None, detail="Scan not found")
     return serialize_scan(db, scan)
 
 
@@ -191,8 +191,8 @@ def run_scan(scan_id: int, user: User = Depends(require_user), db: Session = Dep
 
 
 @router.get("/tenants/{tenant_id}/jobs", response_model=list[ScanJobOut])
-def list_jobs(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    get_tenant(db, tenant_id)
+def list_jobs(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    require_visible_tenant(db, user, tenant_id)
     jobs = (
         db.query(ScanJob)
         .filter(ScanJob.tenant_id == tenant_id)
@@ -204,14 +204,18 @@ def list_jobs(tenant_id: int, _: User = Depends(require_any), db: Session = Depe
 
 
 @router.get("/jobs", response_model=list[ScanJobOut])
-def list_all_jobs(_: User = Depends(require_any), db: Session = Depends(get_db)):
-    jobs = db.query(ScanJob).order_by(ScanJob.created_at.desc()).limit(50).all()
+def list_all_jobs(user: User = Depends(require_any), db: Session = Depends(get_db)):
+    jobs = (
+        apply_tenant_scope(db.query(ScanJob), user, ScanJob.tenant_id)
+        .order_by(ScanJob.created_at.desc())
+        .limit(50)
+        .all()
+    )
     return [job_out(j) for j in jobs]
 
 
 @router.get("/jobs/{job_id}", response_model=ScanJobOut)
-def read_job(job_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def read_job(job_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    require_object_tenant(db, user, job, tenant_id=job.tenant_id if job else None, detail="Job not found")
     return job_out(job, include_snapshot=True)

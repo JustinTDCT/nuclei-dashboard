@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.access import require_visible_tenant
 from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -20,8 +21,8 @@ router = APIRouter(tags=["subnets"])
 
 
 @router.get("/tenants/{tenant_id}/subnets", response_model=list[SubnetOut])
-def list_subnets(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    get_tenant(db, tenant_id)
+def list_subnets(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    require_visible_tenant(db, user, tenant_id)
     return db.query(Subnet).filter(Subnet.tenant_id == tenant_id).order_by(Subnet.scope, Subnet.name).all()
 
 

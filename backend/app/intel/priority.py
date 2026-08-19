@@ -591,12 +591,19 @@ def priority_sort_sql():
     )
 
 
-def open_finding_priority_counts(db: Session, tenant_id: int | None = None) -> dict[str, int]:
+def open_finding_priority_counts(
+    db: Session,
+    tenant_id: int | None = None,
+    *,
+    tenant_filter=None,
+) -> dict[str, int]:
     query = db.query(AssetFinding.priority, func.count(AssetFinding.id)).filter(
         AssetFinding.technical_state == "open"
     )
     if tenant_id is not None:
         query = query.filter(AssetFinding.tenant_id == tenant_id)
+    elif tenant_filter is not None:
+        query = query.filter(tenant_filter)
     counts = {"p1": 0, "p2": 0, "p3": 0, "p4": 0, "uncalculated": 0}
     for priority, total in query.group_by(AssetFinding.priority).all():
         key = priority if priority in counts else "uncalculated"

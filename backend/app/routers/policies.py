@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.access import can_access_tenant, is_internal_operator, require_object_tenant, require_visible_tenant
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.locality import get_tenant
@@ -87,13 +88,15 @@ def api_list_policies(
     network_id: int | None = None,
     enabled: bool | None = None,
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
     if category and category not in POLICY_CATEGORIES:
         raise HTTPException(status_code=400, detail="Invalid category")
     if scope_type and scope_type not in POLICY_SCOPES:
         raise HTTPException(status_code=400, detail="Invalid scope_type")
+    if tenant_id is not None:
+        require_visible_tenant(db, user, tenant_id)
     rows = list_policies(
         db,
         category=category,
@@ -104,13 +107,18 @@ def api_list_policies(
         enabled=enabled,
         include_archived=include_archived,
     )
+    if not is_internal_operator(user):
+        rows = [row for row in rows if row.tenant_id is not None and can_access_tenant(db, user, row.tenant_id)]
     return [serialize_policy(row) for row in rows]
 
 
 @router.get("/policies/{policy_id}", response_model=PolicyOut)
-def api_get_policy(policy_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def api_get_policy(policy_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
     try:
-        return serialize_policy(get_policy(db, policy_id))
+        row = get_policy(db, policy_id)
+        if not is_internal_operator(user):
+            require_object_tenant(db, user, row, tenant_id=row.tenant_id, detail="Policy not found")
+        return serialize_policy(row)
     except PolicyError as exc:
         raise _http(exc) from exc
 
@@ -189,10 +197,10 @@ def api_archive_policy(
 def api_asset_policy_evaluation(
     tenant_id: int,
     asset_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    get_tenant(db, tenant_id)
+    require_visible_tenant(db, user, tenant_id)
     asset = db.get(Asset, asset_id)
     if asset is None or asset.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Asset not found")
@@ -225,10 +233,10 @@ def api_asset_policy_evaluation(
 def api_finding_policy_evaluation(
     tenant_id: int,
     asset_finding_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    get_tenant(db, tenant_id)
+    require_visible_tenant(db, user, tenant_id)
     finding = db.get(AssetFinding, asset_finding_id)
     if finding is None or finding.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Asset finding not found")
@@ -241,17 +249,23 @@ def api_finding_policy_evaluation(
 
 
 @router.post("/policies/preview", response_model=dict)
-def api_preview_policy(body: PolicyPreviewIn, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def api_preview_policy(body: PolicyPreviewIn, user: User = Depends(require_any), db: Session = Depends(get_db)):
     try:
         if body.asset_finding_id is not None:
             finding = db.get(AssetFinding, body.asset_finding_id)
-            if finding is None:
-                raise HTTPException(status_code=404, detail="Asset finding not found")
+            require_object_tenant(
+                db,
+                user,
+                finding,
+                tenant_id=finding.tenant_id if finding else None,
+                detail="Asset finding not found",
+            )
             context = context_for_findings(db, [finding])[finding.id]
         elif body.asset_id is not None:
             asset = db.get(Asset, body.asset_id)
-            if asset is None:
-                raise HTTPException(status_code=404, detail="Asset not found")
+            require_object_tenant(
+                db, user, asset, tenant_id=asset.tenant_id if asset else None, detail="Asset not found"
+            )
             context = contexts_for_assets(db, [asset])[asset.id]
         else:
             raise HTTPException(status_code=400, detail="asset_id or asset_finding_id is required")

@@ -24,6 +24,7 @@ from tests.test_migrations import FROZEN_MIGRATION_HASHES
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE3A_HEAD = "0012_policy_engine"
 PHASE3B_HEAD = "0013_event_alert_engine"
+PHASE3C_HEAD = "0014_reports_auditor_access"
 PHASE3A_GIT_BLOB = "a4c0b9c7a204b31db7c042b00d1cd3d91b5b3e9d"
 PHASE3A_SHA256 = "fc539d809f4decf5107fb5e4d88c9aeb50f1131a5154366bca68c0f1bedeefb9"
 
@@ -71,7 +72,7 @@ def test_fresh_db_reaches_0013_and_freezes_0012(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE3B_HEAD
+    assert revision == head_revision() == current_revision() == PHASE3C_HEAD
     tables = set(inspect(engine).get_table_names())
     assert {"event_alert_queue", "alert_deliveries", "alert_event_routes"}.issubset(tables)
     content = (BACKEND_ROOT / "alembic" / "versions" / "0012_policy_engine.py").read_bytes()

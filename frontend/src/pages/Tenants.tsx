@@ -59,7 +59,11 @@ export function Tenants() {
             <div className="text-sm text-slate-400 mt-1">{t.notes || "No notes"}</div>
           </Link>
         ))}
-        {tenants.length === 0 && <div className="text-slate-500 text-sm">No tenants yet.</div>}
+        {tenants.length === 0 && (
+          <div className="text-slate-500 text-sm">
+            {user?.role === "viewer" ? "No tenant access has been assigned to this account." : "No tenants yet."}
+          </div>
+        )}
       </div>
     </div>
   );

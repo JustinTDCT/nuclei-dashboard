@@ -6,9 +6,11 @@ import { AdminSettings } from "./pages/AdminSettings";
 import { AdminUsers } from "./pages/AdminUsers";
 import { Alerts } from "./pages/Alerts";
 import { Compliance } from "./pages/Compliance";
+import { History } from "./pages/History";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Policies } from "./pages/Policies";
+import { Reports } from "./pages/Reports";
 import { TenantDetail } from "./pages/TenantDetail";
 import { Tenants } from "./pages/Tenants";
 
@@ -38,6 +40,8 @@ export default function App() {
         <Route path="alerts" element={<Alerts />} />
         <Route path="compliance" element={<Compliance />} />
         <Route path="policies" element={<Policies />} />
+        <Route path="reports" element={<Reports />} />
+        <Route path="history" element={<History />} />
         <Route
           path="admin/users"
           element={

@@ -11,3 +11,4 @@ apscheduler==3.10.4
 cryptography==44.0.0
 email-validator==2.2.0
 python-multipart==0.0.20
+reportlab==4.4.3

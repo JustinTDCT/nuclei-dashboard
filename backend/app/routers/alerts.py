@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 
+from app.access import apply_tenant_scope, require_object_tenant, require_tenant_access
 from app.alert_engine import delivery_summary_map, evaluate_event_alert_policy
 from app.audit import record_audit
 from app.auth import require_any, require_user
@@ -59,11 +60,12 @@ def list_alerts(
     severity: str | None = None,
     event_type: str | None = None,
     type: str | None = None,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    query = _visible_query(db)
+    query = apply_tenant_scope(_visible_query(db), user, Alert.tenant_id)
     if tenant_id:
+        require_tenant_access(db, user, tenant_id)
         query = query.filter(Alert.tenant_id == tenant_id)
     if open_only:
         query = query.filter(Alert.is_acknowledged.is_(False))
@@ -78,7 +80,7 @@ def list_alerts(
 
 
 @router.get("/{alert_id}", response_model=AlertDetailOut)
-def get_alert(alert_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def get_alert(alert_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
     row = (
         db.query(Alert)
         .options(
@@ -90,8 +92,7 @@ def get_alert(alert_id: int, _: User = Depends(require_any), db: Session = Depen
         .filter(Alert.id == alert_id)
         .first()
     )
-    if not row:
-        raise HTTPException(status_code=404, detail="Alert not found")
+    require_object_tenant(db, user, row, tenant_id=row.tenant_id if row else None, detail="Alert not found")
     summaries = delivery_summary_map(db, [row.id])
     base = _serialize_alert(row, summaries.get(row.id))
     event = row.source_event
@@ -202,12 +203,13 @@ def ack_all(
 @events_router.get("/{event_id}/alert-policy-evaluation")
 def event_alert_policy_evaluation(
     event_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
     event = db.get(DomainEvent, event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="Event not found")
+    require_object_tenant(
+        db, user, event, tenant_id=event.tenant_id if event else None, detail="Event not found"
+    )
     evaluation = evaluate_event_alert_policy(db, event)
     return {
         "event": {

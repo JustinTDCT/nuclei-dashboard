@@ -7,6 +7,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
 from app.audit import record_audit
+from app.access import apply_tenant_scope, require_object_tenant, require_visible_site, require_visible_tenant
 from app.auth import require_any, require_user
 from app.compose_gen import agent_compose, agent_env
 from app.database import get_db
@@ -62,13 +63,16 @@ def _create_agent_row(db: Session, tenant: Tenant, site, name: str, user: User) 
 
 
 @router.get("/agents", response_model=list[AgentOut])
-def list_all_agents(_: User = Depends(require_any), db: Session = Depends(get_db)):
-    return [serialize(a) for a in db.query(Agent).order_by(Agent.created_at.desc()).all()]
+def list_all_agents(user: User = Depends(require_any), db: Session = Depends(get_db)):
+    return [
+        serialize(a)
+        for a in apply_tenant_scope(db.query(Agent), user, Agent.tenant_id).order_by(Agent.created_at.desc()).all()
+    ]
 
 
 @router.get("/tenants/{tenant_id}/agents", response_model=list[AgentOut])
-def list_agents(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    get_tenant(db, tenant_id)
+def list_agents(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    require_visible_tenant(db, user, tenant_id)
     return [
         serialize(a)
         for a in db.query(Agent).filter(Agent.tenant_id == tenant_id).order_by(Agent.name).all()
@@ -76,8 +80,8 @@ def list_agents(tenant_id: int, _: User = Depends(require_any), db: Session = De
 
 
 @router.get("/sites/{site_id}/agents", response_model=list[AgentOut])
-def list_site_agents(site_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    site = get_site(db, site_id)
+def list_site_agents(site_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    site = require_visible_site(db, user, site_id)
     return [
         serialize(a)
         for a in db.query(Agent).filter(Agent.site_id == site.id).order_by(Agent.name).all()
@@ -177,6 +181,13 @@ def revoke_agent(agent_id: int, _: User = Depends(require_user), db: Session = D
     agent.enrollment_secret = None
     db.commit()
     db.refresh(agent)
+    return serialize(agent)
+
+
+@router.get("/agents/{agent_id}", response_model=AgentOut)
+def read_agent(agent_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    agent = get_agent(db, agent_id)
+    require_object_tenant(db, user, agent, tenant_id=agent.tenant_id, detail="Agent not found")
     return serialize(agent)
 
 

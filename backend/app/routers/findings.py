@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import PlainTextResponse
 from sqlalchemy import exists, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
+from app.access import require_visible_tenant
+from app.reporting.csv_export import csv_streaming_response
 from app.auth import require_any
 from app.compliance import COMPLIANCE_MAPPING_DISCLAIMER, list_asset_finding_control_references
 from app.database import get_db
@@ -51,11 +52,8 @@ from app.treatments import display_status, utcnow as treatment_utcnow
 router = APIRouter(tags=["findings"])
 
 
-def _require_tenant(db: Session, tenant_id: int) -> Tenant:
-    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    return tenant
+def _require_tenant(db: Session, tenant_id: int, user: User) -> Tenant:
+    return require_visible_tenant(db, user, tenant_id)
 
 
 def _num(value):
@@ -138,8 +136,8 @@ def _active_treatments_for(db: Session, rows: list[AssetFinding]) -> dict[int, F
     return {item.asset_finding_id: item for item in found}
 
 
-def _get_tenant_asset_finding(db: Session, tenant_id: int, asset_finding_id: int) -> AssetFinding:
-    _require_tenant(db, tenant_id)
+def _get_tenant_asset_finding(db: Session, tenant_id: int, asset_finding_id: int, user: User) -> AssetFinding:
+    _require_tenant(db, tenant_id, user)
     row = (
         db.query(AssetFinding)
         .options(
@@ -166,10 +164,10 @@ def list_findings(
     device_id: int | None = None,
     template_id: str | None = None,
     scan_job_id: int | None = None,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     query = db.query(Finding).options(joinedload(Finding.device)).filter(Finding.tenant_id == tenant_id)
     if severity:
         query = query.filter(Finding.severity == severity)
@@ -191,8 +189,8 @@ def list_findings(
 
 
 @router.get("/tenants/{tenant_id}/findings/export")
-def export_findings(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    _require_tenant(db, tenant_id)
+def export_findings(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    _require_tenant(db, tenant_id, user)
     rows = (
         db.query(Finding)
         .options(joinedload(Finding.device))
@@ -200,25 +198,24 @@ def export_findings(tenant_id: int, _: User = Depends(require_any), db: Session 
         .order_by(Finding.found_at.desc())
         .all()
     )
-    lines = ["found_at,severity,hostname,ip,template_id,name,host,matched_at,tags"]
+    headers = ["found_at", "severity", "hostname", "ip", "template_id", "name", "host", "matched_at", "tags"]
+    exported = []
     for f in rows:
         item = _finding_out(f)
-        lines.append(
-            ",".join(
-                [
-                    f.found_at.isoformat() if f.found_at else "",
-                    f.severity,
-                    _csv(item.hostname),
-                    _csv(item.ip),
-                    _csv(f.template_id),
-                    _csv(f.name),
-                    _csv(f.host),
-                    _csv(f.matched_at),
-                    _csv(f.tags),
-                ]
-            )
+        exported.append(
+            [
+                f.found_at.isoformat() if f.found_at else "",
+                f.severity,
+                item.hostname,
+                item.ip,
+                f.template_id,
+                f.name,
+                f.host,
+                f.matched_at,
+                f.tags,
+            ]
         )
-    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/csv")
+    return csv_streaming_response(f"tenant-{tenant_id}-findings", headers, exported)
 
 
 @router.get("/tenants/{tenant_id}/asset-findings", response_model=list[AssetFindingOut])
@@ -234,10 +231,10 @@ def list_asset_findings(
     kev: bool | None = None,
     treatment_state: str | None = None,
     treatment_review_overdue: bool | None = None,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     query = (
         db.query(AssetFinding)
         .options(
@@ -292,20 +289,20 @@ def list_asset_findings(
 def get_tenant_asset_finding(
     tenant_id: int,
     asset_finding_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    return _asset_finding_detail(db, _get_tenant_asset_finding(db, tenant_id, asset_finding_id))
+    return _asset_finding_detail(db, _get_tenant_asset_finding(db, tenant_id, asset_finding_id, user))
 
 
 @router.get("/tenants/{tenant_id}/asset-findings/{asset_finding_id}/evidence", response_model=list[FindingOut])
 def list_tenant_asset_finding_evidence(
     tenant_id: int,
     asset_finding_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    row = _get_tenant_asset_finding(db, tenant_id, asset_finding_id)
+    row = _get_tenant_asset_finding(db, tenant_id, asset_finding_id, user)
     evidence = sorted(row.evidence, key=lambda item: (item.found_at, item.id), reverse=True)
     return [_finding_out(item) for item in evidence]
 
@@ -317,10 +314,10 @@ def list_tenant_asset_finding_evidence(
 def list_tenant_asset_finding_history(
     tenant_id: int,
     asset_finding_id: int,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    row = _get_tenant_asset_finding(db, tenant_id, asset_finding_id)
+    row = _get_tenant_asset_finding(db, tenant_id, asset_finding_id, user)
     history = sorted(row.history, key=lambda item: (item.occurred_at, item.id))
     return [AssetFindingHistoryOut.model_validate(item) for item in history]
 
@@ -329,13 +326,13 @@ def list_tenant_asset_finding_history(
 def get_asset_finding(
     asset_finding_id: int,
     tenant_id: int | None = Query(default=None),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
     row = _load_asset_finding(db, asset_finding_id)
     if tenant_id is not None and row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Asset finding not found")
-    _require_tenant(db, row.tenant_id)
+    _require_tenant(db, row.tenant_id, user)
     return _asset_finding_detail(db, row)
 
 
@@ -343,13 +340,13 @@ def get_asset_finding(
 def list_asset_finding_evidence(
     asset_finding_id: int,
     tenant_id: int | None = Query(default=None),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
     row = _load_asset_finding(db, asset_finding_id)
     if tenant_id is not None and row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Asset finding not found")
-    _require_tenant(db, row.tenant_id)
+    _require_tenant(db, row.tenant_id, user)
     evidence = sorted(row.evidence, key=lambda item: (item.found_at, item.id), reverse=True)
     return [_finding_out(item) for item in evidence]
 
@@ -358,13 +355,13 @@ def list_asset_finding_evidence(
 def list_asset_finding_history(
     asset_finding_id: int,
     tenant_id: int | None = Query(default=None),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
     row = _load_asset_finding(db, asset_finding_id)
     if tenant_id is not None and row.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Asset finding not found")
-    _require_tenant(db, row.tenant_id)
+    _require_tenant(db, row.tenant_id, user)
     history = sorted(row.history, key=lambda item: (item.occurred_at, item.id))
     return [AssetFindingHistoryOut.model_validate(item) for item in history]
 
@@ -486,10 +483,10 @@ def _serialize_vulnerability(db: Session, vulnerability: Vulnerability) -> Vulne
 def get_vulnerability(
     vulnerability_id: int,
     tenant_id: int = Query(..., description="Tenant that has a linked Asset Finding for this vulnerability"),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    _require_tenant(db, tenant_id)
+    _require_tenant(db, tenant_id, user)
     vulnerability = db.get(Vulnerability, vulnerability_id)
     if vulnerability is None:
         raise HTTPException(status_code=404, detail="Vulnerability not found")
@@ -501,8 +498,3 @@ def get_vulnerability(
     if linked is None:
         raise HTTPException(status_code=404, detail="Vulnerability not found")
     return _serialize_vulnerability(db, vulnerability)
-
-
-def _csv(value: str) -> str:
-    text = (value or "").replace('"', '""')
-    return f'"{text}"'

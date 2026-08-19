@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0013_event_alert_engine` (after frozen `0001_baseline` through `0012_policy_engine`).
+Current head revision: `0014_reports_auditor_access` (after frozen `0001_baseline` through `0013_event_alert_engine`).
 
-`0001_baseline` through `0012_policy_engine` are immutable. Phase 3B event/alert engine lives in `0013_event_alert_engine`.
+`0001_baseline` through `0013_event_alert_engine` are immutable. Phase 3C reports and auditor access live in `0014_reports_auditor_access`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -46,6 +46,8 @@ Current head revision: `0013_event_alert_engine` (after frozen `0001_baseline` t
 `alembic downgrade` from `0012_policy_engine` is **refused when `policy_rules` contains rows**. Configured policy history is not silently dropped. An empty `policy_rules` table may downgrade.
 
 `alembic downgrade` from `0013_event_alert_engine` is **refused when Phase 3B history exists** (queue, deliveries, routes, alerting policies, or populated new event/alert columns). Empty Phase 3B tables and unused new columns may downgrade.
+
+`alembic downgrade` from `0014_reports_auditor_access` is **refused when Viewer authorization is configured** (`viewer_all_tenants = TRUE`, any `viewer_expires_at`, or any `viewer_tenant_grants` rows). An empty/unconfigured 0014 may downgrade.
 
 ### Fresh install
 
@@ -332,3 +334,62 @@ Read-only evaluation: `GET /api/events/{event_id}/alert-policy-evaluation`.
 ## Viewer / Auditor
 
 Viewer is read-only. A Viewer may list agents and see status. A Viewer must not create/approve/revoke agents and must not download compose or env files that can contain an active enrollment secret. Admin and User remain the deployment roles.
+
+Phase 3C adds **explicit Tenant grants** and optional **expiration**. This is fail-closed.
+
+### Viewer Tenant scope
+
+A Viewer may have one of:
+
+- **No Tenant access** — default. The account can authenticate but Tenant-scoped lists, dashboards, reports, alerts, and history are empty. Direct IDs for other Tenants return 404.
+- **Selected Tenants** — relational grants in `viewer_tenant_grants`. The Viewer sees exactly those Tenants.
+- **All Tenants** — `viewer_all_tenants = TRUE` and no selected grant rows. The Viewer sees current and future Tenant-scoped operational data. This is **not** Admin: user management, SMTP, enrollment secrets, intelligence refresh, and `tenant_id IS NULL` global AuditLog rows remain hidden.
+
+Ambiguous configuration (all-Tenant plus selected grants) is rejected.
+
+If an account is changed from Viewer to Admin/User, Viewer grant state is cleared so old grants cannot reactivate later. Changing back to Viewer starts with no Tenant access until an Admin grants it again.
+
+### Existing Viewer upgrade (0013 → 0014)
+
+**Existing Viewer accounts are not grandfathered into all-Tenant access.**
+
+On upgrade:
+
+- `viewer_all_tenants = FALSE`
+- no `viewer_tenant_grants` rows
+- `viewer_expires_at = NULL`
+
+The Viewer can log in but sees **no Tenant data** until an Admin assigns selected Tenants or all-Tenant access. Admin and User behavior is unchanged.
+
+### Viewer expiration
+
+`viewer_expires_at` is stored in UTC. `NULL` means no expiration. When `viewer_expires_at <= now(UTC)` the Viewer is expired.
+
+Expiration is checked at login **and** on every authenticated request through current-user resolution. A JWT issued before expiration does not keep working after expiration. The API returns a clear 401 (`Viewer access has expired`). Disabled (`is_active = false`) is a separate status from Expired.
+
+### Reports
+
+`Reports` in the UI and `GET /api/reports/...` share one canonical report query layer. Preview, CSV, and PDF use the same filters and authorization primitive as normal Tenant reads.
+
+Families: Executive Vulnerability Summary, Asset Inventory, New / Changed Assets, Open Vulnerabilities, Resolved Vulnerabilities, Mitigated / Accepted Risk, CVE Aging, Scan History, Agent Health, CMMC / Control Evidence.
+
+- Preview is paginated (default 50, max 200). Preview is **not** audited.
+- CSV and PDF exports create `report.export` AuditLog rows (actor, report key, format, scope, filters, generated_at). Report bodies and secrets are not stored.
+- CSV uses the Python `csv` module, UTF-8, formula neutralization for cells starting with `= + - @`, and safe `Content-Disposition` filenames. Timestamps in CSV are ISO-8601 UTC.
+- PDF is generated with ReportLab from the same dataset. Timestamps render in the effective Site timezone when a Site applies, otherwise the configured global timezone, and the timezone is labeled.
+- CMMC / Control Evidence requires exactly one Tenant plus a Framework. It reuses generic Framework/Control/ControlReference mappings. No mapped evidence means “No mapped evidence in the application”, not “Noncompliant”. Mapped evidence means “Evidence/reference is mapped”, not “Compliant”. The existing mapping disclaimer is included. The product does not certify CMMC.
+- Existing `GET /tenants/{tenant_id}/assets/export` remains as a compatibility endpoint and uses the shared CSV helper.
+- Reports never include Agent enrollment secrets, passwords, JWTs, or SMTP credentials.
+
+### Audit & Events
+
+`Audit & Events` exposes two separate histories:
+
+- `GET /api/audit-history` — security/admin AuditLog
+- `GET /api/domain-events` — DomainEvent (does not mutate alert routing)
+
+Both are paginated and ordered deterministically (`created_at`/`occurred_at` DESC, `id` DESC). Viewers only see permitted Tenant rows and never `tenant_id IS NULL` global Admin records.
+
+### Timezone
+
+Persisted timestamps remain UTC. Report filters use UTC boundaries. CSV prefers reproducible UTC. PDF labels the display timezone.

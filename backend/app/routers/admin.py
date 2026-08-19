@@ -4,14 +4,19 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.access import (
+    apply_tenant_scope,
+    is_internal_operator,
+    tenant_scope_clause,
+    visible_tenant_query,
+)
 from app.audit import record_audit
 from app.auth import require_admin, require_any
 from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
 from app.intel.priority import open_finding_priority_counts
 from app.intel.sync import intelligence_status, refresh_intelligence
-from app.models import Agent, Alert, AlertDelivery, Device, ScanJob, Tenant, User
-from app.scan_dispatch import is_agent_healthy
+from app.models import AGENT_HEALTH_SECONDS, Agent, Alert, AlertDelivery, AssetFinding, Device, ScanJob, Tenant, User
 from app.scan_intensity import DEFAULT_CAPS
 from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
 from app.settings_store import get_settings, save_settings
@@ -86,33 +91,57 @@ def timezones(_: User = Depends(require_any)):
 
 
 @router.get("/dashboard")
-def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
-    agents = db.query(Agent).all()
+def dashboard(user: User = Depends(require_any), db: Session = Depends(get_db)):
+    alert_filter = tenant_scope_clause(user, Alert.tenant_id)
+    device_filter = tenant_scope_clause(user, Device.tenant_id)
+    finding_filter = tenant_scope_clause(user, AssetFinding.tenant_id)
+    heartbeat_cut = datetime.now(timezone.utc) - timedelta(seconds=AGENT_HEALTH_SECONDS)
+    pending = (
+        apply_tenant_scope(db.query(func.count(Agent.id)), user, Agent.tenant_id)
+        .filter(Agent.status == "pending_approval")
+        .scalar()
+        or 0
+    )
+    total_agents = apply_tenant_scope(db.query(func.count(Agent.id)), user, Agent.tenant_id).scalar() or 0
+    online = (
+        apply_tenant_scope(db.query(func.count(Agent.id)), user, Agent.tenant_id)
+        .filter(Agent.status == "approved", Agent.last_heartbeat >= heartbeat_cut)
+        .scalar()
+        or 0
+    )
+    delivery_query = (
+        db.query(func.count(AlertDelivery.id))
+        .join(Alert, Alert.id == AlertDelivery.alert_id)
+        .filter(AlertDelivery.status == "failed")
+        .filter(alert_filter)
+    )
     return {
-        "tenants": db.query(func.count(Tenant.id)).scalar() or 0,
-        "users": db.query(func.count(User.id)).scalar() or 0,
+        "tenants": visible_tenant_query(db, user).count(),
+        "users": (db.query(func.count(User.id)).scalar() or 0) if is_internal_operator(user) else 0,
         "open_alerts": db.query(func.count(Alert.id)).filter(
-            Alert.is_acknowledged.is_(False), Alert.dashboard_visible.is_(True)
+            Alert.is_acknowledged.is_(False), Alert.dashboard_visible.is_(True), alert_filter
         ).scalar() or 0,
         "open_alerts_critical": db.query(func.count(Alert.id)).filter(
             Alert.is_acknowledged.is_(False),
             Alert.dashboard_visible.is_(True),
             Alert.severity == "critical",
+            alert_filter,
         ).scalar() or 0,
         "open_alerts_high": db.query(func.count(Alert.id)).filter(
             Alert.is_acknowledged.is_(False),
             Alert.dashboard_visible.is_(True),
             Alert.severity == "high",
+            alert_filter,
         ).scalar() or 0,
-        "delivery_failures": db.query(func.count(AlertDelivery.id)).filter(AlertDelivery.status == "failed").scalar() or 0,
-        "new_devices": db.query(func.count(Device.id)).filter(Device.status == "new").scalar() or 0,
+        "delivery_failures": delivery_query.scalar() or 0,
+        "new_devices": db.query(func.count(Device.id)).filter(Device.status == "new", device_filter).scalar() or 0,
         "agents": {
-            "total": len(agents),
-            "pending": sum(1 for a in agents if a.status == "pending_approval"),
-            "online": sum(1 for a in agents if is_agent_healthy(a)),
+            "total": total_agents,
+            "pending": pending,
+            "online": online,
         },
-        "findings": open_finding_severity_counts(db),
-        "priorities": open_finding_priority_counts(db),
+        "findings": open_finding_severity_counts(db, tenant_filter=finding_filter),
+        "priorities": open_finding_priority_counts(db, tenant_filter=finding_filter),
         "recent_alerts": [
             {
                 "id": a.id,
@@ -124,7 +153,7 @@ def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
                 "severity": a.severity,
                 "occurrence_count": a.occurrence_count or 1,
             }
-            for a in db.query(Alert)
+            for a in apply_tenant_scope(db.query(Alert), user, Alert.tenant_id)
             .filter(Alert.dashboard_visible.is_(True))
             .order_by(Alert.created_at.desc())
             .limit(8)
@@ -140,6 +169,9 @@ def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
                 "findings_count": j.findings_count,
                 "created_at": j.created_at,
             }
-            for j in db.query(ScanJob).order_by(ScanJob.created_at.desc()).limit(8).all()
+            for j in apply_tenant_scope(db.query(ScanJob), user, ScanJob.tenant_id)
+            .order_by(ScanJob.created_at.desc())
+            .limit(8)
+            .all()
         ],
     }

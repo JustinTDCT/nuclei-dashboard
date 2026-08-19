@@ -39,6 +39,11 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    viewer_all_tenants: bool = False
+    viewer_expires_at: datetime | None = None
+    viewer_tenant_ids: list[int] = []
+    viewer_access_status: str = "not_applicable"
+    has_tenant_access: bool = True
 
     model_config = {"from_attributes": True}
 
@@ -48,6 +53,9 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8)
     role: str = Field(pattern="^(admin|user|viewer)$")
+    viewer_all_tenants: bool = False
+    viewer_expires_at: datetime | None = None
+    viewer_tenant_ids: list[int] = []
 
 
 class UserUpdate(BaseModel):
@@ -55,6 +63,10 @@ class UserUpdate(BaseModel):
     password: str | None = Field(default=None, min_length=8)
     role: str | None = Field(default=None, pattern="^(admin|user|viewer)$")
     is_active: bool | None = None
+    viewer_all_tenants: bool | None = None
+    viewer_expires_at: datetime | None = None
+    viewer_tenant_ids: list[int] | None = None
+    clear_viewer_expiration: bool = False
 
 
 class TenantIn(BaseModel):

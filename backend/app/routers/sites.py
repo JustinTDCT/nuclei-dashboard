@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.assets import assign_tag, get_or_create_tag, remove_tag
 from app.audit import record_audit, utcnow
+from app.access import require_visible_site, require_visible_tenant
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.locality import get_site, get_tenant, site_name_taken
@@ -30,10 +31,10 @@ def serialize_site(db: Session, site: Site, global_timezone: str | None = None) 
 def list_sites(
     tenant_id: int,
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    get_tenant(db, tenant_id)
+    require_visible_tenant(db, user, tenant_id)
     q = db.query(Site).options(selectinload(Site.tags)).filter(Site.tenant_id == tenant_id)
     if not include_archived:
         q = q.filter(Site.archived_at.is_(None))
@@ -74,8 +75,8 @@ def create_site(
 
 
 @router.get("/sites/{site_id}", response_model=SiteOut)
-def read_site(site_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    site = get_site(db, site_id)
+def read_site(site_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    site = require_visible_site(db, user, site_id)
     return serialize_site(db, site)
 
 

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.access import is_internal_operator, require_visible_tenant
 from app.audit import record_audit, utcnow
 from app.auth import require_admin, require_any, require_user
 from app.database import get_db
@@ -15,9 +16,11 @@ router = APIRouter(tags=["scan-exclusions"])
 @router.get("/scan-exclusions", response_model=list[ScanExclusionOut])
 def list_global_exclusions(
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
+    if not is_internal_operator(user):
+        return []
     q = db.query(ScanExclusion).filter(ScanExclusion.scope == EXCLUSION_SCOPE_GLOBAL)
     if not include_archived:
         q = q.filter(ScanExclusion.archived_at.is_(None))
@@ -28,14 +31,16 @@ def list_global_exclusions(
 def list_tenant_exclusions(
     tenant_id: int,
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    get_tenant(db, tenant_id)
-    q = db.query(ScanExclusion).filter(
-        (ScanExclusion.scope == EXCLUSION_SCOPE_GLOBAL)
-        | (ScanExclusion.tenant_id == tenant_id)
-    )
+    require_visible_tenant(db, user, tenant_id)
+    q = db.query(ScanExclusion).filter(ScanExclusion.tenant_id == tenant_id)
+    if is_internal_operator(user):
+        q = db.query(ScanExclusion).filter(
+            (ScanExclusion.scope == EXCLUSION_SCOPE_GLOBAL)
+            | (ScanExclusion.tenant_id == tenant_id)
+        )
     if not include_archived:
         q = q.filter(ScanExclusion.archived_at.is_(None))
     return q.order_by(ScanExclusion.scope, ScanExclusion.id).all()

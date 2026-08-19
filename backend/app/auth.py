@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.access import assert_staff_usable
 from app.config import settings
 from app.database import get_db
 from app.models import User
@@ -62,9 +63,9 @@ def get_current_user(
     if payload.get("typ") != "staff":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     user = db.query(User).filter(User.username == payload["sub"]).first()
-    if not user or not user.is_active:
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User inactive or missing")
-    return user
+    return assert_staff_usable(user)
 
 
 def require_roles(*roles: str):

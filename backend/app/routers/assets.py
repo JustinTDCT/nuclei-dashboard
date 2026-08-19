@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
@@ -17,6 +16,8 @@ from app.assets import (
     validate_disposition,
     validate_lifecycle,
 )
+from app.access import require_tenant_access, require_visible_tenant
+from app.reporting.csv_export import csv_streaming_response
 from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -74,12 +75,13 @@ from app.schemas import (
 router = APIRouter(tags=["assets"])
 
 
-def _get_asset(db: Session, asset_id: int, tenant_id: int | None = None) -> Asset:
+def _get_asset(db: Session, asset_id: int, user: User, tenant_id: int | None = None) -> Asset:
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     if tenant_id is not None and asset.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="Asset not found")
+    require_tenant_access(db, user, asset.tenant_id, detail="Asset not found")
     return asset
 
 
@@ -141,8 +143,8 @@ def _serialize_list_item(asset: Asset, findings_count: int = 0) -> AssetListItem
 
 
 @router.get("/tenants/{tenant_id}/tags", response_model=list[TagOut])
-def list_tags(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    get_tenant(db, tenant_id)
+def list_tags(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    require_visible_tenant(db, user, tenant_id)
     return db.query(Tag).filter(Tag.tenant_id == tenant_id).order_by(Tag.name).all()
 
 
@@ -182,10 +184,10 @@ def list_assets(
     criticality: str | None = None,
     expected: bool | None = None,
     include_merged: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    get_tenant(db, tenant_id)
+    require_visible_tenant(db, user, tenant_id)
     query = (
         db.query(Asset)
         .options(
@@ -231,8 +233,8 @@ def list_assets(
 
 
 @router.get("/tenants/{tenant_id}/assets/export")
-def export_assets(tenant_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    get_tenant(db, tenant_id)
+def export_assets(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    require_visible_tenant(db, user, tenant_id)
     assets = (
         db.query(Asset)
         .options(selectinload(Asset.site), selectinload(Asset.tags), selectinload(Asset.addresses))
@@ -240,29 +242,38 @@ def export_assets(tenant_id: int, _: User = Depends(require_any), db: Session = 
         .order_by(Asset.display_name, Asset.id)
         .all()
     )
-    lines = [
-        "id,display_name,site,addresses,classification,lifecycle_state,disposition,criticality,expected,first_seen,last_seen,tags"
+    headers = [
+        "id",
+        "display_name",
+        "site",
+        "addresses",
+        "classification",
+        "lifecycle_state",
+        "disposition",
+        "criticality",
+        "expected",
+        "first_seen",
+        "last_seen",
+        "tags",
     ]
-    for asset in assets:
-        lines.append(
-            ",".join(
-                [
-                    str(asset.id),
-                    _csv(asset.display_name),
-                    _csv(asset.site.name if asset.site else ""),
-                    _csv(";".join(_current_addresses(asset))),
-                    _csv(asset.classification),
-                    asset.lifecycle_state or "",
-                    asset.disposition,
-                    asset.criticality,
-                    "yes" if asset.is_expected and asset.first_seen is None else "no",
-                    asset.first_seen.isoformat() if asset.first_seen else "",
-                    asset.last_seen.isoformat() if asset.last_seen else "",
-                    _csv(";".join(tag.name for tag in asset.tags)),
-                ]
-            )
-        )
-    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/csv")
+    rows = (
+        [
+            asset.id,
+            asset.display_name,
+            asset.site.name if asset.site else "",
+            ";".join(_current_addresses(asset)),
+            asset.classification,
+            asset.lifecycle_state or "",
+            asset.disposition,
+            asset.criticality,
+            "yes" if asset.is_expected and asset.first_seen is None else "no",
+            asset.first_seen.isoformat() if asset.first_seen else "",
+            asset.last_seen.isoformat() if asset.last_seen else "",
+            ";".join(tag.name for tag in asset.tags),
+        ]
+        for asset in assets
+    )
+    return csv_streaming_response(f"tenant-{tenant_id}-assets", headers, rows)
 
 
 @router.post("/tenants/{tenant_id}/assets", response_model=AssetDetail)
@@ -370,7 +381,7 @@ def create_expected_asset(
 
 
 @router.get("/assets/{asset_id}", response_model=AssetDetail)
-def get_asset(asset_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
+def get_asset(asset_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
     asset = (
         db.query(Asset)
         .options(
@@ -386,6 +397,7 @@ def get_asset(asset_id: int, _: User = Depends(require_any), db: Session = Depen
     )
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
+    require_tenant_access(db, user, asset.tenant_id, detail="Asset not found")
     device_ids = [device.id for device in asset.devices]
     findings: list[Finding] = []
     if device_ids:
@@ -431,7 +443,7 @@ def update_asset(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     before = {
         "display_name": asset.display_name,
         "classification": asset.classification,
@@ -542,7 +554,7 @@ def add_asset_tag(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     tag = _resolve_tag(db, asset.tenant_id, body)
     try:
         assign_tag(asset, tag)
@@ -576,7 +588,7 @@ def delete_asset_tag(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     tag = db.query(Tag).filter(Tag.id == tag_id, Tag.tenant_id == asset.tenant_id).first()
     if not tag:
         raise HTTPException(status_code=404, detail="Tag not found")
@@ -607,10 +619,10 @@ def list_identifiers(
     asset_id: int,
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     return _page(
         db.query(AssetIdentifier).filter(AssetIdentifier.asset_id == asset.id),
         AssetIdentifier.last_seen.desc().nullslast(),
@@ -625,10 +637,10 @@ def list_addresses(
     asset_id: int,
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     return _page(
         db.query(AssetAddress).filter(AssetAddress.asset_id == asset.id),
         AssetAddress.last_seen.desc().nullslast(),
@@ -643,10 +655,10 @@ def list_services(
     asset_id: int,
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     return _page(
         db.query(AssetService).filter(AssetService.asset_id == asset.id),
         AssetService.last_seen.desc().nullslast(),
@@ -661,10 +673,10 @@ def list_correlation(
     asset_id: int,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     return _page(
         db.query(AssetCorrelationDecision).filter(AssetCorrelationDecision.selected_asset_id == asset.id),
         AssetCorrelationDecision.created_at.desc(),
@@ -679,10 +691,10 @@ def list_events(
     asset_id: int,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     return _page(
         db.query(DomainEvent).filter(DomainEvent.asset_id == asset.id),
         DomainEvent.occurred_at.desc(),
@@ -699,7 +711,7 @@ def merge_asset(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    target = _get_asset(db, asset_id)
+    target = _get_asset(db, asset_id, user)
     try:
         merge_assets(
             db,
@@ -721,7 +733,7 @@ def split_asset(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    source = _get_asset(db, asset_id)
+    source = _get_asset(db, asset_id, user)
     try:
         target = split_observations_to_new_asset(
             db,
@@ -744,8 +756,8 @@ def reassociate_observation(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    source = _get_asset(db, asset_id)
-    target = _get_asset(db, body.target_asset_id)
+    source = _get_asset(db, asset_id, user)
+    target = _get_asset(db, body.target_asset_id, user)
     try:
         reassociate_observations(
             db,
@@ -769,7 +781,7 @@ def correct_asset_identifier(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     identifier = db.get(AssetIdentifier, identifier_id)
     if identifier is None or identifier.asset_id != asset.id:
         raise HTTPException(status_code=404, detail="Identifier not found")
@@ -796,7 +808,7 @@ def move_site(
     user: User = Depends(require_user),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     try:
         move_asset_site(db, asset=asset, site_id=body.site_id, actor=user, reason=body.reason)
     except IdentityError as exc:
@@ -810,10 +822,10 @@ def list_observations(
     asset_id: int,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    asset = _get_asset(db, asset_id)
+    asset = _get_asset(db, asset_id, user)
     return _page(
         db.query(AssetObservation).filter(AssetObservation.asset_id == asset.id),
         AssetObservation.observed_at.desc(),
@@ -841,8 +853,3 @@ def _resolve_tag(db: Session, tenant_id: int, body: TagAssignIn) -> Tag:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     raise HTTPException(status_code=400, detail="tag_id or name is required")
-
-
-def _csv(value: str) -> str:
-    text = (value or "").replace('"', '""')
-    return f'"{text}"'

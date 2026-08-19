@@ -37,6 +37,7 @@ def _create_staff(client: TestClient, admin_token: str, username: str, role: str
             "email": f"{username}@example.com",
             "password": f"{username}-password",
             "role": role,
+            **({"viewer_all_tenants": True} if role == "viewer" else {}),
         },
     )
     assert response.status_code == 200, response.text

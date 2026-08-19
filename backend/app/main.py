@@ -17,8 +17,10 @@ from app.routers import (
     devices,
     exclusions,
     findings,
+    history,
     networks,
     policies,
+    reports,
     scans,
     scanner_api,
     sites,
@@ -76,6 +78,8 @@ app.include_router(compliance.router, prefix="/api")
 app.include_router(policies.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
 app.include_router(alerts.events_router, prefix="/api")
+app.include_router(reports.router, prefix="/api")
+app.include_router(history.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(agent_api.router, prefix="/api")
 app.include_router(scanner_api.router, prefix="/api")

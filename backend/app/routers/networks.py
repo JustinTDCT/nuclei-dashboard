@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.assets import assign_tag, get_or_create_tag, remove_tag
 from app.audit import record_audit, utcnow
+from app.access import require_visible_network, require_visible_site, require_visible_tenant
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.locality import (
@@ -39,10 +40,10 @@ def serialize_network(db: Session, network: Network) -> NetworkOut:
 def list_networks(
     site_id: int,
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
-    site = get_site(db, site_id)
+    site = require_visible_site(db, user, site_id)
     q = db.query(Network).filter(Network.site_id == site.id)
     if not include_archived:
         q = q.filter(Network.archived_at.is_(None))
@@ -53,9 +54,10 @@ def list_networks(
 def list_tenant_networks(
     tenant_id: int,
     include_archived: bool = False,
-    _: User = Depends(require_any),
+    user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
+    require_visible_tenant(db, user, tenant_id)
     q = db.query(Network).filter(Network.tenant_id == tenant_id)
     if not include_archived:
         q = q.filter(Network.archived_at.is_(None))
@@ -109,8 +111,8 @@ def create_network(
 
 
 @router.get("/networks/{network_id}", response_model=NetworkOut)
-def read_network(network_id: int, _: User = Depends(require_any), db: Session = Depends(get_db)):
-    return serialize_network(db, get_network(db, network_id))
+def read_network(network_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    return serialize_network(db, require_visible_network(db, user, network_id))
 
 
 @router.patch("/networks/{network_id}", response_model=NetworkOut)

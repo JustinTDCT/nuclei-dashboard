@@ -7,6 +7,34 @@ export interface StaffUser {
   role: Role;
   is_active: boolean;
   created_at: string;
+  viewer_all_tenants?: boolean;
+  viewer_expires_at?: string | null;
+  viewer_tenant_ids?: number[];
+  viewer_access_status?: "not_applicable" | "disabled" | "expired" | "all_tenants" | "selected" | "none";
+  has_tenant_access?: boolean;
+}
+
+export interface ReportCatalogItem {
+  key: string;
+  display_name: string;
+  description: string;
+  supported_formats: string[];
+  supported_filters: { key: string; label: string; kind: string; required: boolean }[];
+}
+
+export interface ReportPreview {
+  key: string;
+  title: string;
+  description: string;
+  generated_at: string;
+  timezone: string;
+  scope: string;
+  summary: Record<string, unknown>;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  page: number;
+  page_size: number;
+  total: number;
 }
 
 export interface Tenant {
