@@ -138,8 +138,38 @@ def _claim_lan(client: TestClient, token: str, world: dict, **scan_extra) -> tup
     return job_id, world["agent1"]
 
 
-def _claim_wan(client: TestClient, token: str, world: dict) -> int:
-    scan = _wan_scan(client, token, world)
+_ARTIFACT_FIELDS = {
+    "port_discovery.naabu": ("port_discovery", "naabu"),
+    "discovery.naabu": ("discovery", "naabu"),
+    "fingerprint.httpx": ("fingerprint", "httpx"),
+    "vulnerability.nuclei": ("vulnerability", "nuclei"),
+}
+
+
+def _expected_artifact_keys(job_id: int) -> list[str]:
+    from app.database import SessionLocal
+    from app.models import ScanJob
+    from app.raw_artifacts import expected_artifact_keys
+
+    db = SessionLocal()
+    try:
+        return expected_artifact_keys(db.get(ScanJob, job_id))
+    finally:
+        db.close()
+
+
+def _upload_keys(client: TestClient, url: str, headers: dict, gz: bytes, keys: list[str]):
+    bodies = []
+    for key in keys:
+        stage, tool = _ARTIFACT_FIELDS[key]
+        response = _upload(client, url, headers, gz, artifact_key=key, stage=stage, tool=tool)
+        assert response.status_code == 200, response.text
+        bodies.append(response.json())
+    return bodies
+
+
+def _claim_wan(client: TestClient, token: str, world: dict, **scan_extra) -> int:
+    scan = _wan_scan(client, token, world, **scan_extra)
     run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
     assert run.status_code == 200, run.text
     job_id = run.json()["id"]
@@ -558,7 +588,8 @@ def test_retention_setting_and_cleanup_leaves_normalized_data(reset_db, tmp_path
         world = _world(client, token)
         job_id, agent = _claim_lan(client, token, world)
         gz = _gzip_jsonl(['{"ip":"10.1.0.8"}'])
-        uploaded = _upload(client, f"/api/agent/jobs/{job_id}/artifacts", _agent_headers(agent), gz).json()
+        keys = _expected_artifact_keys(job_id)
+        uploaded = _upload_keys(client, f"/api/agent/jobs/{job_id}/artifacts", _agent_headers(agent), gz, keys)[0]
         created = datetime.fromisoformat(uploaded["created_at"].replace("Z", "+00:00"))
         expires = datetime.fromisoformat(uploaded["retention_expires_at"].replace("Z", "+00:00"))
         assert (expires - created).days == 30
@@ -571,7 +602,7 @@ def test_retention_setting_and_cleanup_leaves_normalized_data(reset_db, tmp_path
             f"/api/agent/jobs/{job_id}/complete",
             headers=_agent_headers(agent),
             params={"ok": "true"},
-            json={"status": "captured", "artifact_keys": [uploaded["artifact_key"]]},
+            json={"status": "captured", "artifact_keys": keys},
         )
 
         from app.database import SessionLocal
@@ -585,7 +616,7 @@ def test_retention_setting_and_cleanup_leaves_normalized_data(reset_db, tmp_path
             extra = ScanArtifact(
                 scan_job_id=job_id,
                 tenant_id=live.tenant_id,
-                artifact_key="fingerprint.httpx",
+                artifact_key="cleanup.extra",
                 stage="fingerprint",
                 tool="httpx",
                 media_type="application/x-ndjson",
@@ -851,11 +882,20 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
             json={"status": "none_executed", "artifact_keys": []},
         )
         assert lied.status_code == 409
-        captured = client.post(
+        partial = client.post(
             f"/api/agent/jobs/{job_id}/complete",
             headers=headers,
             params={"ok": "true"},
             json={"status": "captured", "artifact_keys": ["port_discovery.naabu"]},
+        )
+        assert partial.status_code == 409
+        keys = _expected_artifact_keys(job_id)
+        _upload_keys(client, f"/api/agent/jobs/{job_id}/artifacts", headers, gz, [key for key in keys if key != "port_discovery.naabu"])
+        captured = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": keys},
         )
         assert captured.status_code == 200, captured.text
         assert captured.json()["status"] == "done"
@@ -937,6 +977,114 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
             json={"status": "none_executed", "artifact_keys": []},
         )
         assert wan_lied.status_code == 409
+
+
+@requires_postgres
+def test_captured_complete_requires_all_snapshot_artifacts(reset_db, tmp_path, monkeypatch):
+    _artifact_root(tmp_path, monkeypatch)
+    gz = _gzip_jsonl(['{"ip":"10.1.0.1","port":80}'])
+    vuln_stages = {
+        "discovery": True,
+        "port_mode": "common",
+        "fingerprint": True,
+        "vulnerability": True,
+        "nuclei_severities": "critical,high,medium",
+        "nuclei_tags": "",
+    }
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        job_id, agent = _claim_lan(client, token, world)
+        headers = _agent_headers(agent)
+        url = f"/api/agent/jobs/{job_id}/artifacts"
+        expected = _expected_artifact_keys(job_id)
+        assert expected == ["port_discovery.naabu", "fingerprint.httpx"]
+        naabu_only = _upload_keys(client, url, headers, gz, ["port_discovery.naabu"])
+        assert naabu_only[0]["artifact_key"] == "port_discovery.naabu"
+        incomplete = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": ["port_discovery.naabu"]},
+        )
+        assert incomplete.status_code == 409
+        from app.database import SessionLocal
+        from app.models import ScanArtifact, ScanJob
+
+        db = SessionLocal()
+        try:
+            assert db.get(ScanJob, job_id).status == "running"
+        finally:
+            db.close()
+        _upload_keys(client, url, headers, gz, ["fingerprint.httpx"])
+        complete = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": expected},
+        )
+        assert complete.status_code == 200, complete.text
+        assert complete.json()["status"] == "done"
+
+        vuln_job, vuln_agent = _claim_lan(client, token, world, stage_config=vuln_stages)
+        vuln_headers = _agent_headers(vuln_agent)
+        vuln_url = f"/api/agent/jobs/{vuln_job}/artifacts"
+        vuln_expected = _expected_artifact_keys(vuln_job)
+        assert vuln_expected == ["port_discovery.naabu", "fingerprint.httpx", "vulnerability.nuclei"]
+        _upload_keys(client, vuln_url, vuln_headers, gz, ["port_discovery.naabu", "fingerprint.httpx"])
+        missing_nuclei = client.post(
+            f"/api/agent/jobs/{vuln_job}/complete",
+            headers=vuln_headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": ["port_discovery.naabu", "fingerprint.httpx"]},
+        )
+        assert missing_nuclei.status_code == 409
+
+        wan_id = _claim_wan(client, token, world)
+        wan_headers = _scanner_headers()
+        wan_url = f"/api/internal/scanner/jobs/{wan_id}/artifacts"
+        wan_expected = _expected_artifact_keys(wan_id)
+        assert wan_expected == ["port_discovery.naabu", "fingerprint.httpx"]
+        _upload_keys(client, wan_url, wan_headers, gz, ["port_discovery.naabu"])
+        wan_incomplete = client.post(
+            f"/api/internal/scanner/jobs/{wan_id}/complete",
+            headers=wan_headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": ["port_discovery.naabu"]},
+        )
+        assert wan_incomplete.status_code == 409
+        _upload_keys(client, wan_url, wan_headers, gz, ["fingerprint.httpx"])
+        wan_ok = client.post(
+            f"/api/internal/scanner/jobs/{wan_id}/complete",
+            headers=wan_headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": wan_expected},
+        )
+        assert wan_ok.status_code == 200, wan_ok.text
+
+        failed_job, failed_agent = _claim_lan(client, token, world, stage_config=vuln_stages)
+        failed_headers = _agent_headers(failed_agent)
+        _upload_keys(
+            client,
+            f"/api/agent/jobs/{failed_job}/artifacts",
+            failed_headers,
+            gz,
+            ["port_discovery.naabu", "fingerprint.httpx"],
+        )
+        failed = client.post(
+            f"/api/agent/jobs/{failed_job}/complete",
+            headers=failed_headers,
+            params={"ok": "false", "error": "nuclei crashed"},
+        )
+        assert failed.status_code == 200, failed.text
+        db = SessionLocal()
+        try:
+            job = db.get(ScanJob, failed_job)
+            assert job.status == "failed"
+            keys = {row.artifact_key for row in db.query(ScanArtifact).filter(ScanArtifact.scan_job_id == failed_job)}
+            assert keys == {"port_discovery.naabu", "fingerprint.httpx"}
+        finally:
+            db.close()
 
 
 @requires_postgres

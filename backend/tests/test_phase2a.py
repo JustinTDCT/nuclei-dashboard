@@ -115,25 +115,53 @@ def _post_findings(client, world, job_id: int, items=None):
     return posted.json()
 
 
-def _complete(client, world, job_id: int, ok=True, error=None, raw_evidence=None):
-    payload = raw_evidence
-    if ok and payload is None:
-        gz = gzip.compress(b"{}\n")
+_ARTIFACT_FIELDS = {
+    "port_discovery.naabu": ("port_discovery", "naabu"),
+    "discovery.naabu": ("discovery", "naabu"),
+    "fingerprint.httpx": ("fingerprint", "httpx"),
+    "vulnerability.nuclei": ("vulnerability", "nuclei"),
+}
+
+
+def _expected_artifact_keys(job_id: int) -> list[str]:
+    from app.database import SessionLocal
+    from app.models import ScanJob
+    from app.raw_artifacts import expected_artifact_keys
+
+    db = SessionLocal()
+    try:
+        return expected_artifact_keys(db.get(ScanJob, job_id))
+    finally:
+        db.close()
+
+
+def _upload_expected_artifacts(client, job_id: int, headers: dict, url_prefix: str) -> list[str]:
+    keys = _expected_artifact_keys(job_id)
+    gz = gzip.compress(b"{}\n")
+    for key in keys:
+        stage, tool = _ARTIFACT_FIELDS[key]
         uploaded = client.post(
-            f"/api/agent/jobs/{job_id}/artifacts",
-            headers=_agent_headers(world["agent1"]),
+            f"{url_prefix}/{job_id}/artifacts",
+            headers=headers,
             files={"file": ("artifact.jsonl.gz", BytesIO(gz), "application/gzip")},
             data={
-                "artifact_key": "port_discovery.naabu",
-                "stage": "port_discovery",
-                "tool": "naabu",
+                "artifact_key": key,
+                "stage": stage,
+                "tool": tool,
                 "media_type": "application/x-ndjson",
                 "content_encoding": "gzip",
                 "provenance": "{}",
             },
         )
         assert uploaded.status_code == 200, uploaded.text
-        payload = {"status": "captured", "artifact_keys": ["port_discovery.naabu"]}
+    return keys
+
+
+def _complete(client, world, job_id: int, ok=True, error=None, raw_evidence=None):
+    payload = raw_evidence
+    if ok and payload is None:
+        keys = _upload_expected_artifacts(client, job_id, _agent_headers(world["agent1"]), "/api/agent/jobs")
+        payload = {"status": "captured", "artifact_keys": keys}
     posted = client.post(
         f"/api/agent/jobs/{job_id}/complete",
         headers=_agent_headers(world["agent1"]),
@@ -800,25 +828,12 @@ def test_agent_and_central_use_same_lifecycle_and_legacy_api(reset_db):
             json=[_finding_payload(host="https://203.0.113.10")],
         )
         assert findings.status_code == 200, findings.text
-        artifact = client.post(
-            f"/api/internal/scanner/jobs/{job_id}/artifacts",
-            headers=_scanner_headers(),
-            files={"file": ("artifact.jsonl.gz", BytesIO(gzip.compress(b"{}\n")), "application/gzip")},
-            data={
-                "artifact_key": "port_discovery.naabu",
-                "stage": "port_discovery",
-                "tool": "naabu",
-                "media_type": "application/x-ndjson",
-                "content_encoding": "gzip",
-                "provenance": "{}",
-            },
-        )
-        assert artifact.status_code == 200, artifact.text
+        keys = _upload_expected_artifacts(client, job_id, _scanner_headers(), "/api/internal/scanner/jobs")
         done = client.post(
             f"/api/internal/scanner/jobs/{job_id}/complete",
             headers=_scanner_headers(),
             params={"ok": "true"},
-            json={"status": "captured", "artifact_keys": ["port_discovery.naabu"]},
+            json={"status": "captured", "artifact_keys": keys},
         )
         assert done.status_code == 200, done.text
         from app.database import SessionLocal

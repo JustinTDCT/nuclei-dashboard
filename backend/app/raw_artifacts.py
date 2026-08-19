@@ -461,6 +461,26 @@ def snapshot_is_dry_run(job: ScanJob) -> bool:
     return snapshot.get("dry_run") is True
 
 
+def expected_artifact_keys(job: ScanJob) -> list[str]:
+    if snapshot_is_dry_run(job):
+        return []
+    snapshot = job.execution_snapshot if isinstance(job.execution_snapshot, dict) else {}
+    stages = snapshot.get("stages")
+    if not isinstance(stages, dict):
+        return []
+    keys: list[str] = []
+    port_mode = str(stages.get("port_mode") or "none").strip()
+    if port_mode and port_mode != "none":
+        keys.append("port_discovery.naabu")
+    elif stages.get("discovery"):
+        keys.append("discovery.naabu")
+    if stages.get("fingerprint"):
+        keys.append("fingerprint.httpx")
+    if stages.get("vulnerability"):
+        keys.append("vulnerability.nuclei")
+    return keys
+
+
 def snapshot_requires_raw_artifacts(job: ScanJob) -> bool:
     if snapshot_is_dry_run(job):
         return False
@@ -468,10 +488,7 @@ def snapshot_requires_raw_artifacts(job: ScanJob) -> bool:
     stages = snapshot.get("stages")
     if not isinstance(stages, dict) or not stages:
         return True
-    port_mode = str(stages.get("port_mode") or "none").strip()
-    if port_mode and port_mode != "none":
-        return True
-    return bool(stages.get("discovery") or stages.get("fingerprint") or stages.get("vulnerability"))
+    return bool(expected_artifact_keys(job))
 
 
 def apply_raw_evidence_declaration(
@@ -503,6 +520,12 @@ def apply_raw_evidence_declaration(
             raise RawEvidenceError("dry_run execution cannot declare captured artifacts")
         if not normalized_keys:
             raise RawEvidenceError("captured raw evidence requires artifact_keys")
+        expected = set(expected_artifact_keys(job))
+        declared = set(normalized_keys)
+        if expected - existing:
+            raise RawEvidenceError("Required raw evidence artifacts were not persisted")
+        if expected - declared:
+            raise RawEvidenceError("Raw evidence declaration is missing required artifacts")
         missing = [key for key in normalized_keys if key not in existing]
         if missing:
             raise RawEvidenceError("Declared raw evidence artifacts were not persisted")
