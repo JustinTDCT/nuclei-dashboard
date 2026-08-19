@@ -10,7 +10,7 @@ from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
 from app.intel.priority import open_finding_priority_counts
 from app.intel.sync import intelligence_status, refresh_intelligence
-from app.models import Agent, Alert, Device, ScanJob, Tenant, User
+from app.models import Agent, Alert, AlertDelivery, Device, ScanJob, Tenant, User
 from app.scan_dispatch import is_agent_healthy
 from app.scan_intensity import DEFAULT_CAPS
 from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
@@ -91,7 +91,20 @@ def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
     return {
         "tenants": db.query(func.count(Tenant.id)).scalar() or 0,
         "users": db.query(func.count(User.id)).scalar() or 0,
-        "open_alerts": db.query(func.count(Alert.id)).filter(Alert.is_acknowledged.is_(False)).scalar() or 0,
+        "open_alerts": db.query(func.count(Alert.id)).filter(
+            Alert.is_acknowledged.is_(False), Alert.dashboard_visible.is_(True)
+        ).scalar() or 0,
+        "open_alerts_critical": db.query(func.count(Alert.id)).filter(
+            Alert.is_acknowledged.is_(False),
+            Alert.dashboard_visible.is_(True),
+            Alert.severity == "critical",
+        ).scalar() or 0,
+        "open_alerts_high": db.query(func.count(Alert.id)).filter(
+            Alert.is_acknowledged.is_(False),
+            Alert.dashboard_visible.is_(True),
+            Alert.severity == "high",
+        ).scalar() or 0,
+        "delivery_failures": db.query(func.count(AlertDelivery.id)).filter(AlertDelivery.status == "failed").scalar() or 0,
         "new_devices": db.query(func.count(Device.id)).filter(Device.status == "new").scalar() or 0,
         "agents": {
             "total": len(agents),
@@ -108,8 +121,14 @@ def dashboard(_: User = Depends(require_any), db: Session = Depends(get_db)):
                 "title": a.title,
                 "created_at": a.created_at,
                 "is_acknowledged": a.is_acknowledged,
+                "severity": a.severity,
+                "occurrence_count": a.occurrence_count or 1,
             }
-            for a in db.query(Alert).order_by(Alert.created_at.desc()).limit(8).all()
+            for a in db.query(Alert)
+            .filter(Alert.dashboard_visible.is_(True))
+            .order_by(Alert.created_at.desc())
+            .limit(8)
+            .all()
         ],
         "recent_jobs": [
             {

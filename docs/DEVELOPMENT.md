@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0012_policy_engine` (after frozen `0001_baseline` through `0011_phase2c_treatments_compliance`).
+Current head revision: `0013_event_alert_engine` (after frozen `0001_baseline` through `0012_policy_engine`).
 
-`0001_baseline` through `0011_phase2c_treatments_compliance` are immutable. Phase 3A policy lives in `0012_policy_engine`; later correctness fixes belong in application code unless a new revision is truly required.
+`0001_baseline` through `0012_policy_engine` are immutable. Phase 3B event/alert engine lives in `0013_event_alert_engine`.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -44,6 +44,8 @@ Current head revision: `0012_policy_engine` (after frozen `0001_baseline` throug
 `alembic downgrade` from `0011_phase2c_treatments_compliance` is **refused**. It would destroy treatment history, compensating controls, framework/control catalog rows, and evidence-to-control mappings.
 
 `alembic downgrade` from `0012_policy_engine` is **refused when `policy_rules` contains rows**. Configured policy history is not silently dropped. An empty `policy_rules` table may downgrade.
+
+`alembic downgrade` from `0013_event_alert_engine` is **refused when Phase 3B history exists** (queue, deliveries, routes, alerting policies, or populated new event/alert columns). Empty Phase 3B tables and unused new columns may downgrade.
 
 ### Fresh install
 
@@ -275,6 +277,51 @@ Authorization:
 Automatic Asset classification/disposition changes are audited (`asset.policy_classification_changed`, `asset.policy_disposition_changed`) only when the value actually changes. Policy CRUD is audited. Viewing an evaluation does not mutate or audit.
 
 Reconciliation of existing Assets runs on APScheduler every 20 minutes in bounded batches. It applies current rules forward; it does not invent historical values.
+
+## Phase 3B events and alerts
+
+Domain events are facts. Alerts are a policy-driven operational projection of those facts. AuditLog remains a separate actor/security record.
+
+```text
+Domain transition → DomainEvent + routing queue
+                 → Alert Policy Resolver
+                 → Dashboard Alert / Email / Webhook
+```
+
+Asset, Finding, Treatment, Scan, and Agent code emit a DomainEvent only. They do not send email, create dashboard alerts, or POST webhooks.
+
+Supported event types:
+
+- Asset: New Asset, Asset Became Inactive, Inactive Asset Returned, Asset Disposition Changed
+- Finding: New Vulnerability / Finding, Vulnerability Resolved, Vulnerability Reopened
+- Treatment: Finding Treatment Created, Finding Treatment Expired
+- Scan: Scan Failed, Scan Missed — No Available Agent
+- Security: Agent Identity Mismatch, WAN Target Changed, Policy Changed
+
+Service open/closed and Agent online/offline are later coverage; current lifecycle does not yet provide a trustworthy transition.
+
+Alert policies reuse the Phase 3A PolicyRule engine with category `alerting`. Scope remains Network > Site > Tenant > Global, resolved independently per action. Within the same scope, higher priority wins, then lowest PolicyRule ID.
+
+Conditions are AND and require an explicit event type. Supported fields: event type, classification, disposition, criticality, tag, expected asset, finding severity, priority, has CVE, treatment state, source. No executable expressions.
+
+Actions: severity, dashboard, email (`off` / `staff` / `admins`), webhook (`enabled` + http(s) URL, no embedded credentials), `suppress_for_minutes` (0 disables coalescing; max 30 days).
+
+System defaults, represented as `source = system_default` rather than seeded PolicyRule rows:
+
+- `new_asset`: dashboard yes, email staff, severity high
+- `agent_identity_mismatch`: dashboard yes, email admins, severity critical
+
+Other events notify only when a matching alert policy sets an action. A routing-history row still records why no notification occurred.
+
+Suppression/dedupe is per tenant + event type + logical subject + route identity. It never deletes DomainEvents. An acknowledged Alert never swallows a later matching event.
+
+Upgrade never queues historical DomainEvents. Only events emitted through the Phase 3B outbox path are routed.
+
+SMTP and webhook I/O run in a separate APScheduler delivery worker. Core domain transactions stay free of network I/O. Email and webhook retries are bounded; permanent 4xx webhook failures do not retry forever. Webhooks POST a small JSON payload of identifiers and never include secrets, enrollment material, or raw scan blobs.
+
+Acknowledgement is audited (`alert.acknowledged`, `alert.acknowledged_all`). Repeat acknowledgement is a no-op and is not re-audited. Alerts are not physically deleted.
+
+Read-only evaluation: `GET /api/events/{event_id}/alert-policy-evaluation`.
 
 ## Viewer / Auditor
 

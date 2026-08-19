@@ -83,9 +83,13 @@ def expire_stuck_jobs() -> None:
         q = db.query(ScanJob).filter(ScanJob.status == "running", ScanJob.started_at < cutoff)
         jobs = q.all()
         for job in jobs:
-            job.status = "failed"
-            job.finished_at = _now()
-            job.error = job.error or f"Timed out after {minutes} minutes with no completion"
+            from app.jobs import transition_job_to_failed
+
+            transition_job_to_failed(
+                db,
+                job,
+                job.error or f"Timed out after {minutes} minutes with no completion",
+            )
         if jobs:
             db.commit()
             log.info("Expired %s stuck running jobs", len(jobs))
@@ -177,6 +181,22 @@ def start_scheduler() -> None:
         "interval",
         minutes=15,
         id="treatment-expiration",
+        replace_existing=True,
+    )
+    from app.alert_engine import process_pending_deliveries_job, route_pending_events_job
+
+    scheduler.add_job(
+        route_pending_events_job,
+        "interval",
+        seconds=15,
+        id="alert-routing",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        process_pending_deliveries_job,
+        "interval",
+        seconds=20,
+        id="alert-delivery",
         replace_existing=True,
     )
     scheduler.start()

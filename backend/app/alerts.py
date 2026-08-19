@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from app.emailer import admin_emails, send_mail, staff_emails
+from app.events import emit_agent_identity_mismatch
 from app.models import Alert
 
 
@@ -15,6 +15,8 @@ def create_alert(
     agent_id: int | None = None,
     email_to: list[str] | None = None,
 ) -> Alert:
+    """Legacy dashboard-row helper. Does not send email or enqueue deliveries."""
+    del email_to
     alert = Alert(
         tenant_id=tenant_id,
         type=alert_type,
@@ -22,26 +24,13 @@ def create_alert(
         body=body,
         device_id=device_id,
         agent_id=agent_id,
+        dashboard_visible=True,
+        occurrence_count=1,
     )
     db.add(alert)
     db.flush()
-    recipients = email_to if email_to is not None else staff_emails(db)
-    send_mail(db, recipients, title, body)
     return alert
 
 
-def impersonation_alert(db: Session, agent, detail: str) -> Alert:
-    title = f"Agent impersonation attempt: {agent.name}"
-    body = (
-        f"An enrollment or auth attempt for agent {agent.uuid} ({agent.name}) "
-        f"did not match the bound key.\n\n{detail}"
-    )
-    return create_alert(
-        db,
-        alert_type="impersonation",
-        title=title,
-        body=body,
-        tenant_id=agent.tenant_id,
-        agent_id=agent.id,
-        email_to=admin_emails(db),
-    )
+def impersonation_alert(db: Session, agent, detail: str, *, source_ip: str | None = None):
+    return emit_agent_identity_mismatch(db, agent, reason=detail, source_ip=source_ip)

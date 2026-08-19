@@ -481,6 +481,15 @@ def update_asset(
                 site_id=asset.site_id,
                 details={"before": previous, "after": new_disposition},
             )
+            from app.events import emit_asset_disposition_changed
+
+            emit_asset_disposition_changed(
+                db,
+                asset,
+                previous=previous,
+                new=new_disposition,
+                source="manual",
+            )
     if body.criticality is not None:
         try:
             new_criticality = validate_criticality(body.criticality)

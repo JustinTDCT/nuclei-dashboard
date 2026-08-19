@@ -91,6 +91,9 @@ POST_BASELINE_TABLES = frozenset(
         "compliance_controls",
         "compliance_control_references",
         "policy_rules",
+        "event_alert_queue",
+        "alert_deliveries",
+        "alert_event_routes",
     }
 )
 PHASE1A_MARKER_COLUMNS = {

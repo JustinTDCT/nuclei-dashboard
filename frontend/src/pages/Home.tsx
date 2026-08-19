@@ -37,12 +37,14 @@ export function Home() {
         <h1 className="text-2xl font-semibold">Overview</h1>
         <p className="text-slate-400 text-sm">Live status across all client tenants.</p>
       </div>
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-7 gap-4">
         <Card label="Tenants" value={data.tenants} to="/tenants" />
         <Card label="Agents online" value={data.agents.online} />
         <Card label="Pending approval" value={data.agents.pending} />
         <Card label="New devices" value={data.new_devices} />
         <Card label="Open alerts" value={data.open_alerts} to="/alerts" />
+        <Card label="Critical open" value={data.open_alerts_critical || 0} to="/alerts" />
+        <Card label="High open" value={data.open_alerts_high || 0} to="/alerts" />
       </div>
       <section className="bg-slate-900 border border-slate-800 rounded-xl p-4">
         <h2 className="font-medium mb-3">Open findings by operational priority</h2>
@@ -69,7 +71,7 @@ export function Home() {
                   <div>{a.title}</div>
                   <div className="text-xs text-slate-500">{new Date(a.created_at).toLocaleString()}</div>
                 </div>
-                <Badge value={a.type} />
+                <Badge value={a.severity || a.type} />
               </div>
             ))}
           </div>

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.locality import LanScanInvalidError
 from app.models import (
+    JOB_FAILED,
     JOB_QUEUED,
     JOB_RUNNING,
     JOB_WAITING_FOR_AGENT,
@@ -48,10 +49,23 @@ def create_job(
     return job
 
 
-def fail_job(db: Session, job: ScanJob, detail: str) -> ScanJob:
-    job.status = "failed"
+def transition_job_to_failed(db: Session, job: ScanJob, detail: str, *, clear_claim: bool = False) -> bool:
+    if job.status == JOB_FAILED:
+        return False
+    job.status = JOB_FAILED
     job.error = detail
     job.finished_at = _now()
+    if clear_claim:
+        job.claimed_agent_id = None
+        job.claimed_by = None
+    from app.events import emit_scan_failed
+
+    emit_scan_failed(db, job, reason=detail)
+    return True
+
+
+def fail_job(db: Session, job: ScanJob, detail: str) -> ScanJob:
+    transition_job_to_failed(db, job, detail)
     db.commit()
     db.refresh(job)
     return job
@@ -81,13 +95,12 @@ def fail_pending_legacy_pre_1d_jobs(db: Session, *, job_id: int | None = None) -
         q = q.filter(ScanJob.id == job_id)
     rows = q.all()
     now = _now()
+    changed = 0
     for job in rows:
-        job.status = "failed"
-        job.error = LEGACY_PRE_1D_REQUEUE_ERROR
+        if transition_job_to_failed(db, job, LEGACY_PRE_1D_REQUEUE_ERROR, clear_claim=True):
+            changed += 1
         job.finished_at = now
-        job.claimed_agent_id = None
-        job.claimed_by = None
-    return len(rows)
+    return changed
 
 
 def _legacy_job_payload(db: Session, job: ScanJob) -> dict:

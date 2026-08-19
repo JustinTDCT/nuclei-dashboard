@@ -136,6 +136,88 @@ PHASE2A_EVENT_TYPES = frozenset(
     {EVENT_NEW_FINDING, EVENT_VULNERABILITY_RESOLVED, EVENT_VULNERABILITY_REOPENED}
 )
 
+EVENT_ASSET_DISPOSITION_CHANGED = "asset_disposition_changed"
+EVENT_TREATMENT_CREATED = "treatment_created"
+EVENT_TREATMENT_EXPIRED = "treatment_expired"
+EVENT_SCAN_FAILED = "scan_failed"
+EVENT_AGENT_IDENTITY_MISMATCH = "agent_identity_mismatch"
+EVENT_WAN_TARGET_CHANGED = "wan_target_changed"
+EVENT_POLICY_CHANGED = "policy_changed"
+PHASE3B_EVENT_TYPES = frozenset(
+    {
+        EVENT_ASSET_DISPOSITION_CHANGED,
+        EVENT_TREATMENT_CREATED,
+        EVENT_TREATMENT_EXPIRED,
+        EVENT_SCAN_FAILED,
+        EVENT_AGENT_IDENTITY_MISMATCH,
+        EVENT_WAN_TARGET_CHANGED,
+        EVENT_POLICY_CHANGED,
+    }
+)
+DOMAIN_EVENT_TYPES = (
+    PHASE1C_EVENT_TYPES | PHASE1D_EVENT_TYPES | PHASE2A_EVENT_TYPES | PHASE3B_EVENT_TYPES
+)
+EVENT_TYPE_LABELS = {
+    EVENT_NEW_ASSET: "New Asset",
+    EVENT_ASSET_BECAME_INACTIVE: "Asset Became Inactive",
+    EVENT_PREVIOUSLY_INACTIVE_RETURNED: "Inactive Asset Returned",
+    EVENT_ASSET_DISPOSITION_CHANGED: "Asset Disposition Changed",
+    EVENT_NEW_FINDING: "New Vulnerability / Finding",
+    EVENT_VULNERABILITY_RESOLVED: "Vulnerability Resolved",
+    EVENT_VULNERABILITY_REOPENED: "Vulnerability Reopened",
+    EVENT_TREATMENT_CREATED: "Finding Treatment Created",
+    EVENT_TREATMENT_EXPIRED: "Finding Treatment Expired",
+    EVENT_SCAN_FAILED: "Scan Failed",
+    EVENT_SCAN_MISSED_UNAVAILABLE_AGENT: "Scan Missed — No Available Agent",
+    EVENT_AGENT_IDENTITY_MISMATCH: "Agent Identity Mismatch",
+    EVENT_WAN_TARGET_CHANGED: "WAN Target Changed",
+    EVENT_POLICY_CHANGED: "Policy Changed",
+}
+
+ALERT_SEVERITY_INFO = "info"
+ALERT_SEVERITY_LOW = "low"
+ALERT_SEVERITY_MEDIUM = "medium"
+ALERT_SEVERITY_HIGH = "high"
+ALERT_SEVERITY_CRITICAL = "critical"
+ALERT_SEVERITIES = frozenset(
+    {
+        ALERT_SEVERITY_INFO,
+        ALERT_SEVERITY_LOW,
+        ALERT_SEVERITY_MEDIUM,
+        ALERT_SEVERITY_HIGH,
+        ALERT_SEVERITY_CRITICAL,
+    }
+)
+ALERT_EMAIL_OFF = "off"
+ALERT_EMAIL_STAFF = "staff"
+ALERT_EMAIL_ADMINS = "admins"
+ALERT_EMAIL_MODES = frozenset({ALERT_EMAIL_OFF, ALERT_EMAIL_STAFF, ALERT_EMAIL_ADMINS})
+ALERT_QUEUE_PENDING = "pending"
+ALERT_QUEUE_PROCESSING = "processing"
+ALERT_QUEUE_PROCESSED = "processed"
+ALERT_QUEUE_FAILED = "failed"
+ALERT_QUEUE_STATUSES = frozenset(
+    {ALERT_QUEUE_PENDING, ALERT_QUEUE_PROCESSING, ALERT_QUEUE_PROCESSED, ALERT_QUEUE_FAILED}
+)
+DELIVERY_CHANNEL_EMAIL = "email"
+DELIVERY_CHANNEL_WEBHOOK = "webhook"
+DELIVERY_CHANNELS = frozenset({DELIVERY_CHANNEL_EMAIL, DELIVERY_CHANNEL_WEBHOOK})
+DELIVERY_PENDING = "pending"
+DELIVERY_PROCESSING = "processing"
+DELIVERY_SENT = "sent"
+DELIVERY_FAILED = "failed"
+DELIVERY_STATUSES = frozenset(
+    {DELIVERY_PENDING, DELIVERY_PROCESSING, DELIVERY_SENT, DELIVERY_FAILED}
+)
+ROUTING_ALERT_CREATED = "alert_created"
+ROUTING_ALERT_COALESCED = "alert_coalesced"
+ROUTING_NO_NOTIFICATION = "no_notification"
+ROUTING_RESULTS = frozenset({ROUTING_ALERT_CREATED, ROUTING_ALERT_COALESCED, ROUTING_NO_NOTIFICATION})
+MAX_SUPPRESS_FOR_MINUTES = 43200
+MAX_DELIVERY_ATTEMPTS = 5
+ALERT_ROUTE_BATCH_SIZE = 50
+ALERT_DELIVERY_BATCH_SIZE = 25
+
 DEFAULT_FINDING_RESOLUTION_CLEAN_SCANS = 2
 
 PRIORITY_P1 = "p1"
@@ -198,11 +280,13 @@ CONTROL_SUBJECT_TYPES = frozenset(
 POLICY_CATEGORY_ASSET_HANDLING = "asset_handling"
 POLICY_CATEGORY_ASSET_INACTIVITY = "asset_inactivity"
 POLICY_CATEGORY_FINDING_LIFECYCLE = "finding_lifecycle"
+POLICY_CATEGORY_ALERTING = "alerting"
 POLICY_CATEGORIES = frozenset(
     {
         POLICY_CATEGORY_ASSET_HANDLING,
         POLICY_CATEGORY_ASSET_INACTIVITY,
         POLICY_CATEGORY_FINDING_LIFECYCLE,
+        POLICY_CATEGORY_ALERTING,
     }
 )
 
@@ -761,6 +845,14 @@ class Finding(Base):
 
 class Alert(Base):
     __tablename__ = "alerts"
+    __table_args__ = (
+        Index("ix_alerts_tenant_id_dedupe_key_ack", "tenant_id", "dedupe_key", "is_acknowledged"),
+        Index("ix_alerts_dashboard_open_severity", "dashboard_visible", "is_acknowledged", "severity"),
+        Index("ix_alerts_tenant_id_severity_created_at", "tenant_id", "severity", "created_at"),
+        Index("ix_alerts_domain_event_id", "domain_event_id"),
+        Index("ix_alerts_asset_id", "asset_id"),
+        Index("ix_alerts_asset_finding_id", "asset_finding_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
@@ -773,8 +865,33 @@ class Alert(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     acknowledged_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    domain_event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_events.id", ondelete="SET NULL"), nullable=True
+    )
+    last_domain_event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domain_events.id", ondelete="SET NULL"), nullable=True
+    )
+    severity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True)
+    network_id: Mapped[int | None] = mapped_column(ForeignKey("networks.id", ondelete="SET NULL"), nullable=True)
+    asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    asset_finding_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_findings.id", ondelete="SET NULL"), nullable=True
+    )
+    scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id", ondelete="SET NULL"), nullable=True)
+    policy_explanation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    dashboard_visible: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    dedupe_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    first_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     tenant: Mapped["Tenant | None"] = relationship(back_populates="alerts")
+    site: Mapped["Site | None"] = relationship()
+    network: Mapped["Network | None"] = relationship()
+    source_event: Mapped["DomainEvent | None"] = relationship(foreign_keys=[domain_event_id])
+    last_event: Mapped["DomainEvent | None"] = relationship(foreign_keys=[last_domain_event_id])
+    deliveries: Mapped[list["AlertDelivery"]] = relationship(back_populates="alert")
 
 
 class Setting(Base):
@@ -1064,14 +1181,30 @@ class DomainEvent(Base):
     __table_args__ = (
         UniqueConstraint("idempotence_key", name="uq_domain_events_idempotence_key"),
         Index("ix_domain_events_tenant_id_event_type_occurred_at", "tenant_id", "event_type", "occurred_at"),
+        Index("ix_domain_events_site_id_event_type_occurred_at", "site_id", "event_type", "occurred_at"),
+        Index("ix_domain_events_network_id_event_type_occurred_at", "network_id", "event_type", "occurred_at"),
         Index("ix_domain_events_asset_id_occurred_at", "asset_id", "occurred_at"),
+        Index("ix_domain_events_asset_finding_id_occurred_at", "asset_finding_id", "occurred_at"),
+        Index("ix_domain_events_scan_job_id", "scan_job_id"),
+        Index("ix_domain_events_agent_id", "agent_id"),
+        Index("ix_domain_events_treatment_id", "treatment_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_type: Mapped[str] = mapped_column(String(80), index=True)
-    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
     site_id: Mapped[int | None] = mapped_column(ForeignKey("sites.id", ondelete="SET NULL"), nullable=True, index=True)
+    network_id: Mapped[int | None] = mapped_column(ForeignKey("networks.id", ondelete="SET NULL"), nullable=True)
     asset_id: Mapped[int | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True)
+    asset_finding_id: Mapped[int | None] = mapped_column(
+        ForeignKey("asset_findings.id", ondelete="SET NULL"), nullable=True
+    )
+    scan_job_id: Mapped[int | None] = mapped_column(ForeignKey("scan_jobs.id", ondelete="SET NULL"), nullable=True)
+    agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id", ondelete="SET NULL"), nullable=True)
+    treatment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("finding_treatments.id", ondelete="SET NULL"), nullable=True
+    )
+    policy_rule_id: Mapped[int | None] = mapped_column(ForeignKey("policy_rules.id", ondelete="SET NULL"), nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     source: Mapped[str] = mapped_column(String(40), default=SOURCE_SCANNER)
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -1079,6 +1212,9 @@ class DomainEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     asset: Mapped["Asset | None"] = relationship(back_populates="domain_events")
+    site: Mapped["Site | None"] = relationship()
+    network: Mapped["Network | None"] = relationship()
+    alert_queue: Mapped["EventAlertQueue | None"] = relationship(back_populates="domain_event", uselist=False)
 
 
 class Vulnerability(Base):
@@ -1586,7 +1722,7 @@ class PolicyRule(Base):
     __tablename__ = "policy_rules"
     __table_args__ = (
         CheckConstraint(
-            "category IN ('asset_handling', 'asset_inactivity', 'finding_lifecycle')",
+            "category IN ('asset_handling', 'asset_inactivity', 'finding_lifecycle', 'alerting')",
             name="ck_policy_rules_category",
         ),
         CheckConstraint(
@@ -1642,3 +1778,84 @@ class PolicyRule(Base):
     tenant: Mapped["Tenant | None"] = relationship()
     site: Mapped["Site | None"] = relationship()
     network: Mapped["Network | None"] = relationship()
+
+
+class EventAlertQueue(Base):
+    __tablename__ = "event_alert_queue"
+    __table_args__ = (
+        UniqueConstraint("domain_event_id", name="uq_event_alert_queue_domain_event_id"),
+        Index("ix_event_alert_queue_pending", "status", "next_attempt_at"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'processed', 'failed')",
+            name="ck_event_alert_queue_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    domain_event_id: Mapped[int] = mapped_column(ForeignKey("domain_events.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String(20), default=ALERT_QUEUE_PENDING, server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    domain_event: Mapped["DomainEvent"] = relationship(back_populates="alert_queue")
+
+
+class AlertDelivery(Base):
+    __tablename__ = "alert_deliveries"
+    __table_args__ = (
+        UniqueConstraint("alert_id", "channel", name="uq_alert_deliveries_alert_id_channel"),
+        Index("ix_alert_deliveries_pending", "status", "next_attempt_at"),
+        Index("ix_alert_deliveries_alert_id", "alert_id"),
+        CheckConstraint(
+            "channel IN ('email', 'webhook')",
+            name="ck_alert_deliveries_channel",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'sent', 'failed')",
+            name="ck_alert_deliveries_status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id", ondelete="CASCADE"))
+    channel: Mapped[str] = mapped_column(String(20))
+    destination: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(20), default=DELIVERY_PENDING, server_default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload_snapshot: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    alert: Mapped["Alert"] = relationship(back_populates="deliveries")
+
+
+class AlertEventRoute(Base):
+    __tablename__ = "alert_event_routes"
+    __table_args__ = (
+        UniqueConstraint("domain_event_id", name="uq_alert_event_routes_domain_event_id"),
+        Index("ix_alert_event_routes_alert_id", "alert_id"),
+        CheckConstraint(
+            "routing_result IN ('alert_created', 'alert_coalesced', 'no_notification')",
+            name="ck_alert_event_routes_result",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    domain_event_id: Mapped[int] = mapped_column(ForeignKey("domain_events.id", ondelete="CASCADE"))
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id", ondelete="SET NULL"), nullable=True)
+    routing_result: Mapped[str] = mapped_column(String(40))
+    effective_actions: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    policy_explanation: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    domain_event: Mapped["DomainEvent"] = relationship()
+    alert: Mapped["Alert | None"] = relationship()

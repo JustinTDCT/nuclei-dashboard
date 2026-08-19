@@ -60,6 +60,9 @@ def create_wan_target(
         tenant_id=tenant_id,
         details={"type": target.target_type, "normalized": target.normalized_value, "name": target.name},
     )
+    from app.events import emit_wan_target_changed
+
+    emit_wan_target_changed(db, target, change="created")
     db.commit()
     db.refresh(target)
     return target
@@ -81,6 +84,9 @@ def archive_wan_target(target_id: int, user: User = Depends(require_user), db: S
             tenant_id=target.tenant_id,
             details={"type": target.target_type, "normalized": target.normalized_value, "name": target.name},
         )
+        from app.events import emit_wan_target_changed
+
+        emit_wan_target_changed(db, target, change="archived")
         db.commit()
         db.refresh(target)
     return target

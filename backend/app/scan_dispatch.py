@@ -197,11 +197,9 @@ def atomic_claim_job(db: Session, job_id: int, agent: Agent, *, now: datetime | 
 
 
 def fail_unclaimed_job(db: Session, job: ScanJob, detail: str) -> ScanJob:
-    job.status = JOB_FAILED
-    job.error = detail
-    job.finished_at = utcnow()
-    job.claimed_agent_id = None
-    job.claimed_by = None
+    from app.jobs import transition_job_to_failed
+
+    transition_job_to_failed(db, job, detail, clear_claim=True)
     db.flush()
     return job
 

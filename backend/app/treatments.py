@@ -147,6 +147,9 @@ def expire_elapsed_treatments_for_finding(
                 "actor": "system",
             },
         )
+        from app.events import emit_treatment_expired
+
+        emit_treatment_expired(db, treatment, finding)
     return len(expired_rows)
 
 
@@ -323,6 +326,9 @@ def create_treatment(
             "technical_state": finding.technical_state,
         },
     )
+    from app.events import emit_treatment_created
+
+    emit_treatment_created(db, row, finding)
     return row
 
 

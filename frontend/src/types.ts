@@ -532,6 +532,18 @@ export interface ControlReference {
   mapping_disclaimer?: string;
 }
 
+export interface AlertDelivery {
+  id: number;
+  channel: string;
+  destination: string;
+  status: string;
+  attempt_count: number;
+  last_attempt_at: string | null;
+  delivered_at: string | null;
+  last_error: string | null;
+  response_status: number | null;
+}
+
 export interface AlertItem {
   id: number;
   tenant_id: number | null;
@@ -542,6 +554,31 @@ export interface AlertItem {
   device_id: number | null;
   agent_id: number | null;
   created_at: string;
+  severity?: string | null;
+  site_id?: number | null;
+  network_id?: number | null;
+  asset_id?: number | null;
+  domain_event_id?: number | null;
+  dashboard_visible?: boolean;
+  occurrence_count?: number;
+  first_event_at?: string | null;
+  last_event_at?: string | null;
+  tenant_name?: string | null;
+  site_name?: string | null;
+  event_type_label?: string | null;
+  delivery_summary?: { email?: string | null; webhook?: string | null; failed?: number } | null;
+  policy_explanation?: Record<string, unknown> | null;
+  source_event?: {
+    id: number;
+    event_type: string;
+    event_type_label?: string;
+    occurred_at: string;
+    tenant_id: number | null;
+    site_id: number | null;
+    network_id: number | null;
+    source: string;
+  } | null;
+  deliveries?: AlertDelivery[];
 }
 
 export interface Settings {
@@ -594,7 +631,7 @@ export interface IntelligenceStatus {
   sources: Record<string, IntelligenceSourceStatus>;
 }
 
-export type PolicyCategory = "asset_handling" | "asset_inactivity" | "finding_lifecycle";
+export type PolicyCategory = "asset_handling" | "asset_inactivity" | "finding_lifecycle" | "alerting";
 export type PolicyScope = "global" | "tenant" | "site" | "network";
 
 export interface PolicyCondition {
@@ -618,7 +655,7 @@ export interface Policy {
   priority: number;
   enabled: boolean;
   conditions: PolicyCondition[];
-  actions: Record<string, string | number>;
+  actions: Record<string, unknown>;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -653,6 +690,9 @@ export interface Dashboard {
   tenants: number;
   users: number;
   open_alerts: number;
+  open_alerts_critical?: number;
+  open_alerts_high?: number;
+  delivery_failures?: number;
   new_devices: number;
   agents: { total: number; pending: number; online: number };
   findings: Record<string, number>;

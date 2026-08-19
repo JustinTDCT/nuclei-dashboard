@@ -725,6 +725,8 @@ def _emit_lifecycle_event(
         tenant_id=asset_finding.tenant_id,
         site_id=asset_finding.asset.site_id if asset_finding.asset else None,
         asset_id=asset_finding.asset_id,
+        asset_finding_id=asset_finding.id,
+        scan_job_id=scan_job_id,
         idempotence_key=f"{event_type}:{asset_finding.id}:{scan_job_id or 0}",
         details=details,
         source=SOURCE_SCANNER,
@@ -1277,8 +1279,9 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
 def complete_scan_run(db: Session, job: ScanJob, *, ok: bool, error: str | None = None) -> ScanJob:
     finished = utcnow()
     if not ok:
-        job.status = JOB_FAILED
-        job.error = error
+        from app.jobs import transition_job_to_failed
+
+        transition_job_to_failed(db, job, error or "scan failed")
         job.finished_at = finished
         return job
     if not job.execution_snapshot:

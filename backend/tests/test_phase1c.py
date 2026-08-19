@@ -20,7 +20,7 @@ PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0012_policy_engine"
+PHASE3A_HEAD = "0013_event_alert_engine"
 PHASE1C_TABLES = {"asset_correlation_decisions", "domain_events"}
 FROZEN = (
     "0001_baseline_current_schema.py",

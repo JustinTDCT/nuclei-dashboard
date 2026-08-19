@@ -30,6 +30,24 @@ const CATEGORY_LABEL: Record<PolicyCategory, string> = {
   asset_handling: "Asset Handling",
   asset_inactivity: "Asset Inactivity",
   finding_lifecycle: "Finding Lifecycle",
+  alerting: "Alerting",
+};
+
+const EVENT_LABELS: Record<string, string> = {
+  new_asset: "New Asset",
+  asset_became_inactive: "Asset Became Inactive",
+  previously_inactive_asset_returned: "Inactive Asset Returned",
+  asset_disposition_changed: "Asset Disposition Changed",
+  new_finding: "New Vulnerability / Finding",
+  vulnerability_resolved: "Vulnerability Resolved",
+  vulnerability_reopened: "Vulnerability Reopened",
+  treatment_created: "Finding Treatment Created",
+  treatment_expired: "Finding Treatment Expired",
+  scan_failed: "Scan Failed",
+  scan_missed_unavailable_agent: "Scan Missed — No Available Agent",
+  agent_identity_mismatch: "Agent Identity Mismatch",
+  wan_target_changed: "WAN Target Changed",
+  policy_changed: "Policy Changed",
 };
 
 const SCOPE_LABEL: Record<PolicyScope, string> = {
@@ -48,6 +66,11 @@ const FIELD_LABEL: Record<string, string> = {
   severity: "Finding severity",
   priority: "Finding priority",
   has_cve: "Has CVE",
+  event_type: "Event",
+  classification: "Classification",
+  disposition: "Disposition",
+  treatment_state: "Treatment state",
+  source: "Source",
 };
 
 const OP_LABEL: Record<string, string> = {
@@ -73,6 +96,12 @@ const emptyDraft = {
   disposition: "",
   inactive_after_days: "30",
   resolution_clean_scans: "2",
+  alert_severity: "high",
+  alert_dashboard: true,
+  alert_email: "staff",
+  alert_webhook_enabled: false,
+  alert_webhook_url: "",
+  suppress_for_minutes: "0",
 };
 
 function fieldsFor(category: PolicyCategory): { field: string; ops: string[] }[] {
@@ -92,13 +121,29 @@ function fieldsFor(category: PolicyCategory): { field: string; ops: string[] }[]
       { field: "has_cve", ops: ["equals"] },
     ];
   }
+  if (category === "alerting") {
+    return [
+      { field: "event_type", ops: ["equals"] },
+      { field: "classification", ops: ["equals"] },
+      { field: "disposition", ops: ["equals"] },
+      { field: "criticality", ops: ["equals"] },
+      { field: "tag", ops: ["has", "lacks"] },
+      { field: "is_expected", ops: ["equals"] },
+      { field: "severity", ops: ["equals"] },
+      { field: "priority", ops: ["equals"] },
+      { field: "has_cve", ops: ["equals"] },
+      { field: "treatment_state", ops: ["equals"] },
+      { field: "source", ops: ["equals"] },
+    ];
+  }
   return asset;
 }
 
 function conditionText(item: PolicyCondition): string {
   const field = FIELD_LABEL[item.field] || item.field;
   const op = OP_LABEL[item.op] || item.op;
-  return `${field} ${op} ${String(item.value)}`;
+  const value = item.field === "event_type" ? EVENT_LABELS[String(item.value)] || String(item.value) : String(item.value);
+  return `${field} ${op} ${value}`;
 }
 
 function actionText(policy: Policy): string {
@@ -109,6 +154,14 @@ function actionText(policy: Policy): string {
   if (actions.inactive_after_days) parts.push(`Mark asset inactive after ${actions.inactive_after_days} days`);
   if (actions.resolution_clean_scans) {
     parts.push(`Resolve after ${actions.resolution_clean_scans} consecutive applicable clean scans`);
+  }
+  if (actions.severity) parts.push(`Severity = ${String(actions.severity)}`);
+  if (actions.dashboard !== undefined) parts.push(`Dashboard = ${actions.dashboard ? "Yes" : "No"}`);
+  if (actions.email) parts.push(`Email = ${String(actions.email)}`);
+  const webhook = actions.webhook as { enabled?: boolean; url?: string } | undefined;
+  if (webhook) parts.push(webhook.enabled ? `Webhook = ${webhook.url || "enabled"}` : "Webhook = Off");
+  if (actions.suppress_for_minutes !== undefined) {
+    parts.push(`Suppress duplicates for ${actions.suppress_for_minutes} minutes`);
   }
   return parts.join(" · ") || "—";
 }
@@ -375,14 +428,22 @@ function PolicyBuilder({
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
-    const actions: Record<string, string | number | boolean> = {};
+    const actions: Record<string, unknown> = {};
     if (form.category === "asset_handling") {
       if (form.classification) actions.classification = form.classification;
       if (form.disposition) actions.disposition = form.disposition;
     } else if (form.category === "asset_inactivity") {
       actions.inactive_after_days = Number(form.inactive_after_days);
-    } else {
+    } else if (form.category === "finding_lifecycle") {
       actions.resolution_clean_scans = Number(form.resolution_clean_scans);
+    } else {
+      if (form.alert_severity) actions.severity = form.alert_severity;
+      actions.dashboard = form.alert_dashboard;
+      if (form.alert_email) actions.email = form.alert_email;
+      actions.webhook = form.alert_webhook_enabled
+        ? { enabled: true, url: form.alert_webhook_url }
+        : { enabled: false };
+      actions.suppress_for_minutes = Number(form.suppress_for_minutes) || 0;
     }
     const conditions = form.conditions
       .filter((item) => String(item.value) !== "")
@@ -434,7 +495,17 @@ function PolicyBuilder({
         <div className="grid md:grid-cols-2 gap-3">
           <div>
             <label>Category</label>
-            <select className="w-full" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value as PolicyCategory, conditions: [] })}>
+            <select
+              className="w-full"
+              value={form.category}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  category: e.target.value as PolicyCategory,
+                  conditions: e.target.value === "alerting" ? [{ field: "event_type", op: "equals", value: "new_asset" }] : [],
+                })
+              }
+            >
               {Object.entries(CATEGORY_LABEL).map(([value, label]) => (
                 <option key={value} value={value}>
                   {label}
@@ -592,6 +663,66 @@ function PolicyBuilder({
               </div>
             </div>
           )}
+          {form.category === "alerting" && (
+            <div className="grid md:grid-cols-2 gap-3">
+              <div>
+                <label>Severity</label>
+                <select className="w-full" value={form.alert_severity} onChange={(e) => setForm({ ...form, alert_severity: e.target.value })}>
+                  <option value="">Leave inherited</option>
+                  {["info", "low", "medium", "high", "critical"].map((item) => (
+                    <option key={item}>{item}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label>Dashboard</label>
+                <select
+                  className="w-full"
+                  value={form.alert_dashboard ? "yes" : "no"}
+                  onChange={(e) => setForm({ ...form, alert_dashboard: e.target.value === "yes" })}
+                >
+                  <option value="yes">Yes</option>
+                  <option value="no">No</option>
+                </select>
+              </div>
+              <div>
+                <label>Email</label>
+                <select className="w-full" value={form.alert_email} onChange={(e) => setForm({ ...form, alert_email: e.target.value })}>
+                  <option value="">Leave inherited</option>
+                  <option value="off">Off</option>
+                  <option value="staff">Staff</option>
+                  <option value="admins">Admins</option>
+                </select>
+              </div>
+              <div>
+                <label>Suppress duplicate alert for</label>
+                <div className="flex items-center gap-2">
+                  <input className="w-24" value={form.suppress_for_minutes} onChange={(e) => setForm({ ...form, suppress_for_minutes: e.target.value })} />
+                  <span className="text-sm text-slate-400">minutes</span>
+                </div>
+              </div>
+              <div className="md:col-span-2">
+                <label>Webhook</label>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={form.alert_webhook_enabled ? "yes" : "no"}
+                    onChange={(e) => setForm({ ...form, alert_webhook_enabled: e.target.value === "yes" })}
+                  >
+                    <option value="no">Disabled</option>
+                    <option value="yes">Enabled</option>
+                  </select>
+                  {form.alert_webhook_enabled && (
+                    <input
+                      className="flex-1"
+                      placeholder="https://..."
+                      value={form.alert_webhook_url}
+                      onChange={(e) => setForm({ ...form, alert_webhook_url: e.target.value })}
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </section>
         {error && <div className="text-rose-300 text-sm">{error}</div>}
         <div className="flex justify-end gap-3">
@@ -606,6 +737,50 @@ function PolicyBuilder({
 }
 
 function ConditionValue({ field, value, onChange }: { field: string; value: string; onChange: (value: string) => void }) {
+  if (field === "event_type") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Select event</option>
+        {Object.entries(EVENT_LABELS).map(([key, label]) => (
+          <option key={key} value={key}>
+            {label}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (field === "classification") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Select</option>
+        {DEVICE_CLASSES.map((item) => (
+          <option key={item}>{item}</option>
+        ))}
+      </select>
+    );
+  }
+  if (field === "disposition") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Select</option>
+        {DISPOSITIONS.map((item) => (
+          <option key={item} value={item}>
+            {item}
+          </option>
+        ))}
+      </select>
+    );
+  }
+  if (field === "treatment_state") {
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Select</option>
+        {["unaddressed", "mitigated", "accepted_risk", "false_positive", "active", "expired"].map((item) => (
+          <option key={item}>{item}</option>
+        ))}
+      </select>
+    );
+  }
   if (field === "criticality") {
     return (
       <select value={value} onChange={(e) => onChange(e.target.value)}>

@@ -17,6 +17,7 @@ from tests.test_phase2a import _finding_payload, _run_clean, _run_detected
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
 PHASE3A_HEAD = "0012_policy_engine"
+PHASE3B_HEAD = "0013_event_alert_engine"
 PHASE2C_GIT_BLOB = "430857e2a96017a43ffffd164eb78b0ab684918e"
 PHASE2C_SHA256 = "f78ddcd7fb8753ec652ef8377d74758f737394c505012c4786b6b71868fb22d1"
 
@@ -44,7 +45,7 @@ def test_fresh_db_reaches_0012_and_freezes_0011(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == PHASE3A_HEAD
+    assert revision == head_revision() == current_revision() == PHASE3B_HEAD
     assert "policy_rules" in set(inspect(engine).get_table_names())
     content = (BACKEND_ROOT / "alembic" / "versions" / "0011_phase2c_treatments_compliance.py").read_bytes()
     assert hashlib.sha256(content).hexdigest() == PHASE2C_SHA256

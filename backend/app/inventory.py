@@ -4,7 +4,6 @@ from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
-from app.alerts import create_alert
 from app.assets import ingest_device_report, observation_context
 from app.classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
 from app.models import Alert, Device, Finding
@@ -291,21 +290,6 @@ def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[Devic
         )
         if created_device:
             created.append(device)
-            hostname = identity_name(report.hostname, report.ip)
-            create_alert(
-                db,
-                alert_type="new_device",
-                title=f"New {report.scope.upper()} device: {hostname}",
-                body=(
-                    f"A new device was discovered on tenant #{tenant_id}.\n"
-                    f"Hostname: {hostname}\nIP: {(report.ip or '').strip()}\n"
-                    f"Scope: {report.scope}\nClass: {device.classification}\n"
-                    f"Label: {device.auto_label or '-'}\nPorts: {report.ports}"
-                ),
-                tenant_id=tenant_id,
-                device_id=device.id,
-            )
-            db.flush()
     return len(created), created
 
 

@@ -696,6 +696,8 @@ def _apply_observation_lifecycle(
     classification: str,
     site_id: int | None,
     scope: str,
+    network_id: int | None = None,
+    scan_job_id: int | None = None,
 ) -> None:
     from app.events import emit_new_asset, emit_previously_inactive_returned
 
@@ -711,7 +713,7 @@ def _apply_observation_lifecycle(
         asset.classification = classification
     asset.updated_at = observed_at
     if first_observation:
-        emit_new_asset(db, asset)
+        emit_new_asset(db, asset, network_id=network_id if site_id else None, scan_job_id=scan_job_id)
     if was_inactive:
         emit_previously_inactive_returned(db, asset, observation_key=observation_key)
 
@@ -724,6 +726,8 @@ def create_discovered_asset(
     report: DeviceReport,
     scope: str,
     observed_at: datetime,
+    network_id: int | None = None,
+    scan_job_id: int | None = None,
 ) -> Asset:
     from app.events import emit_new_asset
 
@@ -731,6 +735,7 @@ def create_discovered_asset(
         site_id = fallback_lan_site(db, tenant_id).id
     if scope == "wan":
         site_id = None
+        network_id = None
     asset = Asset(
         tenant_id=tenant_id,
         site_id=site_id,
@@ -747,7 +752,7 @@ def create_discovered_asset(
     )
     db.add(asset)
     db.flush()
-    emit_new_asset(db, asset)
+    emit_new_asset(db, asset, network_id=network_id if site_id else None, scan_job_id=scan_job_id)
     return asset
 
 
@@ -790,7 +795,14 @@ def ingest_device_report(
         asset = db.get(Asset, canonical_asset_id(db, result.selected_asset_id))
         if asset is None:
             asset = create_discovered_asset(
-                db, tenant_id=tenant_id, site_id=context.get("site_id"), report=report, scope=scope, observed_at=now
+                db,
+                tenant_id=tenant_id,
+                site_id=context.get("site_id"),
+                report=report,
+                scope=scope,
+                observed_at=now,
+                network_id=context.get("network_id"),
+                scan_job_id=job_id,
             )
             result.selected_asset_id = asset.id
             result.decision = "created_new"
@@ -803,10 +815,19 @@ def ingest_device_report(
                 classification=report.classification or "",
                 site_id=context.get("site_id"),
                 scope=scope,
+                network_id=context.get("network_id"),
+                scan_job_id=job_id,
             )
     else:
         asset = create_discovered_asset(
-            db, tenant_id=tenant_id, site_id=context.get("site_id"), report=report, scope=scope, observed_at=now
+            db,
+            tenant_id=tenant_id,
+            site_id=context.get("site_id"),
+            report=report,
+            scope=scope,
+            observed_at=now,
+            network_id=context.get("network_id"),
+            scan_job_id=job_id,
         )
         result.selected_asset_id = asset.id
     name = display_name_for(report.hostname, report.ip, asset.display_name)

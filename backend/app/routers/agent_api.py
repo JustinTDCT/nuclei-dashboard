@@ -57,7 +57,12 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
     agent = _get_agent(db, body.uuid)
     if agent.status == "approved":
         if agent.public_key and agent.public_key != body.public_key:
-            impersonation_alert(db, agent, "Enroll attempt used a different public key after approval.")
+            impersonation_alert(
+                db,
+                agent,
+                "Enroll attempt used a different public key after approval.",
+                source_ip=_client_ip(request),
+            )
             db.commit()
             raise HTTPException(status_code=403, detail="Agent key mismatch")
         agent.hostname = body.hostname or agent.hostname
@@ -70,7 +75,12 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="Invalid enrollment secret")
 
     if agent.public_key and agent.public_key != body.public_key:
-        impersonation_alert(db, agent, "A second enroll presented a different public key before approval.")
+        impersonation_alert(
+            db,
+            agent,
+            "A second enroll presented a different public key before approval.",
+            source_ip=_client_ip(request),
+        )
         db.commit()
         raise HTTPException(status_code=403, detail="Agent key mismatch")
 
@@ -94,7 +104,7 @@ def challenge(uuid: str, db: Session = Depends(get_db)):
 
 
 @router.post("/token")
-def token(body: AgentTokenIn, db: Session = Depends(get_db)):
+def token(body: AgentTokenIn, request: Request, db: Session = Depends(get_db)):
     agent = _get_agent(db, body.uuid)
     if not agent.public_key:
         raise HTTPException(status_code=400, detail="Agent has not enrolled")
@@ -102,7 +112,12 @@ def token(body: AgentTokenIn, db: Session = Depends(get_db)):
     if not stored or stored[0] != body.nonce or stored[1] < _now().timestamp():
         raise HTTPException(status_code=401, detail="Invalid or expired nonce")
     if not verify_ed25519(agent.public_key, body.nonce, body.signature):
-        impersonation_alert(db, agent, "Token request signature did not match the bound public key.")
+        impersonation_alert(
+            db,
+            agent,
+            "Token request signature did not match the bound public key.",
+            source_ip=_client_ip(request),
+        )
         db.commit()
         raise HTTPException(status_code=403, detail="Invalid signature")
     if agent.status != "approved":

@@ -10,6 +10,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session, selectinload
 
@@ -18,12 +19,17 @@ from app.audit import record_audit
 from app.classify import infer_class, normalize_hostname
 from app.locality import get_network, get_site, get_tenant
 from app.models import (
+    ALERT_EMAIL_MODES,
+    ALERT_SEVERITIES,
     CRITICALITIES,
     DISPOSITIONS,
+    DOMAIN_EVENT_TYPES,
     IDENTIFIER_HOSTNAME,
     IDENTIFIER_VALIDITY_ACTIVE,
     LIFECYCLE_ACTIVE,
+    MAX_SUPPRESS_FOR_MINUTES,
     POLICY_CATEGORIES,
+    POLICY_CATEGORY_ALERTING,
     POLICY_CATEGORY_ASSET_HANDLING,
     POLICY_CATEGORY_ASSET_INACTIVITY,
     POLICY_CATEGORY_FINDING_LIFECYCLE,
@@ -33,6 +39,8 @@ from app.models import (
     POLICY_SCOPE_TENANT,
     POLICY_SCOPES,
     PRIORITIES,
+    TREATMENT_STATES,
+    TREATMENT_STATUSES,
     Asset,
     AssetFinding,
     AssetIdentifier,
@@ -57,7 +65,22 @@ SCOPE_RANK = {
 
 CONDITION_FIELDS_ASSET = frozenset({"hostname", "tag", "criticality", "is_expected", "observed_port"})
 CONDITION_FIELDS_FINDING = frozenset({"severity", "priority", "has_cve"})
-CONDITION_FIELDS = CONDITION_FIELDS_ASSET | CONDITION_FIELDS_FINDING
+CONDITION_FIELDS_ALERTING = frozenset(
+    {
+        "event_type",
+        "classification",
+        "disposition",
+        "criticality",
+        "tag",
+        "is_expected",
+        "severity",
+        "priority",
+        "has_cve",
+        "treatment_state",
+        "source",
+    }
+)
+CONDITION_FIELDS = CONDITION_FIELDS_ASSET | CONDITION_FIELDS_FINDING | CONDITION_FIELDS_ALERTING
 
 OPERATORS = {
     "hostname": frozenset({"equals", "glob"}),
@@ -68,12 +91,18 @@ OPERATORS = {
     "severity": frozenset({"equals"}),
     "priority": frozenset({"equals"}),
     "has_cve": frozenset({"equals"}),
+    "event_type": frozenset({"equals"}),
+    "classification": frozenset({"equals"}),
+    "disposition": frozenset({"equals"}),
+    "treatment_state": frozenset({"equals"}),
+    "source": frozenset({"equals"}),
 }
 
 ACTIONS_BY_CATEGORY = {
     POLICY_CATEGORY_ASSET_HANDLING: frozenset({"classification", "disposition"}),
     POLICY_CATEGORY_ASSET_INACTIVITY: frozenset({"inactive_after_days"}),
     POLICY_CATEGORY_FINDING_LIFECYCLE: frozenset({"resolution_clean_scans"}),
+    POLICY_CATEGORY_ALERTING: frozenset({"severity", "dashboard", "email", "webhook", "suppress_for_minutes"}),
 }
 
 FINDING_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info", "unknown"})
@@ -84,6 +113,35 @@ RECONCILE_BATCH_SIZE = 250
 FORBIDDEN_CONDITION_KEYS = frozenset(
     {"expr", "expression", "sql", "script", "code", "eval", "python", "javascript", "or", "any", "not"}
 )
+
+
+def system_default_alert_actions(event_type: str) -> dict[str, Any]:
+    from app.models import (
+        ALERT_EMAIL_ADMINS,
+        ALERT_EMAIL_STAFF,
+        ALERT_SEVERITY_CRITICAL,
+        ALERT_SEVERITY_HIGH,
+        EVENT_AGENT_IDENTITY_MISMATCH,
+        EVENT_NEW_ASSET,
+    )
+
+    if event_type == EVENT_NEW_ASSET:
+        return {
+            "severity": ALERT_SEVERITY_HIGH,
+            "dashboard": True,
+            "email": ALERT_EMAIL_STAFF,
+            "webhook": {"enabled": False},
+            "suppress_for_minutes": 0,
+        }
+    if event_type == EVENT_AGENT_IDENTITY_MISMATCH:
+        return {
+            "severity": ALERT_SEVERITY_CRITICAL,
+            "dashboard": True,
+            "email": ALERT_EMAIL_ADMINS,
+            "webhook": {"enabled": False},
+            "suppress_for_minutes": 0,
+        }
+    return {}
 
 
 class PolicyError(Exception):
@@ -112,6 +170,10 @@ class PolicyEvaluationContext:
     current_classification: str = "Unknown"
     current_disposition: str = "unreviewed"
     inference_classification: str | None = None
+    event_type: str | None = None
+    source: str | None = None
+    treatment_state: str | None = None
+    domain_event_id: int | None = None
 
 
 @dataclass
@@ -197,9 +259,14 @@ def _normalize_condition(raw: Any, *, category: str) -> dict[str, Any]:
         raise PolicyError(f"Unsupported condition keys: {', '.join(sorted(extra))}")
     field_name = raw.get("field")
     op = raw.get("op")
-    if field_name not in CONDITION_FIELDS:
+    allowed_fields = CONDITION_FIELDS_ASSET
+    if category == POLICY_CATEGORY_FINDING_LIFECYCLE:
+        allowed_fields = CONDITION_FIELDS_ASSET | CONDITION_FIELDS_FINDING
+    elif category == POLICY_CATEGORY_ALERTING:
+        allowed_fields = CONDITION_FIELDS_ALERTING
+    if field_name not in allowed_fields:
         raise PolicyError(f"Unsupported condition field: {field_name}")
-    if category != POLICY_CATEGORY_FINDING_LIFECYCLE and field_name in CONDITION_FIELDS_FINDING:
+    if category != POLICY_CATEGORY_FINDING_LIFECYCLE and field_name in CONDITION_FIELDS_FINDING and category != POLICY_CATEGORY_ALERTING:
         raise PolicyError(f"Field {field_name} is only valid on finding lifecycle policies")
     allowed_ops = OPERATORS[field_name]
     if op not in allowed_ops:
@@ -233,6 +300,22 @@ def _normalize_condition(raw: Any, *, category: str) -> dict[str, Any]:
         value = normalized
     elif field_name == "has_cve":
         value = _as_bool(value)
+    elif field_name == "event_type":
+        if not isinstance(value, str) or value not in DOMAIN_EVENT_TYPES:
+            raise PolicyError("Unsupported event type")
+    elif field_name == "classification":
+        if value not in DEVICE_CLASSES:
+            raise PolicyError("Invalid classification")
+    elif field_name == "disposition":
+        if value not in DISPOSITIONS:
+            raise PolicyError("Invalid disposition")
+    elif field_name == "treatment_state":
+        if value not in (TREATMENT_STATES | TREATMENT_STATUSES):
+            raise PolicyError("Invalid treatment_state")
+    elif field_name == "source":
+        if not isinstance(value, str) or not value.strip() or len(value) > 40:
+            raise PolicyError("Invalid source")
+        value = value.strip()
     return {"field": field_name, "op": op, "value": value}
 
 
@@ -241,7 +324,10 @@ def validate_conditions(raw: Any, *, category: str) -> list[dict[str, Any]]:
         return []
     if not isinstance(raw, list):
         raise PolicyError("conditions must be a list; nested Boolean trees are not supported")
-    return [_normalize_condition(item, category=category) for item in raw]
+    cleaned = [_normalize_condition(item, category=category) for item in raw]
+    if category == POLICY_CATEGORY_ALERTING and not any(item["field"] == "event_type" for item in cleaned):
+        raise PolicyError("Alerting policy requires an explicit event_type condition")
+    return cleaned
 
 
 def validate_actions(raw: Any, *, category: str) -> dict[str, Any]:
@@ -272,9 +358,56 @@ def validate_actions(raw: Any, *, category: str) -> dict[str, Any]:
         if scans < 1 or scans > MAX_RESOLUTION_CLEAN_SCANS:
             raise PolicyError(f"resolution_clean_scans must be between 1 and {MAX_RESOLUTION_CLEAN_SCANS}")
         cleaned["resolution_clean_scans"] = scans
+    if "severity" in raw:
+        severity = raw["severity"]
+        if severity not in ALERT_SEVERITIES:
+            raise PolicyError("Invalid alert severity")
+        cleaned["severity"] = severity
+    if "dashboard" in raw:
+        cleaned["dashboard"] = _as_bool(raw["dashboard"])
+    if "email" in raw:
+        email = raw["email"]
+        if email not in ALERT_EMAIL_MODES:
+            raise PolicyError("email must be off, staff, or admins")
+        cleaned["email"] = email
+    if "webhook" in raw:
+        cleaned["webhook"] = validate_webhook_action(raw["webhook"])
+    if "suppress_for_minutes" in raw:
+        minutes = _as_int(raw["suppress_for_minutes"], field="suppress_for_minutes")
+        if minutes < 0 or minutes > MAX_SUPPRESS_FOR_MINUTES:
+            raise PolicyError(f"suppress_for_minutes must be between 0 and {MAX_SUPPRESS_FOR_MINUTES}")
+        cleaned["suppress_for_minutes"] = minutes
     if not cleaned:
         raise PolicyError("At least one valid action is required")
     return cleaned
+
+
+def validate_webhook_action(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise PolicyError("webhook must be an object with enabled and optional url")
+    extra = set(raw) - {"enabled", "url"}
+    if extra:
+        raise PolicyError(f"Unsupported webhook keys: {', '.join(sorted(extra))}")
+    enabled = _as_bool(raw.get("enabled", False))
+    if not enabled:
+        return {"enabled": False}
+    url = raw.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise PolicyError("Enabled webhook requires a URL")
+    return {"enabled": True, "url": validate_webhook_url(url.strip())}
+
+
+def validate_webhook_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise PolicyError("Webhook URL must use http or https")
+    if not parsed.netloc:
+        raise PolicyError("Webhook URL is malformed")
+    if parsed.username or parsed.password:
+        raise PolicyError("Webhook URL must not contain credentials")
+    if " " in url:
+        raise PolicyError("Webhook URL is malformed")
+    return url
 
 
 def validate_scope_shape(
@@ -456,6 +589,21 @@ def _match_condition(condition: dict[str, Any], context: PolicyEvaluationContext
     elif field_name == "has_cve":
         matched = bool(context.has_cve) is bool(value)
         detail = f"has_cve is {bool(context.has_cve)}"
+    elif field_name == "event_type":
+        matched = context.event_type == value
+        detail = f"event_type is {context.event_type or 'none'}"
+    elif field_name == "classification":
+        matched = context.current_classification == value
+        detail = f"classification is {context.current_classification}"
+    elif field_name == "disposition":
+        matched = context.current_disposition == value
+        detail = f"disposition is {context.current_disposition}"
+    elif field_name == "treatment_state":
+        matched = context.treatment_state == value
+        detail = f"treatment_state is {context.treatment_state or 'none'}"
+    elif field_name == "source":
+        matched = context.source == value
+        detail = f"source is {context.source or 'none'}"
     return ConditionExplanation(field=field_name, op=op, value=value, matched=matched, detail=detail)
 
 
@@ -672,7 +820,7 @@ class PolicyResolver:
                 )
             actions["inactive_after_days"] = inactivity
             effective["inactive_after_days"] = inactivity.value
-        else:
+        elif category == POLICY_CATEGORY_FINDING_LIFECYCLE:
             threshold = winners.get("resolution_clean_scans")
             if threshold is None:
                 threshold = _fallback_action(
@@ -682,6 +830,19 @@ class PolicyResolver:
                 )
             actions["resolution_clean_scans"] = threshold
             effective["resolution_clean_scans"] = threshold.value
+        elif category == POLICY_CATEGORY_ALERTING:
+            defaults = system_default_alert_actions(context.event_type or "")
+            for name in ("severity", "dashboard", "email", "webhook", "suppress_for_minutes"):
+                winner = winners.get(name)
+                if winner is not None:
+                    actions[name] = winner
+                    effective[name] = winner.value
+                elif name in defaults:
+                    fallback = _fallback_action(name, defaults[name], "system_default")
+                    actions[name] = fallback
+                    effective[name] = fallback.value
+        else:
+            raise PolicyError(f"Unsupported category: {category}")
         return PolicyEvaluationResult(
             category=category,
             tenant_id=context.tenant_id,
@@ -1052,6 +1213,18 @@ def apply_asset_handling(
             context=context,
         )
         changed["disposition"] = {"before": previous, "after": disposition.value}
+        from app.events import emit_asset_disposition_changed
+
+        emit_asset_disposition_changed(
+            db,
+            asset,
+            previous=previous,
+            new=disposition.value,
+            source="policy",
+            policy_rule_id=disposition.rule_id,
+            policy_revision=disposition.revision,
+            network_id=context.network_id,
+        )
     if changed:
         asset.updated_at = utcnow()
     return changed
@@ -1171,6 +1344,9 @@ def create_policy(db: Session, *, actor: User, payload: dict[str, Any]) -> Polic
     db.add(row)
     db.flush()
     _audit_policy_change(db, actor=actor, action="policy.created", row=row, before=None)
+    from app.events import emit_policy_changed
+
+    emit_policy_changed(db, row)
     return row
 
 
@@ -1203,6 +1379,9 @@ def update_policy(db: Session, *, actor: User, row: PolicyRule, changes: dict[st
     row.updated_at = utcnow()
     db.flush()
     _audit_policy_change(db, actor=actor, action="policy.changed", row=row, before=before)
+    from app.events import emit_policy_changed
+
+    emit_policy_changed(db, row)
     return row
 
 
@@ -1225,6 +1404,9 @@ def set_policy_enabled(db: Session, *, actor: User, row: PolicyRule, enabled: bo
         row=row,
         before=before,
     )
+    from app.events import emit_policy_changed
+
+    emit_policy_changed(db, row)
     return row
 
 
@@ -1242,6 +1424,9 @@ def archive_policy(db: Session, *, actor: User, row: PolicyRule, reason: str = "
     row.updated_at = row.archived_at
     db.flush()
     _audit_policy_change(db, actor=actor, action="policy.archived", row=row, before=before, reason=reason)
+    from app.events import emit_policy_changed
+
+    emit_policy_changed(db, row)
     return row
 
 

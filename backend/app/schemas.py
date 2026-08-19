@@ -356,8 +356,44 @@ class AlertOut(BaseModel):
     device_id: int | None
     agent_id: int | None
     created_at: datetime
+    severity: str | None = None
+    site_id: int | None = None
+    network_id: int | None = None
+    asset_id: int | None = None
+    asset_finding_id: int | None = None
+    domain_event_id: int | None = None
+    dashboard_visible: bool = True
+    occurrence_count: int = 1
+    first_event_at: datetime | None = None
+    last_event_at: datetime | None = None
+    tenant_name: str | None = None
+    site_name: str | None = None
+    event_type_label: str | None = None
+    delivery_summary: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
+
+
+class AlertDeliveryOut(BaseModel):
+    id: int
+    channel: str
+    destination: str
+    status: str
+    attempt_count: int
+    last_attempt_at: datetime | None = None
+    delivered_at: datetime | None = None
+    last_error: str | None = None
+    response_status: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AlertDetailOut(AlertOut):
+    policy_explanation: dict[str, Any] | None = None
+    source_event: dict[str, Any] | None = None
+    deliveries: list[AlertDeliveryOut] = []
+    acknowledged_at: datetime | None = None
+    acknowledged_by_id: int | None = None
 
 
 class SettingsOut(BaseModel):
