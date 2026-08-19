@@ -1997,6 +1997,8 @@ An Agent rebuild retrieves the current `scan_runtime` source used by its Compose
 
 Scale S1 lives in the Agent image (independent heartbeat/control loop, persistent HTTPS client, scan-stage progress logs, and the httpx DIT stub that prevents a runtime Hugging Face download). After this change, rebuild the Agent image. A container restart of an old image is not enough.
 
+Scale S2A is measurement only. It does not change ingestion, correlation, Finding lifecycle, or Agent upload behavior. The S1 baseline for later S2 comparisons is commit `312e0d0`. Run `cd backend && pytest tests/test_scale_s2a.py` for the small correctness/replay gate, or `python scripts/scale_s2a_benchmark.py --size small` for a JSON metrics report. Medium and large sizes are opt-in and are not part of ordinary `pytest`.
+
 From the Agent directory:
 
 ```bash

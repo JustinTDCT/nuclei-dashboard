@@ -155,6 +155,18 @@ npm run build
 
 Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or use `TEST_DATABASE_URL` if you set it.
 
+### Scale S2A ingest harness
+
+S2A does not change production ingest code. It freezes current (`312e0d0` / S1 checkpoint) semantics and records SQL/RSS/timing so S2B+ can prove equivalence.
+
+```bash
+cd backend
+pytest tests/test_scale_s2a.py
+python scripts/scale_s2a_benchmark.py --size small --out /tmp/s2a-small.json
+```
+
+`--size medium` and `--size large` are for volume measurement only. Do not treat those as required CI. The harness compares normalized Assets, identifiers, addresses, services, observations, correlation decisions, Devices, Vulnerabilities, mappings, Findings, AssetFindings, evaluations, history, DomainEvents, Alerts, and ScanJob counters. Replaying an identical Device/Finding chunk must equal a single ingest.
+
 ## Phase 1A locality and WAN compatibility
 
 `0002_sites_networks` introduces Site, Network, Network-Agent authorization, dispatch configuration, and a minimal append-only `audit_logs` table.
