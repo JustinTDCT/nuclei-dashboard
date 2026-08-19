@@ -168,8 +168,8 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
     scope = job.get("scope") or "lan"
     profile = "discovery_nuclei" if stages.get("vulnerability") else "discovery"
     cidrs = [row["value"] for row in targets if row["type"] in {"ip", "cidr"}]
-    if os.environ.get("SCAN_DRY_RUN") == "1":
-        _log("SCAN_DRY_RUN=1 — emitting sample results", log)
+    if job.get("dry_run") or os.environ.get("SCAN_DRY_RUN") == "1":
+        _log("dry-run — emitting sample results without scanner artifacts", log)
         return dry_run(cidrs or [row["value"] for row in targets], scope, profile)
     if not targets:
         raise RuntimeError("No targets configured for this scan")

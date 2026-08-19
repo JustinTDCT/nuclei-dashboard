@@ -33,6 +33,26 @@ SECRET_KEYS = frozenset(
         "nvd_api_key",
     }
 )
+_SECRET_KEY_NEEDLES = (
+    "password",
+    "secret",
+    "token",
+    "authorization",
+    "private_key",
+    "api_key",
+    "credential",
+    "cookie",
+    "bearer",
+)
+PROVENANCE_SCALAR_KEYS = frozenset(
+    {
+        "runtime_version",
+        "naabu_version",
+        "httpx_version",
+        "nuclei_version",
+        "nuclei_templates",
+    }
+)
 
 
 class SnapshotError(ValueError):
@@ -59,6 +79,7 @@ def build_execution_snapshot(
     grace_seconds: int,
     wait_minutes: int,
     created_at: datetime,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     snapshot = {
         "snapshot_version": SNAPSHOT_VERSION,
@@ -102,6 +123,7 @@ def build_execution_snapshot(
             "scheduled_for": scheduled_for.isoformat() if scheduled_for else None,
         },
         "created_at": created_at.isoformat(),
+        "dry_run": bool(dry_run),
     }
     assert_no_secrets(snapshot)
     return snapshot
@@ -169,6 +191,7 @@ def job_payload_from_snapshot(job: ScanJob) -> dict[str, Any]:
         "profile": "discovery_nuclei" if stages.get("vulnerability") else "discovery",
         "nuclei_severities": stages.get("nuclei_severities") or "",
         "nuclei_tags": stages.get("nuclei_tags") or "",
+        "dry_run": bool(snapshot.get("dry_run")),
     }
 
 
@@ -180,12 +203,56 @@ def worker_identity(job: ScanJob) -> str:
     return job.claimed_by or ""
 
 
+def is_secret_key(key: str) -> bool:
+    lowered = str(key).lower()
+    if lowered in SECRET_KEYS:
+        return True
+    return any(needle in lowered for needle in _SECRET_KEY_NEEDLES)
+
+
+def scalar_provenance_value(value: Any) -> str | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float)):
+        text = str(value).strip()
+    else:
+        return None
+    return text or None
+
+
+def _sanitize_merged_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if is_secret_key(str(key)):
+                continue
+            nested = _sanitize_merged_value(item)
+            if nested in (None, "", [], {}):
+                continue
+            cleaned[str(key)] = nested
+        return cleaned
+    if isinstance(value, list):
+        return [item for item in (_sanitize_merged_value(row) for row in value) if item not in (None, "", [], {})]
+    return value
+
+
 def merge_provenance(existing: dict[str, Any] | None, incoming: dict[str, Any] | None) -> dict[str, Any]:
     merged = dict(existing or {})
     for key, value in (incoming or {}).items():
-        if key in SECRET_KEYS:
+        if is_secret_key(str(key)):
             continue
-        if value in (None, "", [], {}):
+        if key in PROVENANCE_SCALAR_KEYS:
+            scalar = scalar_provenance_value(value)
+            if scalar is None:
+                continue
+            merged[key] = scalar
             continue
-        merged[key] = value
+        cleaned = _sanitize_merged_value(value)
+        if cleaned in (None, "", [], {}):
+            continue
+        merged[key] = cleaned
     return merged

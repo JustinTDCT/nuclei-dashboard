@@ -59,8 +59,8 @@ The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`sc
 - `RAW_ARTIFACT_MAX_BYTES` defaults to 268435456 (256 MiB). Oversized uploads are rejected; artifacts are never silently truncated.
 - Compose volume `scan-artifacts` is mounted only on the API. Remote LAN agents upload over HTTPS; they do not receive the volume.
 - Default retention is 365 days (`raw_scan_artifact_retention_days` in Admin → Settings). The value at upload time sets that artifact's `retention_expires_at`. Changing the setting does not bulk-delete existing artifacts.
-- Successful `complete?ok=true` requires an explicit raw-evidence declaration (`captured`, `dry_run`, or `none_executed`). A stale client that omits it is rejected and the run is not marked successful. Failed completes remain optional.
-- Client-supplied artifact provenance is allowlisted to runtime/tool/template version metadata. Secret-bearing keys are rejected.
+- Successful `complete?ok=true` requires an explicit raw-evidence declaration (`captured`, `dry_run`, or `none_executed`). The declaration is checked against the immutable execution snapshot: a normal scan with an unconditional scanner stage cannot claim `none_executed`, and `dry_run` is accepted only when the snapshot itself is a dry-run. A stale client that omits the declaration is rejected and the run is not marked successful. Failed completes remain optional.
+- Client-supplied artifact provenance is allowlisted to scalar runtime/tool/template version strings. Secret-bearing keys and nested objects are rejected.
 - Read-time expiry is enforced even before hourly cleanup. Expired artifacts are not downloadable. Missing pre-expiry bytes are `unavailable`, not `expired`.
 - Hourly cleanup deletes expired bytes, keeps the metadata row, and records `scan_artifact.retention_delete`. Normalized Assets, Observations, Findings, history, and ScanJobs are untouched.
 - Viewer access follows Tenant grants. Direct IDs for other tenants fail closed as 404. Successful downloads record `scan_artifact.download`.

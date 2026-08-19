@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app.audit import record_audit
 from app.config import settings
 from app.models import ScanArtifact, ScanJob
-from app.scan_snapshot import SECRET_KEYS, merge_provenance
+from app.scan_snapshot import PROVENANCE_SCALAR_KEYS, is_secret_key, merge_provenance, scalar_provenance_value
 from app.schemas import RawEvidenceDeclaration, ScanArtifactOut
 from app.settings_store import get_settings
 
@@ -53,17 +53,7 @@ CLIENT_PROVENANCE_ALLOWLIST = frozenset(
         "worker",
     }
 )
-_SECRET_KEY_NEEDLES = (
-    "password",
-    "secret",
-    "token",
-    "authorization",
-    "private_key",
-    "api_key",
-    "credential",
-    "cookie",
-    "bearer",
-)
+PROVENANCE_MAX_SCALAR_CHARS = 200
 
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -184,22 +174,24 @@ def validate_artifact_key(value: str) -> str:
     return validate_artifact_token(value, field="artifact_key", pattern=_SAFE_KEY)
 
 
-def _provenance_key_is_secret(key: str) -> bool:
-    lowered = str(key).lower()
-    if lowered in SECRET_KEYS:
-        return True
-    return any(needle in lowered for needle in _SECRET_KEY_NEEDLES)
-
-
 def sanitize_client_provenance(payload: dict[str, Any]) -> dict[str, Any]:
     for key in payload:
-        if _provenance_key_is_secret(str(key)):
+        if is_secret_key(str(key)):
             raise ArtifactError("provenance must not contain secrets")
     sanitized: dict[str, Any] = {}
     for key, value in payload.items():
-        if key not in CLIENT_PROVENANCE_ALLOWLIST or value in (None, ""):
+        if key not in CLIENT_PROVENANCE_ALLOWLIST:
             continue
-        sanitized[key] = value
+        if value in (None, ""):
+            continue
+        if isinstance(value, (dict, list)):
+            raise ArtifactError("provenance fields must be scalar strings")
+        scalar = scalar_provenance_value(value)
+        if scalar is None:
+            raise ArtifactError("provenance fields must be scalar strings")
+        if len(scalar) > PROVENANCE_MAX_SCALAR_CHARS:
+            raise ArtifactError("provenance value exceeds the maximum allowed size")
+        sanitized[key] = scalar
     return sanitized
 
 
@@ -337,25 +329,20 @@ def build_provenance(
         "stage": stage,
         "scan_job_id": job.id,
         "generated_at": (now or utcnow()).isoformat(),
-        "worker": runtime.get("worker") or "Not Recorded",
+        "worker": scalar_provenance_value(runtime.get("worker")) or "Not Recorded",
     }
-    for key in (
-        "claimed_agent_id",
-        "agent_uuid",
-        "runtime_version",
-        "naabu_version",
-        "httpx_version",
-        "nuclei_version",
-        "nuclei_templates",
-    ):
-        value = runtime.get(key)
-        if value not in (None, ""):
+    for key in ("claimed_agent_id", "agent_uuid", *PROVENANCE_SCALAR_KEYS):
+        value = scalar_provenance_value(runtime.get(key))
+        if value:
             snapshot[key] = value
     if extra:
         for key, value in extra.items():
-            if key not in CLIENT_PROVENANCE_ALLOWLIST or key in snapshot or value in (None, ""):
+            if key not in CLIENT_PROVENANCE_ALLOWLIST or key in snapshot:
                 continue
-            snapshot[key] = value
+            scalar = scalar_provenance_value(value)
+            if scalar is None:
+                continue
+            snapshot[key] = scalar
     return snapshot
 
 
@@ -469,6 +456,24 @@ def commit_ingested_artifact(db: Session, ingested: IngestedArtifact) -> None:
         raise
 
 
+def snapshot_is_dry_run(job: ScanJob) -> bool:
+    snapshot = job.execution_snapshot if isinstance(job.execution_snapshot, dict) else {}
+    return snapshot.get("dry_run") is True
+
+
+def snapshot_requires_raw_artifacts(job: ScanJob) -> bool:
+    if snapshot_is_dry_run(job):
+        return False
+    snapshot = job.execution_snapshot if isinstance(job.execution_snapshot, dict) else {}
+    stages = snapshot.get("stages")
+    if not isinstance(stages, dict) or not stages:
+        return True
+    port_mode = str(stages.get("port_mode") or "none").strip()
+    if port_mode and port_mode != "none":
+        return True
+    return bool(stages.get("discovery") or stages.get("fingerprint") or stages.get("vulnerability"))
+
+
 def apply_raw_evidence_declaration(
     db: Session,
     job: ScanJob,
@@ -494,6 +499,8 @@ def apply_raw_evidence_declaration(
         for row in db.query(ScanArtifact).filter(ScanArtifact.scan_job_id == job.id).all()
     }
     if status == RAW_EVIDENCE_CAPTURED:
+        if snapshot_is_dry_run(job):
+            raise RawEvidenceError("dry_run execution cannot declare captured artifacts")
         if not normalized_keys:
             raise RawEvidenceError("captured raw evidence requires artifact_keys")
         missing = [key for key in normalized_keys if key not in existing]
@@ -504,6 +511,13 @@ def apply_raw_evidence_declaration(
             raise RawEvidenceError(f"{status} raw evidence must not declare artifact_keys")
         if existing:
             raise RawEvidenceError(f"{status} raw evidence cannot complete with persisted artifacts")
+        if status == RAW_EVIDENCE_DRY_RUN and not snapshot_is_dry_run(job):
+            raise RawEvidenceError("dry_run is not permitted for this execution snapshot")
+        if status == RAW_EVIDENCE_NONE_EXECUTED:
+            if snapshot_is_dry_run(job):
+                raise RawEvidenceError("dry_run execution must declare dry_run raw evidence")
+            if snapshot_requires_raw_artifacts(job):
+                raise RawEvidenceError("Execution snapshot requires raw evidence artifacts")
     job.runtime_provenance = merge_provenance(
         job.runtime_provenance,
         {"raw_evidence": {"status": status, "artifact_keys": normalized_keys}},

@@ -8,11 +8,17 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
+
+_TEST_ARTIFACT_DIR = Path(tempfile.gettempdir()) / "nd-pytest-raw-artifacts"
+_TEST_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("RAW_ARTIFACT_DIR", str(_TEST_ARTIFACT_DIR))
 
 _CONTAINER_NAME = "nuclei-phase0-test-pg"
 _DEFAULT_TEST_URL = "postgresql://nuclei:nuclei@127.0.0.1:55432/nuclei_test"

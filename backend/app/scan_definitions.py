@@ -470,6 +470,7 @@ def create_run(
         grace_seconds=validated["grace_seconds"],
         wait_minutes=validated["wait_minutes"],
         created_at=now,
+        dry_run=bool((scan.intensity_config or {}).get("dry_run")),
     )
     try:
         worker_targets_from_snapshot(snapshot)

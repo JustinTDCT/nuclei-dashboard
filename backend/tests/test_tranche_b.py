@@ -127,8 +127,8 @@ def _named_world(client: TestClient, token: str, name: str) -> dict:
     }
 
 
-def _claim_lan(client: TestClient, token: str, world: dict) -> tuple[int, dict]:
-    scan = _lan_scan(client, token, world)
+def _claim_lan(client: TestClient, token: str, world: dict, **scan_extra) -> tuple[int, dict]:
+    scan = _lan_scan(client, token, world, **scan_extra)
     run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
     assert run.status_code == 200, run.text
     job_id = run.json()["id"]
@@ -844,6 +844,13 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
             json={"status": "dry_run", "artifact_keys": []},
         )
         assert dry_with_bytes.status_code == 409
+        lied = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "none_executed", "artifact_keys": []},
+        )
+        assert lied.status_code == 409
         captured = client.post(
             f"/api/agent/jobs/{job_id}/complete",
             headers=headers,
@@ -853,15 +860,54 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
         assert captured.status_code == 200, captured.text
         assert captured.json()["status"] == "done"
 
-        empty_job, empty_agent = _claim_lan(client, token, world)
+        ordinary_job, ordinary_agent = _claim_lan(client, token, world)
+        ordinary_none = client.post(
+            f"/api/agent/jobs/{ordinary_job}/complete",
+            headers=_agent_headers(ordinary_agent),
+            params={"ok": "true"},
+            json={"status": "none_executed", "artifact_keys": []},
+        )
+        assert ordinary_none.status_code == 409
+        ordinary_dry = client.post(
+            f"/api/agent/jobs/{ordinary_job}/complete",
+            headers=_agent_headers(ordinary_agent),
+            params={"ok": "true"},
+            json={"status": "dry_run", "artifact_keys": []},
+        )
+        assert ordinary_dry.status_code == 409
+        db = SessionLocal()
+        try:
+            assert db.get(ScanJob, ordinary_job).status == "running"
+        finally:
+            db.close()
+
+        dry_job, dry_agent = _claim_lan(
+            client, token, world, intensity_config={"preset": "normal", "dry_run": True}
+        )
         dry = client.post(
-            f"/api/agent/jobs/{empty_job}/complete",
-            headers=_agent_headers(empty_agent),
+            f"/api/agent/jobs/{dry_job}/complete",
+            headers=_agent_headers(dry_agent),
             params={"ok": "true"},
             json={"status": "dry_run", "artifact_keys": []},
         )
         assert dry.status_code == 200, dry.text
+
         none_job, none_agent = _claim_lan(client, token, world)
+        db = SessionLocal()
+        try:
+            none_row = db.get(ScanJob, none_job)
+            snapshot = dict(none_row.execution_snapshot or {})
+            snapshot["stages"] = {
+                "discovery": False,
+                "port_mode": "none",
+                "fingerprint": False,
+                "vulnerability": False,
+            }
+            snapshot["dry_run"] = False
+            none_row.execution_snapshot = snapshot
+            db.commit()
+        finally:
+            db.close()
         none = client.post(
             f"/api/agent/jobs/{none_job}/complete",
             headers=_agent_headers(none_agent),
@@ -884,6 +930,13 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
             params={"ok": "true"},
         )
         assert wan_stale.status_code == 409
+        wan_lied = client.post(
+            f"/api/internal/scanner/jobs/{wan_id}/complete",
+            headers=_scanner_headers(),
+            params={"ok": "true"},
+            json={"status": "none_executed", "artifact_keys": []},
+        )
+        assert wan_lied.status_code == 409
 
 
 @requires_postgres
@@ -917,6 +970,17 @@ def test_secret_provenance_is_rejected(reset_db, tmp_path, monkeypatch):
             provenance=json.dumps({"nuclei_version": "3.1", "token": "leak"}),
         )
         assert mixed.status_code == 400
+        nested = _upload(
+            client,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            headers,
+            gz,
+            artifact_key="fingerprint.httpx",
+            stage="fingerprint",
+            tool="httpx",
+            provenance=json.dumps({"nuclei_version": {"token": "secret", "password": "p"}}),
+        )
+        assert nested.status_code == 400
         allowed = _upload(
             client,
             f"/api/agent/jobs/{job_id}/artifacts",
@@ -945,6 +1009,42 @@ def test_secret_provenance_is_rejected(reset_db, tmp_path, monkeypatch):
             row = db.get(ScanArtifact, body["id"])
             assert "token" not in json.dumps(row.provenance)
             assert row.provenance.get("nuclei_version") == "3.1"
+        finally:
+            db.close()
+
+        runtime_job, runtime_agent = _claim_lan(client, token, world)
+        runtime_headers = _agent_headers(runtime_agent)
+        poisoned = client.post(
+            f"/api/agent/jobs/{runtime_job}/provenance",
+            headers=runtime_headers,
+            json={"nuclei_version": {"token": "secret", "authorization": "Bearer abc123"}},
+        )
+        assert poisoned.status_code == 200, poisoned.text
+        runtime_upload = _upload(
+            client,
+            f"/api/agent/jobs/{runtime_job}/artifacts",
+            runtime_headers,
+            gz,
+            artifact_key="vulnerability.nuclei",
+        )
+        assert runtime_upload.status_code == 200, runtime_upload.text
+        runtime_body = runtime_upload.json()
+        assert "token" not in json.dumps(runtime_body)
+        assert "authorization" not in json.dumps(runtime_body)
+        assert runtime_body["provenance"].get("nuclei_version") not in (
+            {"token": "secret", "authorization": "Bearer abc123"},
+            "secret",
+        )
+        from app.models import ScanJob
+
+        db = SessionLocal()
+        try:
+            artifact_row = db.get(ScanArtifact, runtime_body["id"])
+            job_row = db.get(ScanJob, runtime_job)
+            assert "token" not in json.dumps(artifact_row.provenance)
+            assert not isinstance(artifact_row.provenance.get("nuclei_version"), dict)
+            assert "token" not in json.dumps(job_row.runtime_provenance)
+            assert not isinstance((job_row.runtime_provenance or {}).get("nuclei_version"), dict)
         finally:
             db.close()
 
