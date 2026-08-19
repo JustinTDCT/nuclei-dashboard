@@ -4,6 +4,7 @@ Flags are limited to options actually supported by ProjectDiscovery CLIs:
 - naabu: -host, -p, -top-ports, -json, -silent, -rate, -c, -timeout, -retries, -exclude-hosts
 - httpx: -l, -json, -silent, -title, -tech-detect, -status-code, -cname, -web-server, -tls-grab,
          -rl, -t, -timeout, -retries
+  (v1.10.0 has no -no-classify; DIT download is avoided by seeding ~/.dit/model.json)
 - nuclei: -l, -jsonl, -silent, -severity, -tags, -rl, -c, -timeout, -retries, -duc
 """
 

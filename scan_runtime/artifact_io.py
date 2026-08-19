@@ -12,8 +12,24 @@ from typing import Any
 
 LogFn = Callable[[str], None]
 CHUNK_SIZE = 1024 * 1024
-PROGRESS_INTERVAL_SECONDS = 30.0
-MAX_PROGRESS_LOGS = 40
+PROGRESS_POLL_SECONDS = 30.0
+PROGRESS_FAST_UNTIL_SECONDS = 600.0
+PROGRESS_MEDIUM_UNTIL_SECONDS = 1800.0
+PROGRESS_FAST_INTERVAL_SECONDS = 30.0
+PROGRESS_MEDIUM_INTERVAL_SECONDS = 120.0
+PROGRESS_SLOW_INTERVAL_SECONDS = 300.0
+
+
+def progress_interval_for_elapsed(elapsed: float) -> float:
+    """Keep long scans visible without a hard silence cap.
+
+    0–10 min: every 30s; 10–30 min: every 2 min; 30+ min: every 5 min.
+    """
+    if elapsed < PROGRESS_FAST_UNTIL_SECONDS:
+        return PROGRESS_FAST_INTERVAL_SECONDS
+    if elapsed < PROGRESS_MEDIUM_UNTIL_SECONDS:
+        return PROGRESS_MEDIUM_INTERVAL_SECONDS
+    return PROGRESS_SLOW_INTERVAL_SECONDS
 
 
 def log_message(message: str, log: LogFn | None) -> None:
@@ -29,7 +45,7 @@ def run_command_to_file(cmd: list[str], dest: Path, log: LogFn | None = None) ->
     stderr_chunks: list[bytes] = []
     stderr_limit = 65536
     started = time.monotonic()
-    progress_logs = 0
+    last_progress = started
     tool = Path(cmd[0]).name if cmd else "scanner"
 
     def _drain_stderr(pipe) -> None:
@@ -47,15 +63,16 @@ def run_command_to_file(cmd: list[str], dest: Path, log: LogFn | None = None) ->
         reader.start()
         while True:
             try:
-                returncode = proc.wait(timeout=PROGRESS_INTERVAL_SECONDS)
+                returncode = proc.wait(timeout=PROGRESS_POLL_SECONDS)
                 break
             except subprocess.TimeoutExpired:
-                if progress_logs >= MAX_PROGRESS_LOGS:
+                now = time.monotonic()
+                elapsed = now - started
+                if now - last_progress + 0.01 < progress_interval_for_elapsed(elapsed):
                     continue
-                elapsed = int(time.monotonic() - started)
                 size = dest.stat().st_size if dest.exists() else 0
-                log_message(f"{tool} still running ({elapsed}s, {size} bytes written)", log)
-                progress_logs += 1
+                log_message(f"{tool} still running ({int(elapsed)}s, {size} bytes written)", log)
+                last_progress = now
         reader.join(timeout=5)
     stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
     empty = dest.stat().st_size == 0

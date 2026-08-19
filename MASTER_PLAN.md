@@ -91,7 +91,7 @@ Do not introduce distributed databases or unnecessary infrastructure for hypothe
 
 Inserted before later product work. PostgreSQL remains. Do not introduce sharding, Kafka, microservices, or Kubernetes for these items.
 
-- **Scale S1 — Agent/control plane (this tranche).** Independent heartbeat while one scan worker runs; persistent HTTP client; lightweight heartbeat; inventory on startup/change/period; SQL-side Agent-specific job selection; poll/heartbeat jitter; bounded scan-stage progress logging. No schema change.
+- **Scale S1 — Agent/control plane (this tranche).** Independent heartbeat while one scan worker runs; persistent HTTP client; lightweight heartbeat; inventory on startup/change/period; SQL-side Agent-specific job selection; poll returns the first claimable job; `SELECT Agent ... FOR UPDATE` before claim so one running job per Agent is atomic; adaptive scan-stage progress logging; httpx DIT model stubbed at image build. No schema change.
 - **Scale S2 — Scan ingestion.** Run-scoped caches, batch Device/Finding/coverage writes, memory-bounded scanner parsing. Likely migration 0017 if indexes are proven.
 - **Scale S3 — Central maintenance/query paths.** Remove startup whole-Device refresh; batch periodic jobs; EventAlertQueue stale reclaim; real pagination; keyset report iteration; separate scheduler process before API workers. Challenge nonces must leave process memory before adding API replicas.
 

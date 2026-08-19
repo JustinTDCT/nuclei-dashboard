@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -146,17 +148,41 @@ def test_control_loop_heartbeats_while_one_job_runs():
     assert all(row.get("activity") == "scanning" for row in during)
 
 
+def test_progress_interval_never_goes_silent():
+    import artifact_io
+
+    assert artifact_io.progress_interval_for_elapsed(0) == 30.0
+    assert artifact_io.progress_interval_for_elapsed(599) == 30.0
+    assert artifact_io.progress_interval_for_elapsed(600) == 120.0
+    assert artifact_io.progress_interval_for_elapsed(1799) == 120.0
+    assert artifact_io.progress_interval_for_elapsed(1800) == 300.0
+    assert artifact_io.progress_interval_for_elapsed(10_000) == 300.0
+
+
 def test_run_command_emits_bounded_progress(tmp_path, monkeypatch):
     import artifact_io
 
-    monkeypatch.setattr(artifact_io, "PROGRESS_INTERVAL_SECONDS", 0.2)
-    monkeypatch.setattr(artifact_io, "MAX_PROGRESS_LOGS", 3)
+    monkeypatch.setattr(artifact_io, "PROGRESS_POLL_SECONDS", 0.2)
+    monkeypatch.setattr(artifact_io, "PROGRESS_FAST_INTERVAL_SECONDS", 0.2)
+    monkeypatch.setattr(artifact_io, "PROGRESS_FAST_UNTIL_SECONDS", 10.0)
     logs: list[str] = []
     dest = tmp_path / "out.bin"
     artifact_io.run_command_to_file(["sleep", "0.65"], dest, log=logs.append)
     progress = [line for line in logs if "still running" in line]
-    assert 1 <= len(progress) <= 3
+    assert 1 <= len(progress) <= 5
     assert any("bytes written" in line for line in progress)
+
+
+def test_httpx_command_does_not_invent_no_classify_flag():
+    from commands import build_httpx_command
+
+    cmd = build_httpx_command("httpx", "/tmp/t", intensity={"httpx_rate": 50})
+    assert "-json" in cmd
+    assert "-no-classify" not in cmd
+    assert "-nc" not in cmd
+    install = (RUNTIME_ROOT / "install_tools.sh").read_text(encoding="utf-8")
+    assert "/root/.dit/model.json" in install
+    assert "DIT page classifier" in install
 
 
 def test_jittered_interval_stays_within_bounds():
@@ -218,8 +244,7 @@ def test_agent_job_poll_does_not_starve_behind_ineligible_queue(reset_db):
         polled = client.get("/api/agent/jobs", headers=_agent_headers(world_b["agent1"]))
         assert polled.status_code == 200, polled.text
         ids = [row["job_id"] for row in polled.json()]
-        assert later_id in ids
-        assert all(job_id == later_id for job_id in ids)
+        assert ids == [later_id]
 
 
 @requires_postgres
@@ -246,6 +271,125 @@ def test_busy_agent_does_not_receive_additional_jobs(reset_db):
             headers=_agent_headers(world["agent1"]),
         )
         assert blocked.status_code == 409
+
+
+@requires_postgres
+def test_poll_returns_only_the_first_claimable_job(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        first_scan = _lan_scan(client, token, world, name="Poll-1")
+        first = client.post(f"/api/scans/{first_scan['id']}/run", headers=_headers(token))
+        second_scan = _lan_scan(client, token, world, name="Poll-2")
+        second = client.post(f"/api/scans/{second_scan['id']}/run", headers=_headers(token))
+        assert first.status_code == 200 and second.status_code == 200
+        _heartbeat(world["agent1"]["id"])
+        polled = client.get("/api/agent/jobs", headers=_agent_headers(world["agent1"]))
+        assert polled.status_code == 200, polled.text
+        assert len(polled.json()) == 1
+        assert polled.json()[0]["job_id"] == first.json()["id"]
+
+
+@requires_postgres
+def test_concurrent_starts_same_agent_claim_exactly_one_job(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        first_scan = _lan_scan(client, token, world, name="Race-1")
+        first = client.post(f"/api/scans/{first_scan['id']}/run", headers=_headers(token))
+        second_scan = _lan_scan(client, token, world, name="Race-2")
+        second = client.post(f"/api/scans/{second_scan['id']}/run", headers=_headers(token))
+        assert first.status_code == 200 and second.status_code == 200
+        job_ids = [first.json()["id"], second.json()["id"]]
+        _heartbeat(world["agent1"]["id"])
+        headers = _agent_headers(world["agent1"])
+
+        def _start(job_id: int):
+            return client.post(f"/api/agent/jobs/{job_id}/start", headers=headers)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(_start, job_ids))
+        codes = sorted(response.status_code for response in results)
+        assert codes.count(200) == 1, [response.text for response in results]
+        assert 409 in codes
+        from app.database import SessionLocal
+        from app.models import JOB_RUNNING, ScanJob
+
+        db = SessionLocal()
+        try:
+            running = (
+                db.query(ScanJob)
+                .filter(ScanJob.claimed_agent_id == world["agent1"]["id"], ScanJob.status == JOB_RUNNING)
+                .all()
+            )
+            assert len(running) == 1
+            assert running[0].id in job_ids
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_eligible_job_sql_explain_analyze_is_bounded(reset_db):
+    with _client() as client:
+        token = _login(client)
+        world_a = _named_world(client, token, "Explain-A")
+        world_b = _named_world(client, token, "Explain-B")
+        scan_a = _lan_scan(client, token, world_a, name="A-scan")
+        first = client.post(f"/api/scans/{scan_a['id']}/run", headers=_headers(token))
+        assert first.status_code == 200, first.text
+        scan_b = _lan_scan(client, token, world_b, name="B-scan")
+        later = client.post(f"/api/scans/{scan_b['id']}/run", headers=_headers(token))
+        assert later.status_code == 200, later.text
+
+        from app.database import SessionLocal
+        from app.models import JOB_QUEUED, ScanJob
+        from sqlalchemy import text
+
+        db = SessionLocal()
+        try:
+            template = db.get(ScanJob, first.json()["id"])
+            created = datetime.now(timezone.utc) - timedelta(hours=1)
+            for index in range(80):
+                db.add(
+                    ScanJob(
+                        scan_id=template.scan_id,
+                        tenant_id=template.tenant_id,
+                        status=JOB_QUEUED,
+                        execution_snapshot=deepcopy(template.execution_snapshot),
+                        snapshot_version=template.snapshot_version,
+                        definition_revision=template.definition_revision,
+                        trigger_type=template.trigger_type,
+                        created_at=created + timedelta(seconds=index),
+                        runtime_provenance=deepcopy(template.runtime_provenance),
+                    )
+                )
+            db.commit()
+            payload = json.dumps({"dispatch": {"eligible_agent_ids": [world_b["agent1"]["id"]]}})
+            plan = db.execute(
+                text(
+                    """
+                    EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+                    SELECT scan_jobs.id
+                    FROM scan_jobs
+                    WHERE status IN ('queued', 'waiting_for_agent')
+                      AND execution_snapshot IS NOT NULL
+                      AND execution_snapshot->>'scope' = 'lan'
+                      AND execution_snapshot @> CAST(:payload AS jsonb)
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT 25
+                    """
+                ),
+                {"payload": payload},
+            ).scalar_one()
+        finally:
+            db.close()
+
+        if isinstance(plan, str):
+            plan = json.loads(plan)
+        root = plan[0]["Plan"]
+        execution_ms = float(plan[0].get("Execution Time") or 0)
+        assert execution_ms < 250.0
+        assert root.get("Actual Rows", 0) >= 0
 
 
 @requires_postgres

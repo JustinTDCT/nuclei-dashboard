@@ -1995,7 +1995,7 @@ Do not manually edit old/frozen Alembic migration files on an installed system.
 
 An Agent rebuild retrieves the current `scan_runtime` source used by its Compose build context and installs the pinned tool/template releases defined by that revision.
 
-Scale S1 lives in the Agent image (independent heartbeat/control loop, persistent HTTPS client, and scan-stage progress logs). After this change, rebuild the Agent image. A container restart of an old image is not enough.
+Scale S1 lives in the Agent image (independent heartbeat/control loop, persistent HTTPS client, scan-stage progress logs, and the httpx DIT stub that prevents a runtime Hugging Face download). After this change, rebuild the Agent image. A container restart of an old image is not enough.
 
 From the Agent directory:
 

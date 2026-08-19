@@ -25,7 +25,7 @@ from app.models import (
 from app.scan_dispatch import (
     agent_has_running_job,
     agent_may_claim_now,
-    atomic_claim_job,
+    claim_job_for_agent,
     is_agent_healthy,
     queued_lan_jobs_for_agent,
 )
@@ -268,9 +268,7 @@ def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_d
             except LanScanInvalidError as exc:
                 fail_job(db, job, exc.detail)
                 continue
-            if len(payloads) >= 5:
-                break
-            continue
+            break
         fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
     return payloads
 
@@ -307,9 +305,9 @@ def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = 
     except LanScanInvalidError as exc:
         fail_job(db, job, exc.detail)
         raise HTTPException(status_code=409, detail=exc.detail) from exc
-    claimed = atomic_claim_job(db, job.id, agent)
+    claimed, claim_error = claim_job_for_agent(db, job.id, agent)
     if claimed is None:
-        raise HTTPException(status_code=409, detail="Job already claimed")
+        raise HTTPException(status_code=409, detail=claim_error or "Job already claimed")
     try:
         if claimed.execution_snapshot:
             revalidate_lan_claim(db, claimed, agent)

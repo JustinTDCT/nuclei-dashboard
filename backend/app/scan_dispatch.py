@@ -181,6 +181,31 @@ def agent_has_running_job(db: Session, agent: Agent) -> bool:
     )
 
 
+def lock_agent_row(db: Session, agent_id: int) -> Agent:
+    """Serialize concurrent claim attempts for one Agent (no schema change)."""
+    locked = db.query(Agent).filter(Agent.id == agent_id).with_for_update().first()
+    if locked is None:
+        raise DispatchError("Agent not found")
+    return locked
+
+
+def claim_job_for_agent(
+    db: Session, job_id: int, agent: Agent, *, now: datetime | None = None
+) -> tuple[ScanJob | None, str | None]:
+    """Atomically enforce one running ScanJob per Agent, then claim the job.
+
+    The Agent row is locked first so two processes presenting the same
+    identity cannot both pass a check-then-claim race.
+    """
+    lock_agent_row(db, agent.id)
+    if agent_has_running_job(db, agent):
+        return None, "Agent already has a running job"
+    claimed = atomic_claim_job(db, job_id, agent, now=now)
+    if claimed is None:
+        return None, "Job already claimed"
+    return claimed, None
+
+
 def queued_lan_jobs_for_agent(db: Session, agent: Agent, *, limit: int = 25) -> list[ScanJob]:
     """Return queued LAN jobs this Agent is snapshot-eligible for.
 

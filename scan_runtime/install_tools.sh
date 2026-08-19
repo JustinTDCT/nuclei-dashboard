@@ -101,6 +101,11 @@ install_pd httpx
 # Python's httpx package also ships a CLI named httpx; keep the PD binary.
 cp /usr/local/bin/httpx /usr/local/bin/pd-httpx
 chmod +x /usr/local/bin/pd-httpx
+# httpx v1.10.0 initializes the DIT page classifier on -json and otherwise
+# downloads ~92MB from Hugging Face into ~/.dit/model.json. We do not use
+# PageType. Seed a local stub so cold Agents stay offline and deterministic.
+mkdir -p /root/.dit
+printf '%s\n' '{}' > /root/.dit/model.json
 install_templates
 mkdir -p /usr/local/share
 cp "$VERSIONS_FILE" /usr/local/share/nuclei-dashboard-pinned-versions.json
