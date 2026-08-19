@@ -121,6 +121,8 @@ def update_user(
     before_grants = load_grant_ids(db, user.id)
     before = _scope_snapshot(user, before_grants)
     previous_role = user.role
+    previous_email = user.email
+    password_reset = bool(body.password)
     if body.email is not None:
         user.email = body.email
     if body.password:
@@ -238,6 +240,24 @@ def update_user(
                 "after": after["viewer_expires_at"],
                 **details,
             },
+        )
+    if password_reset:
+        record_audit(
+            db,
+            actor=actor,
+            action="user.password_reset",
+            object_type="user",
+            object_id=user.id,
+            details={"username": user.username},
+        )
+    if body.email is not None and previous_email != user.email:
+        record_audit(
+            db,
+            actor=actor,
+            action="user.email_changed",
+            object_type="user",
+            object_id=user.id,
+            details={"username": user.username, "before": previous_email, "after": user.email},
         )
     if (
         before["viewer_all_tenants"] != after["viewer_all_tenants"]

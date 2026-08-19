@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-nuclei}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-nuclei}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -18,11 +18,11 @@ services:
     build: ./backend
     pull_policy: build
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-nuclei}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-nuclei}
-      SECRET_KEY: ${SECRET_KEY:-change-this-to-a-long-random-string}
-      SCANNER_TOKEN: ${SCANNER_TOKEN:-change-this-scanner-token}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-nuclei}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-nuclei}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      SCANNER_TOKEN: ${SCANNER_TOKEN:?Set SCANNER_TOKEN in .env}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       PUBLIC_URL: ${PUBLIC_URL:-https://10.150.10.155:8118}
       AGENT_IMAGE: ${AGENT_IMAGE:-nuclei-dashboard-agent:latest}
@@ -58,7 +58,7 @@ services:
     command: ["python", "scanner_main.py"]
     environment:
       CENTRAL_URL: http://api:8000
-      SCANNER_TOKEN: ${SCANNER_TOKEN:-change-this-scanner-token}
+      SCANNER_TOKEN: ${SCANNER_TOKEN:?Set SCANNER_TOKEN in .env}
       SCAN_DRY_RUN: ${SCAN_DRY_RUN:-0}
     volumes:
       - nuclei-templates:/root/nuclei-templates

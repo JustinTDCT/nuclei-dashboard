@@ -76,9 +76,10 @@ def run_command_to_file(cmd: list[str], dest: Path, log: LogFn | None = None) ->
         reader.join(timeout=5)
     stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
     empty = dest.stat().st_size == 0
-    if returncode != 0 and empty:
-        dest.unlink(missing_ok=True)
-        raise RuntimeError(stderr_text or f"command failed: {cmd[0]}")
+    if returncode != 0:
+        if empty:
+            dest.unlink(missing_ok=True)
+        raise RuntimeError(stderr_text or f"command failed: {cmd[0]} (exit {returncode})")
     if stderr_text:
         log_message(stderr_text, log)
 

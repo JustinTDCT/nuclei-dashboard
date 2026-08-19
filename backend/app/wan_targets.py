@@ -23,12 +23,88 @@ from app.models import (
 
 _FQDN_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _SCHEME_PREFIX = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+MIN_IPV4_PREFIX_LENGTH = 16
+MIN_IPV6_PREFIX_LENGTH = 32
+BLOCKED_FQDN_SUFFIXES = (".local", ".localhost")
+BLOCKED_FQDNS = frozenset(
+    {
+        "localhost",
+        "metadata.google.internal",
+        "metadata.google.com",
+        "instance-data",
+    }
+)
+# Explicit classes — do not use ipaddress.is_private. Recent Python treats
+# IETF documentation ranges (TEST-NET-1/2/3) as private, and those remain
+# valid lab WAN targets.
+PROHIBITED_NETWORKS = tuple(
+    ipaddress.ip_network(item)
+    for item in (
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "198.18.0.0/15",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "255.255.255.255/32",
+        "::/128",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8",
+    )
+)
 
 
 class WanTargetInvalidError(ValueError):
     def __init__(self, detail: str):
         self.detail = detail
         super().__init__(detail)
+
+
+def assert_wan_target_policy(target_type: str, normalized: str) -> None:
+    """Reject private, reserved, metadata, and over-broad WAN scope."""
+    if target_type == WAN_TARGET_FQDN:
+        _assert_wan_fqdn_policy(normalized)
+        return
+    try:
+        network = ipaddress.ip_network(normalized, strict=False)
+    except ValueError as exc:
+        raise WanTargetInvalidError("Invalid WAN target") from exc
+    minimum = MIN_IPV4_PREFIX_LENGTH if network.version == 4 else MIN_IPV6_PREFIX_LENGTH
+    if network.prefixlen < minimum:
+        raise WanTargetInvalidError(
+            f"WAN {network.version} CIDR prefix must be /{minimum} or more specific"
+        )
+    if _prohibited_network(network):
+        raise WanTargetInvalidError("WAN targets cannot include private, loopback, link-local, multicast, or reserved addresses")
+
+
+def assert_wan_address_policy(address: ipaddress._BaseAddress) -> None:
+    if _prohibited_address(address):
+        raise WanTargetInvalidError("WAN targets cannot resolve to private, loopback, link-local, multicast, or reserved addresses")
+
+
+def _assert_wan_fqdn_policy(normalized: str) -> None:
+    host = (normalized or "").strip().lower().rstrip(".")
+    if host in BLOCKED_FQDNS or any(host.endswith(suffix) for suffix in BLOCKED_FQDN_SUFFIXES):
+        raise WanTargetInvalidError("WAN FQDN targets cannot use localhost, mDNS, or cloud-metadata names")
+
+
+def _prohibited_address(address: ipaddress._BaseAddress) -> bool:
+    return any(address in blocked for blocked in PROHIBITED_NETWORKS if address.version == blocked.version)
+
+
+def _prohibited_network(network: ipaddress._BaseNetwork) -> bool:
+    return any(
+        network.overlaps(blocked)
+        for blocked in PROHIBITED_NETWORKS
+        if network.version == blocked.version
+    )
 
 
 def normalize_wan_target(target_type: str, value: str) -> tuple[str, str]:

@@ -944,6 +944,7 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
             assert db.get(ScanJob, ordinary_job).status == "running"
         finally:
             db.close()
+        _finish_job(ordinary_job, "failed")
 
         dry_job, dry_agent = _claim_lan(
             client, token, world, intensity_config={"preset": "normal", "dry_run": True}

@@ -10,7 +10,7 @@ from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError
 from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
-from app.scan_dispatch import CENTRAL_WORKER
+from app.scan_dispatch import CENTRAL_WORKER, atomic_claim_central_job
 from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_wan_start
 from app.raw_artifacts import (
@@ -91,10 +91,10 @@ def start_job(job_id: int, _: None = Depends(require_scanner), db: Session = Dep
     except (ExecutionBlocked, LanScanInvalidError) as exc:
         fail_job(db, job, exc.detail)
         raise HTTPException(status_code=409, detail=exc.detail) from exc
-    job.status = "running"
-    job.claimed_by = CENTRAL_WORKER
-    job.started_at = _now()
-    job.runtime_provenance = merge_provenance(job.runtime_provenance, {"worker": CENTRAL_WORKER})
+    claimed = atomic_claim_central_job(db, job.id, now=_now())
+    if claimed is None:
+        raise HTTPException(status_code=404, detail="Job not available")
+    claimed.runtime_provenance = merge_provenance(claimed.runtime_provenance, {"worker": CENTRAL_WORKER})
     db.commit()
     return payload
 

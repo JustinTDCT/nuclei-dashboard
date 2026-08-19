@@ -372,6 +372,13 @@ def test_wan_authorization_and_audit(reset_db):
             {"target_type": "fqdn", "value": "https://evil.example"},
             {"target_type": "fqdn", "value": "host.example.com:443"},
             {"target_type": "fqdn", "value": "*.example.com"},
+            {"target_type": "ip", "value": "192.168.1.1"},
+            {"target_type": "ip", "value": "127.0.0.1"},
+            {"target_type": "ip", "value": "169.254.169.254"},
+            {"target_type": "cidr", "value": "0.0.0.0/0"},
+            {"target_type": "cidr", "value": "10.0.0.0/8"},
+            {"target_type": "cidr", "value": "8.8.0.0/8"},
+            {"target_type": "fqdn", "value": "metadata.google.internal"},
         ):
             resp = client.post(f"/api/tenants/{tenant_id}/wan-targets", headers=_headers(admin), json={"name": "x", **bad})
             assert resp.status_code == 400

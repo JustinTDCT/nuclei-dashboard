@@ -231,6 +231,30 @@ def queued_lan_jobs_for_agent(db: Session, agent: Agent, *, limit: int = 25) -> 
     )
 
 
+def atomic_claim_central_job(db: Session, job_id: int, *, now: datetime | None = None) -> ScanJob | None:
+    current = now or utcnow()
+    result = db.execute(
+        update(ScanJob)
+        .where(
+            ScanJob.id == job_id,
+            ScanJob.status == JOB_QUEUED,
+            ScanJob.claimed_agent_id.is_(None),
+            ScanJob.claimed_by.is_(None),
+        )
+        .values(
+            status=JOB_RUNNING,
+            claimed_by=CENTRAL_WORKER,
+            started_at=current,
+        )
+        .returning(ScanJob.id)
+    )
+    claimed_id = result.scalar_one_or_none()
+    if claimed_id is None:
+        return None
+    db.flush()
+    return db.get(ScanJob, job_id)
+
+
 def atomic_claim_job(db: Session, job_id: int, agent: Agent, *, now: datetime | None = None) -> ScanJob | None:
     current = now or utcnow()
     result = db.execute(

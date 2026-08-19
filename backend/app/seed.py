@@ -4,9 +4,11 @@ from app.auth import hash_password
 from app.config import settings
 from app.models import User
 from app.settings_store import save_settings
+from app.startup_security import validate_runtime_secrets
 
 
 def seed(db: Session) -> None:
+    validate_runtime_secrets(settings)
     if db.query(User).count() == 0:
         db.add(
             User(

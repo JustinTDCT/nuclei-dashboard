@@ -19,6 +19,11 @@ from sqlalchemy import create_engine, text
 _TEST_ARTIFACT_DIR = Path(tempfile.gettempdir()) / "nd-pytest-raw-artifacts"
 _TEST_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("RAW_ARTIFACT_DIR", str(_TEST_ARTIFACT_DIR))
+os.environ.setdefault("SECRET_KEY", "phase0-test-secret-not-for-production")
+os.environ.setdefault("SCANNER_TOKEN", "phase0-test-scanner-token-not-for-production")
+os.environ.setdefault("ADMIN_USERNAME", "admin")
+os.environ.setdefault("ADMIN_PASSWORD", "test-admin-pass")
+os.environ.setdefault("ADMIN_EMAIL", "admin@localhost")
 
 _CONTAINER_NAME = "nuclei-phase0-test-pg"
 _DEFAULT_TEST_URL = "postgresql://nuclei:nuclei@127.0.0.1:55432/nuclei_test"
@@ -91,6 +96,7 @@ except Exception as exc:  # noqa: BLE001 — tests skip instead of hitting prod 
     POSTGRES_SKIP_REASON = f"PostgreSQL is not available for Phase 0 tests: {exc}"
 
 os.environ.setdefault("SECRET_KEY", "phase0-test-secret-not-for-production")
+os.environ.setdefault("SCANNER_TOKEN", "phase0-test-scanner-token-not-for-production")
 os.environ.setdefault("ADMIN_USERNAME", "admin")
 os.environ.setdefault("ADMIN_PASSWORD", "test-admin-pass")
 os.environ.setdefault("ADMIN_EMAIL", "admin@localhost")

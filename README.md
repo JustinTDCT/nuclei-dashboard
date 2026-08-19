@@ -495,7 +495,7 @@ or:
 vi .env
 ```
 
-At minimum, review and change:
+At minimum, set these to unique strong values. The API refuses to start if any of them is empty or a known placeholder such as `changeme`:
 
 ```dotenv
 POSTGRES_PASSWORD=use-a-strong-database-password
@@ -510,6 +510,8 @@ ADMIN_EMAIL=admin@example.com
 PUBLIC_URL=https://dashboard.example.com:8118
 SITE_ADDRESS=https://dashboard.example.com:8118
 ```
+
+Compose also fails closed if those secret variables are unset. Copying `.env.example` unchanged is not a working production configuration.
 
 ### Important: replace the example IP
 
@@ -1007,7 +1009,7 @@ Corporate LAN
 10.20.0.0/24
 ```
 
-If WAN scanning is needed, add authorized WAN Targets separately.
+If WAN scanning is needed, add authorized WAN Targets separately. WAN targets must be public IP/CIDR/FQDN scope — private, loopback, link-local, multicast, reserved, cloud-metadata, and over-broad prefixes such as `0.0.0.0/0` are rejected.
 
 At this point the **central server installation is complete**.
 
@@ -1805,6 +1807,14 @@ Use a trusted public certificate or configure the correct internal CA.
 ---
 
 ## Secrets
+
+The application will not start with empty or known-placeholder `SECRET_KEY`, `SCANNER_TOKEN`, `ADMIN_PASSWORD`, or database password values. Compose has no insecure fallbacks for those variables.
+
+The public HTTPS listener does not expose `/api/internal/scanner`. The central scanner reaches that API on the Docker network only.
+
+`GET /api/admin/settings` returns a masked SMTP password. Leave the field blank to keep the stored value.
+
+Staff tokens are invalidated when that user's password is reset.
 
 Do not commit:
 

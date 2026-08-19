@@ -4,13 +4,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "postgresql://nuclei:changeme@localhost:5432/nuclei"
-    secret_key: str = "dev-secret-change-me"
+    database_url: str = "postgresql://nuclei@localhost:5432/nuclei"
+    secret_key: str = ""
     jwt_expire_hours: int = 12
     agent_jwt_expire_minutes: int = 720
-    scanner_token: str = "change-this-scanner-token"
+    scanner_token: str = ""
     admin_username: str = "admin"
-    admin_password: str = "changeme"
+    admin_password: str = ""
     admin_email: str = "admin@localhost"
     public_url: str = "https://10.150.10.155:8118"
     agent_image: str = "nuclei-dashboard-agent:latest"

@@ -25,9 +25,25 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_token(subject: str, role: str, hours: int | None = None, extra: dict | None = None) -> str:
+def staff_token_version(password_hash: str) -> str:
+    return (password_hash or "")[-24:]
+
+
+def create_token(
+    subject: str,
+    role: str,
+    password_hash: str,
+    hours: int | None = None,
+    extra: dict | None = None,
+) -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=hours or settings.jwt_expire_hours)
-    payload = {"sub": subject, "role": role, "exp": expire, "typ": "staff"}
+    payload = {
+        "sub": subject,
+        "role": role,
+        "exp": expire,
+        "typ": "staff",
+        "pwd": staff_token_version(password_hash),
+    }
     if extra:
         payload.update(extra)
     return jwt.encode(payload, settings.secret_key, algorithm="HS256")
@@ -65,6 +81,8 @@ def get_current_user(
     user = db.query(User).filter(User.username == payload["sub"]).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User inactive or missing")
+    if payload.get("pwd") != staff_token_version(user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     return assert_staff_usable(user)
 
 

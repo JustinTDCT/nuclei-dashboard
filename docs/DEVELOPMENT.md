@@ -231,7 +231,9 @@ Archived Sites/Networks are soft-deleted (`archived_at`). Do not physically dele
 
 Generated agent compose/env and production defaults verify central-server TLS (`TLS_VERIFY=1` / `AGENT_TLS_VERIFY=1`).
 
-Caddy terminates HTTPS using `./certs/cert.pem` and `./certs/key.pem` (see `Caddyfile`). It does not auto-issue a certificate.
+Caddy terminates HTTPS using `./certs/cert.pem` and `./certs/key.pem` (see `Caddyfile`). It does not auto-issue a certificate. Caddy answers `/api/internal*` with 404; the central scanner calls `http://api:8000` on the Docker network and never needs that namespace on the public listener.
+
+The API refuses to start when `SECRET_KEY`, `SCANNER_TOKEN`, `ADMIN_PASSWORD`, or the database password is empty or a known placeholder. Compose requires those variables to be set in `.env`.
 
 Publicly trusted certificates need no extra agent configuration.
 

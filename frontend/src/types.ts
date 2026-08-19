@@ -645,6 +645,7 @@ export interface Settings {
   smtp_port: number;
   smtp_user: string;
   smtp_password: string;
+  smtp_password_configured?: boolean;
   smtp_from: string;
   smtp_tls: boolean;
   stale_days: number;

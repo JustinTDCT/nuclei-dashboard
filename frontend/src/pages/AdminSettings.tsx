@@ -108,7 +108,13 @@ export function AdminSettings() {
         <Field label="SMTP user" value={form.smtp_user} onChange={(v) => setForm({ ...form, smtp_user: v })} />
         <div>
           <label>SMTP password</label>
-          <input className="w-full" type="password" value={form.smtp_password} onChange={(e) => setForm({ ...form, smtp_password: e.target.value })} />
+          <input
+            className="w-full"
+            type="password"
+            value={form.smtp_password}
+            placeholder={form.smtp_password_configured ? "Configured — leave blank to keep" : ""}
+            onChange={(e) => setForm({ ...form, smtp_password: e.target.value })}
+          />
         </div>
         <Field label="From address" value={form.smtp_from} onChange={(v) => setForm({ ...form, smtp_from: v })} />
         <label className="flex items-center gap-2 text-sm text-slate-300 mt-6">

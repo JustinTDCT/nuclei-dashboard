@@ -467,6 +467,7 @@ class SettingsOut(BaseModel):
     smtp_port: int = 587
     smtp_user: str = ""
     smtp_password: str = ""
+    smtp_password_configured: bool = False
     smtp_from: str = ""
     smtp_tls: bool = True
     stale_days: int = 14

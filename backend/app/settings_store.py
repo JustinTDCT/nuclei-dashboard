@@ -8,6 +8,10 @@ from app.schemas import SettingsOut
 from app.timezones import FALLBACK_TIMEZONE, coerce_timezone
 
 DEFAULTS = SettingsOut().model_dump()
+SMTP_PASSWORD_MASK = "********"
+_SETTINGS_RESPONSE_ONLY = frozenset({"smtp_password_configured"})
+for _key in _SETTINGS_RESPONSE_ONLY:
+    DEFAULTS.pop(_key, None)
 
 
 def get_settings(db: Session) -> dict:
@@ -39,9 +43,23 @@ def central_url(db: Session) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+def public_settings(data: dict) -> dict:
+    out = dict(data)
+    configured = bool((out.get("smtp_password") or "").strip())
+    out["smtp_password"] = SMTP_PASSWORD_MASK if configured else ""
+    out["smtp_password_configured"] = configured
+    return out
+
+
 def save_settings(db: Session, values: dict) -> dict:
     data = get_settings(db)
-    data.update(values)
+    incoming = {key: value for key, value in values.items() if key not in _SETTINGS_RESPONSE_ONLY}
+    incoming_password = incoming.get("smtp_password")
+    if incoming_password in (None, "", SMTP_PASSWORD_MASK):
+        incoming["smtp_password"] = data.get("smtp_password") or ""
+    data.update(incoming)
+    for key in _SETTINGS_RESPONSE_ONLY:
+        data.pop(key, None)
     row = db.query(Setting).filter(Setting.key == "system").first()
     if row is None:
         row = Setting(key="system", value=data)

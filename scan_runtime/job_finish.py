@@ -33,15 +33,12 @@ def submit_normalized(
 ) -> None:
     if result.get("devices") and devices_fn is not None:
         devices_fn(result["devices"])
-    for coverage in result.get("detector_coverage") or []:
-        if coverage_fn is None:
-            continue
-        try:
-            coverage_fn(coverage)
-        except ApiError:
-            pass
     if result.get("findings") and findings_fn is not None:
         findings_fn(result["findings"])
+    for coverage in result.get("detector_coverage") or []:
+        if coverage_fn is None:
+            raise ApiError("detector coverage could not be persisted")
+        coverage_fn(coverage)
 
 
 def finish_pipeline_run(
@@ -72,18 +69,25 @@ def finish_pipeline_run(
                 provenance_error = f"version provenance persistence failed: {exc}"
         elif not dry_run and not pipeline_error:
             provenance_error = "required version provenance was not collected"
-    submit_normalized(
-        provenance_fn=None,
-        devices_fn=devices_fn,
-        coverage_fn=coverage_fn,
-        findings_fn=findings_fn,
-        result=result,
-    )
+    coverage_error: str | None = None
+    try:
+        submit_normalized(
+            provenance_fn=None,
+            devices_fn=devices_fn,
+            coverage_fn=coverage_fn,
+            findings_fn=findings_fn,
+            result=result,
+        )
+    except Exception as exc:
+        coverage_error = f"normalized result persistence failed: {exc}"
     if pipeline_error:
         complete(False, pipeline_error)
         return
     if provenance_error:
         complete(False, provenance_error)
+        return
+    if coverage_error:
+        complete(False, coverage_error)
         return
     complete(True, None, raw_evidence=raw_evidence_declaration(result))
 

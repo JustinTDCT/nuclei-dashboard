@@ -8,7 +8,12 @@ from app.database import get_db
 from app.locality import get_tenant
 from app.models import AuthorizedWanTarget, Subnet, User
 from app.schemas import AuthorizedWanTargetIn, AuthorizedWanTargetOut
-from app.wan_targets import WanTargetInvalidError, find_active_wan_target_by_normalized, normalize_wan_target
+from app.wan_targets import (
+    WanTargetInvalidError,
+    assert_wan_target_policy,
+    find_active_wan_target_by_normalized,
+    normalize_wan_target,
+)
 
 router = APIRouter(tags=["wan-targets"])
 
@@ -37,6 +42,7 @@ def create_wan_target(
     get_tenant(db, tenant_id)
     try:
         target_type, normalized = normalize_wan_target(body.target_type, body.value)
+        assert_wan_target_policy(target_type, normalized)
     except WanTargetInvalidError as exc:
         raise HTTPException(status_code=400, detail=exc.detail) from exc
     existing = find_active_wan_target_by_normalized(db, tenant_id, normalized)

@@ -16,7 +16,9 @@ def request_source_ip(request: Request | None) -> str:
         return ""
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        parts = [part.strip() for part in forwarded.split(",") if part.strip()]
+        if parts:
+            return parts[-1]
     return request.client.host if request.client else ""
 
 

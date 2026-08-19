@@ -20,7 +20,7 @@ from app.models import AGENT_HEALTH_SECONDS, Agent, Alert, AlertDelivery, AssetF
 from app.scan_intensity import DEFAULT_CAPS
 from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
 from app.scanner_versions import APPROVED_SETTING_KEYS
-from app.settings_store import get_settings, save_settings
+from app.settings_store import get_settings, public_settings, save_settings
 from app.timezones import list_iana_timezones, validate_iana_timezone
 
 router = APIRouter(tags=["admin"])
@@ -28,7 +28,7 @@ router = APIRouter(tags=["admin"])
 
 @router.get("/admin/settings", response_model=SettingsOut)
 def read_settings(_: User = Depends(require_admin), db: Session = Depends(get_db)):
-    return SettingsOut(**get_settings(db))
+    return SettingsOut(**public_settings(get_settings(db)))
 
 
 @router.put("/admin/settings", response_model=SettingsOut)
@@ -89,7 +89,7 @@ def write_settings(body: SettingsIn, user: User = Depends(require_admin), db: Se
             details=version_changes,
         )
     db.commit()
-    return SettingsOut(**saved)
+    return SettingsOut(**public_settings(saved))
 
 
 @router.get("/display-settings", response_model=DisplaySettingsOut)

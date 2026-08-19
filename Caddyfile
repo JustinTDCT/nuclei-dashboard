@@ -8,6 +8,13 @@
 https://:8118 {
 	tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
 	encode gzip
-	reverse_proxy /api* api:8000
-	reverse_proxy web:80
+	handle /api/internal* {
+		respond "Not Found" 404
+	}
+	handle /api* {
+		reverse_proxy api:8000
+	}
+	handle {
+		reverse_proxy web:80
+	}
 }

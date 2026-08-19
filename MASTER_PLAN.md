@@ -100,6 +100,20 @@ Inserted before later product work. PostgreSQL remains. Do not introduce shardin
   - **S2E — Agent streaming/spooling.** Bound Agent RAM after the server can ingest chunks efficiently.
 - **Scale S3 — Central maintenance/query paths.** Remove startup whole-Device refresh; batch periodic jobs; EventAlertQueue stale reclaim; real pagination; keyset report iteration; separate scheduler process before API workers. Challenge nonces must leave process memory before adding API replicas.
 
+### Security hardening sequence
+
+Inserted after a clean-room review of commit `312e0d0`. These are production-safety defects, not Scale work. They may be implemented without waiting for S2/S3. They must not change Finding-lifecycle meaning except to prevent an incomplete detector stage from counting as `EVALUATION_CLEAN`.
+
+- **Sec H1 — Fail-closed detector stages.** Any non-zero Nuclei/Naabu/httpx exit is a failed stage, even when stdout is non-empty. Partial positive evidence may be kept. Missing findings on that stage must never become clean/negative evidence. Detector-coverage persist failure must fail the run.
+- **Sec H2 — Deployment secrets.** Startup aborts when `SECRET_KEY`, `SCANNER_TOKEN`, `ADMIN_PASSWORD`, or the database password is empty or a known placeholder. Compose must not supply insecure fallbacks. Documentation is not the security control.
+- **Sec H3 — Control-plane exposure.** Caddy must not publish `/api/internal`. WAN job claim must use the same atomic update pattern as LAN claim.
+- **Sec H4 — WAN target safety policy.** Authorized WAN targets remain IP/CIDR/FQDN, but creation and live revalidation reject private, loopback, link-local, multicast, reserved, unspecified, cloud-metadata, and over-broad prefixes.
+- **Sec H5 — Session revocation and SMTP secret masking.** Staff tokens are bound to the current password hash so a reset invalidates outstanding JWTs. Password and email changes are audited. `GET /admin/settings` never returns the SMTP password.
+- **Sec H6 — Agent supply chain (open).** Pin generated Agent builds to an immutable tag/commit/digest. Checksum-verify tool and template downloads. Do not run the Agent as root on host networking without that pin.
+- **Sec H7 — Scanner deadlines (open).** Propagate job cancellation/timeout to the child scanner process. PostgreSQL job-expiry and process lifetime must be one reality.
+- **Sec H8 — Auth edge and challenge DoS (open).** Login rate-limit/lockout, CSP/HSTS/frame headers, and durable multi-record Agent challenges. Required before treating the login edge as production-hardened.
+- **Sec H9 — Horizontal API scale remains S3.** In-process APScheduler and in-memory challenge nonces still forbid API replicas.
+
 ---
 
 # 4. Current High-Level Architecture
@@ -334,6 +348,8 @@ Target creation/change must be audited.
 The backend and scanner must fail closed if a requested WAN target is outside the authorized target set.
 
 This is a safety and accountability boundary.
+
+Authorized WAN targets must also pass a safety policy: no private, loopback, link-local, multicast, reserved, unspecified, or cloud-metadata addresses, and no over-broad prefixes (IPv4 less specific than /16, IPv6 less specific than /32). Syntax validation and authorization remain separate from that policy.
 
 Future domain/subdomain discovery may be added, but it must not silently expand authorized scope without explicit policy.
 

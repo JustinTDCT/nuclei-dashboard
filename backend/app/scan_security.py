@@ -18,6 +18,7 @@ from app.scan_exclusions import (
 from app.scan_intensity import IntensityError, assert_resolved_within_caps, caps_from_settings
 from app.scan_snapshot import SnapshotError, worker_targets_from_snapshot
 from app.settings_store import get_settings
+from app.wan_targets import WanTargetInvalidError, assert_wan_address_policy, assert_wan_target_policy
 
 
 class ExecutionBlocked(ValueError):
@@ -67,6 +68,13 @@ def revalidate_wan_start(db: Session, job: ScanJob) -> None:
             raise ExecutionBlocked("One or more authorized WAN targets were revoked")
         if target.target_type != row.get("type") or target.normalized_value != row.get("normalized"):
             raise ExecutionBlocked("Authorized WAN target value no longer matches the snapshot")
+        try:
+            assert_wan_target_policy(target.target_type, target.normalized_value)
+            if target.target_type == WAN_TARGET_FQDN:
+                for address in resolve_fqdn_addresses(target.normalized_value):
+                    assert_wan_address_policy(address)
+        except WanTargetInvalidError as exc:
+            raise ExecutionBlocked(exc.detail) from exc
     _revalidate_caps_and_exclusions(db, job, snapshot, None, [])
 
 
@@ -141,6 +149,10 @@ def pin_fqdn_targets(targets: list[dict[str, str]], exclusion_nets: list) -> lis
         if any(address in network for address in addresses for network in exclusion_nets):
             continue
         for address in addresses:
+            try:
+                assert_wan_address_policy(address)
+            except WanTargetInvalidError as exc:
+                raise ExecutionBlocked(exc.detail) from exc
             pinned.append({"type": "ip", "value": str(address), "source_fqdn": row["value"]})
     if targets and not pinned:
         raise ExecutionBlocked("Exclusions remove all WAN targets")

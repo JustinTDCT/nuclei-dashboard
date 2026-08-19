@@ -11,6 +11,7 @@ from threading import Thread
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from tests.conftest import requires_postgres
 from tests.test_phase1d import _agent_headers, _client, _headers, _heartbeat, _lan_scan, _login, _world
@@ -157,6 +158,17 @@ def test_progress_interval_never_goes_silent():
     assert artifact_io.progress_interval_for_elapsed(1799) == 120.0
     assert artifact_io.progress_interval_for_elapsed(1800) == 300.0
     assert artifact_io.progress_interval_for_elapsed(10_000) == 300.0
+
+
+def test_run_command_nonzero_exit_with_output_is_failure(tmp_path):
+    import artifact_io
+
+    dest = tmp_path / "partial.jsonl"
+    dest.write_text("", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="exit 3"):
+        artifact_io.run_command_to_file(["/bin/sh", "-c", "printf '{\"ok\":true}\\n'; exit 3"], dest)
+    assert dest.exists()
+    assert dest.read_text(encoding="utf-8") == '{"ok":true}\n'
 
 
 def test_run_command_emits_bounded_progress(tmp_path, monkeypatch):

@@ -63,7 +63,7 @@ def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
         details={"result": "success", "source_ip": source_ip},
         commit=True,
     )
-    token = create_token(user.username, user.role)
+    token = create_token(user.username, user.role, user.password_hash)
     return TokenOut(access_token=token, user=serialize_user(db, user))
 
 

@@ -285,6 +285,43 @@ def test_job_finish_provenance_failure_keeps_artifacts_and_fails_closed(tmp_path
     assert "required version provenance was not collected" in str(completes[0][1])
 
 
+def test_job_finish_coverage_failure_keeps_findings_and_fails_closed():
+    from api_client import ApiError
+    from job_finish import finish_pipeline_run
+
+    completes: list[tuple] = []
+    findings: list[list] = []
+
+    def coverage(_payload):
+        raise ApiError("coverage rejected")
+
+    def store_findings(payload):
+        findings.append(payload)
+
+    def complete(ok, error=None, raw_evidence=None):
+        completes.append((ok, error, raw_evidence))
+
+    finish_pipeline_run(
+        result={
+            "artifacts": [],
+            "staging_dir": None,
+            "provenance": {"runtime_version": "test"},
+            "dry_run": False,
+            "devices": [],
+            "findings": [{"template_id": "cve-1", "host": "https://203.0.113.10"}],
+            "detector_coverage": [{"detector_type": "nuclei", "targets": ["https://203.0.113.10"]}],
+        },
+        upload=lambda _payload: None,
+        complete=complete,
+        provenance_fn=lambda _payload: None,
+        findings_fn=store_findings,
+        coverage_fn=coverage,
+    )
+    assert findings and findings[0][0]["template_id"] == "cve-1"
+    assert completes and completes[0][0] is False
+    assert "normalized result persistence failed" in str(completes[0][1])
+
+
 def test_0015_frozen_and_0016_is_current_head():
     assert hashlib.sha256(MIGRATION_0015.read_bytes()).hexdigest() == TRANCHE_B_SHA256
     assert FROZEN_MIGRATION_HASHES["0015_raw_scan_evidence.py"] == TRANCHE_B_SHA256
