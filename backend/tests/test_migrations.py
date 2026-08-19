@@ -39,6 +39,7 @@ FROZEN_MIGRATION_HASHES = {
     "0012_policy_engine.py": "fc539d809f4decf5107fb5e4d88c9aeb50f1131a5154366bca68c0f1bedeefb9",
     "0013_event_alert_engine.py": "72792866df1caf6a6a263bad8dc348b2abee8e507e2a4bd656cda97e8dba6578",
     "0014_reports_auditor_access.py": "4f8167d0c2f22c37eec0ae96fff5cdfe637977ab7b531bc0084270b09e46bfc5",
+    "0015_raw_scan_evidence.py": "fb0cac18676e410821b61c9c6182d7ad8bc532a7598f76b58440e5bc998e7428",
 }
 PHASE1B_TABLES = {
     "assets",

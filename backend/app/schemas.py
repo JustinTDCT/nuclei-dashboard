@@ -258,6 +258,19 @@ class ScanJobOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class RawEvidenceDeclaration(BaseModel):
+    status: str
+    artifact_keys: list[str] = []
+
+    @field_validator("status")
+    @classmethod
+    def _valid_status(cls, value: str) -> str:
+        allowed = {"captured", "dry_run", "none_executed"}
+        if value not in allowed:
+            raise ValueError("raw evidence status must be captured, dry_run, or none_executed")
+        return value
+
+
 class ScanArtifactOut(BaseModel):
     id: int
     scan_job_id: int
@@ -273,6 +286,7 @@ class ScanArtifactOut(BaseModel):
     retention_expires_at: datetime
     deleted_at: datetime | None = None
     delete_reason: str | None = None
+    status: str
     available: bool
     provenance: dict[str, Any] = {}
     download_filename: str

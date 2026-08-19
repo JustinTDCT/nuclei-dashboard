@@ -176,6 +176,7 @@ export interface ScanArtifact {
   retention_expires_at: string;
   deleted_at: string | null;
   delete_reason: string | null;
+  status: "available" | "expired" | "unavailable";
   available: boolean;
   provenance: Record<string, unknown>;
   download_filename: string;

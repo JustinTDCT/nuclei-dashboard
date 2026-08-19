@@ -25,9 +25,24 @@ from app.models import (
 from app.scan_dispatch import agent_may_claim_now, atomic_claim_job, is_agent_healthy
 from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_lan_claim
-from app.raw_artifacts import ArtifactError, ingest_upload_file, raise_http, serialize_artifact
+from app.raw_artifacts import (
+    ArtifactError,
+    apply_raw_evidence_declaration,
+    commit_ingested_artifact,
+    ingest_upload_file,
+    raise_http,
+    serialize_artifact,
+)
 from app.scan_snapshot import merge_provenance
-from app.schemas import AgentTokenIn, DetectorCoverageIn, DeviceReport, EnrollIn, FindingReport, ScanArtifactOut
+from app.schemas import (
+    AgentTokenIn,
+    DetectorCoverageIn,
+    DeviceReport,
+    EnrollIn,
+    FindingReport,
+    RawEvidenceDeclaration,
+    ScanArtifactOut,
+)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 bearer = HTTPBearer(auto_error=False)
@@ -321,15 +336,20 @@ def complete_job(
     job_id: int,
     ok: bool = True,
     error: str | None = None,
+    raw_evidence: RawEvidenceDeclaration | None = None,
     agent: Agent = Depends(current_agent),
     db: Session = Depends(get_db),
 ):
     job = _owned_job(db, job_id, agent.uuid)
     try:
+        apply_raw_evidence_declaration(db, job, ok=ok, declaration=raw_evidence)
         complete_scan_run(db, job, ok=ok, error=error)
     except FindingLifecycleError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=exc.detail) from exc
+    except ArtifactError as exc:
+        db.rollback()
+        raise_http(exc)
     db.commit()
     return {"ok": True, "status": job.status}
 
@@ -372,7 +392,7 @@ def post_artifact(
     if job.tenant_id != agent.tenant_id:
         raise HTTPException(status_code=409, detail="Job is not an active Phase 1D run")
     try:
-        artifact = ingest_upload_file(
+        ingested = ingest_upload_file(
             db,
             job,
             upload=file,
@@ -385,8 +405,8 @@ def post_artifact(
         )
     except ArtifactError as exc:
         raise_http(exc)
-    db.commit()
-    return serialize_artifact(artifact)
+    commit_ingested_artifact(db, ingested)
+    return serialize_artifact(ingested.artifact)
 
 
 def _agent_in_job_pool(job: ScanJob, agent: Agent) -> bool:

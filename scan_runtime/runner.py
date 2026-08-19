@@ -151,6 +151,7 @@ def dry_run(cidrs: list[str], scope: str, profile: str) -> dict[str, Any]:
         "staging_dir": None,
         "provenance": {},
         "detector_coverage": [],
+        "dry_run": True,
     }
 
 

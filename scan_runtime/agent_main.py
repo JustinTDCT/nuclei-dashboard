@@ -40,7 +40,9 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token) -> None
         finish_pipeline_run(
             result=result,
             upload=lambda artifact: client.upload_artifact(token, job_id, artifact),
-            complete=lambda ok, error: client.complete(token, job_id, ok=ok, error=error),
+            complete=lambda ok, error, raw_evidence=None: client.complete(
+                token, job_id, ok=ok, error=error, raw_evidence=raw_evidence
+            ),
             provenance_fn=lambda payload: client.provenance(token, job_id, payload),
             devices_fn=lambda devices: client.devices(token, job_id, devices),
             coverage_fn=lambda payload: client.detector_coverage(token, job_id, payload),
@@ -54,7 +56,9 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token) -> None
             finish_pipeline_run(
                 result=result,
                 upload=lambda artifact: client.upload_artifact(token, job_id, artifact),
-                complete=lambda ok, error: client.complete(token, job_id, ok=ok, error=error),
+                complete=lambda ok, error, raw_evidence=None: client.complete(
+                token, job_id, ok=ok, error=error, raw_evidence=raw_evidence
+            ),
                 provenance_fn=lambda payload: client.provenance(token, job_id, payload),
                 devices_fn=lambda devices: client.devices(token, job_id, devices),
                 coverage_fn=lambda payload: client.detector_coverage(token, job_id, payload),

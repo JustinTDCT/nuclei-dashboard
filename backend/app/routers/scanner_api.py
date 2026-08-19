@@ -13,9 +13,16 @@ from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
 from app.scan_dispatch import CENTRAL_WORKER
 from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_wan_start
-from app.raw_artifacts import ArtifactError, ingest_upload_file, raise_http, serialize_artifact
+from app.raw_artifacts import (
+    ArtifactError,
+    apply_raw_evidence_declaration,
+    commit_ingested_artifact,
+    ingest_upload_file,
+    raise_http,
+    serialize_artifact,
+)
 from app.scan_snapshot import merge_provenance
-from app.schemas import DetectorCoverageIn, DeviceReport, FindingReport, ScanArtifactOut
+from app.schemas import DetectorCoverageIn, DeviceReport, FindingReport, RawEvidenceDeclaration, ScanArtifactOut
 
 router = APIRouter(prefix="/internal/scanner", tags=["scanner"])
 
@@ -137,15 +144,20 @@ def complete_job(
     job_id: int,
     ok: bool = True,
     error: str | None = None,
+    raw_evidence: RawEvidenceDeclaration | None = None,
     _: None = Depends(require_scanner),
     db: Session = Depends(get_db),
 ):
     job = _owned(db, job_id)
     try:
+        apply_raw_evidence_declaration(db, job, ok=ok, declaration=raw_evidence)
         complete_scan_run(db, job, ok=ok, error=error)
     except FindingLifecycleError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=exc.detail) from exc
+    except ArtifactError as exc:
+        db.rollback()
+        raise_http(exc)
     db.commit()
     return {"ok": True, "status": job.status}
 
@@ -178,7 +190,7 @@ def post_artifact(
 ):
     job = _owned(db, job_id)
     try:
-        artifact = ingest_upload_file(
+        ingested = ingest_upload_file(
             db,
             job,
             upload=file,
@@ -191,8 +203,8 @@ def post_artifact(
         )
     except ArtifactError as exc:
         raise_http(exc)
-    db.commit()
-    return serialize_artifact(artifact)
+    commit_ingested_artifact(db, ingested)
+    return serialize_artifact(ingested.artifact)
 
 
 def _owned(db: Session, job_id: int) -> ScanJob:

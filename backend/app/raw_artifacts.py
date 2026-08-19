@@ -7,6 +7,7 @@ import os
 import re
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,8 @@ from sqlalchemy.orm import Session
 from app.audit import record_audit
 from app.config import settings
 from app.models import ScanArtifact, ScanJob
-from app.schemas import ScanArtifactOut
+from app.scan_snapshot import SECRET_KEYS, merge_provenance
+from app.schemas import RawEvidenceDeclaration, ScanArtifactOut
 from app.settings_store import get_settings
 
 log = logging.getLogger(__name__)
@@ -31,6 +33,37 @@ MIN_RETENTION_DAYS = 1
 DEFAULT_MEDIA_TYPE = "application/x-ndjson"
 DEFAULT_CONTENT_ENCODING = "gzip"
 DELETE_REASON_RETENTION = "retention"
+ARTIFACT_STATUS_AVAILABLE = "available"
+ARTIFACT_STATUS_EXPIRED = "expired"
+ARTIFACT_STATUS_UNAVAILABLE = "unavailable"
+RAW_EVIDENCE_CAPTURED = "captured"
+RAW_EVIDENCE_DRY_RUN = "dry_run"
+RAW_EVIDENCE_NONE_EXECUTED = "none_executed"
+RAW_EVIDENCE_STATUSES = frozenset({RAW_EVIDENCE_CAPTURED, RAW_EVIDENCE_DRY_RUN, RAW_EVIDENCE_NONE_EXECUTED})
+CLIENT_PROVENANCE_ALLOWLIST = frozenset(
+    {
+        "runtime_version",
+        "naabu_version",
+        "httpx_version",
+        "nuclei_version",
+        "nuclei_templates",
+        "tool",
+        "stage",
+        "generated_at",
+        "worker",
+    }
+)
+_SECRET_KEY_NEEDLES = (
+    "password",
+    "secret",
+    "token",
+    "authorization",
+    "private_key",
+    "api_key",
+    "credential",
+    "cookie",
+    "bearer",
+)
 
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -57,6 +90,17 @@ class ArtifactTooLarge(ArtifactError):
 class ArtifactStorageError(ArtifactError):
     def __init__(self, detail: str = "Artifact storage path is invalid"):
         super().__init__(detail, status_code=400)
+
+
+class RawEvidenceError(ArtifactError):
+    def __init__(self, detail: str = "Raw evidence declaration is required to complete a successful run"):
+        super().__init__(detail, status_code=409)
+
+
+@dataclass(frozen=True)
+class IngestedArtifact:
+    artifact: ScanArtifact
+    created_path: Path | None = None
 
 
 def utcnow() -> datetime:
@@ -140,6 +184,25 @@ def validate_artifact_key(value: str) -> str:
     return validate_artifact_token(value, field="artifact_key", pattern=_SAFE_KEY)
 
 
+def _provenance_key_is_secret(key: str) -> bool:
+    lowered = str(key).lower()
+    if lowered in SECRET_KEYS:
+        return True
+    return any(needle in lowered for needle in _SECRET_KEY_NEEDLES)
+
+
+def sanitize_client_provenance(payload: dict[str, Any]) -> dict[str, Any]:
+    for key in payload:
+        if _provenance_key_is_secret(str(key)):
+            raise ArtifactError("provenance must not contain secrets")
+    sanitized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key not in CLIENT_PROVENANCE_ALLOWLIST or value in (None, ""):
+            continue
+        sanitized[key] = value
+    return sanitized
+
+
 def parse_provenance(raw: str | dict[str, Any] | None) -> dict[str, Any]:
     if raw in (None, "", {}):
         return {}
@@ -147,7 +210,7 @@ def parse_provenance(raw: str | dict[str, Any] | None) -> dict[str, Any]:
         encoded = json.dumps(raw, default=str)
         if len(encoded.encode("utf-8")) > PROVENANCE_MAX_BYTES:
             raise ArtifactError("provenance exceeds the maximum allowed size")
-        return raw
+        return sanitize_client_provenance(raw)
     if not isinstance(raw, str):
         raise ArtifactError("provenance must be a JSON object")
     if len(raw.encode("utf-8")) > PROVENANCE_MAX_BYTES:
@@ -158,7 +221,7 @@ def parse_provenance(raw: str | dict[str, Any] | None) -> dict[str, Any]:
         raise ArtifactError("provenance must be valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ArtifactError("provenance must be a JSON object")
-    return parsed
+    return sanitize_client_provenance(parsed)
 
 
 def download_filename(artifact: ScanArtifact) -> str:
@@ -178,9 +241,18 @@ def site_id_from_job(job: ScanJob | None) -> int | None:
     return None
 
 
-def artifact_available(artifact: ScanArtifact) -> bool:
+def artifact_is_expired(artifact: ScanArtifact, *, now: datetime | None = None) -> bool:
     if artifact.deleted_at is not None:
+        return True
+    expires = artifact.retention_expires_at
+    if expires is None:
         return False
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires <= (now or utcnow())
+
+
+def artifact_bytes_readable(artifact: ScanArtifact) -> bool:
     try:
         path = resolve_storage_path(artifact.storage_key)
     except ArtifactError:
@@ -188,7 +260,20 @@ def artifact_available(artifact: ScanArtifact) -> bool:
     return path.is_file() and not path.is_symlink()
 
 
+def artifact_status(artifact: ScanArtifact, *, now: datetime | None = None) -> str:
+    if artifact_is_expired(artifact, now=now):
+        return ARTIFACT_STATUS_EXPIRED
+    if artifact_bytes_readable(artifact):
+        return ARTIFACT_STATUS_AVAILABLE
+    return ARTIFACT_STATUS_UNAVAILABLE
+
+
+def artifact_available(artifact: ScanArtifact) -> bool:
+    return artifact_status(artifact) == ARTIFACT_STATUS_AVAILABLE
+
+
 def serialize_artifact(artifact: ScanArtifact) -> ScanArtifactOut:
+    status = artifact_status(artifact)
     return ScanArtifactOut(
         id=artifact.id,
         scan_job_id=artifact.scan_job_id,
@@ -204,7 +289,8 @@ def serialize_artifact(artifact: ScanArtifact) -> ScanArtifactOut:
         retention_expires_at=artifact.retention_expires_at,
         deleted_at=artifact.deleted_at,
         delete_reason=artifact.delete_reason,
-        available=artifact_available(artifact),
+        status=status,
+        available=status == ARTIFACT_STATUS_AVAILABLE,
         provenance=artifact.provenance or {},
         download_filename=download_filename(artifact),
     )
@@ -267,7 +353,7 @@ def build_provenance(
             snapshot[key] = value
     if extra:
         for key, value in extra.items():
-            if key in snapshot or value in (None, ""):
+            if key not in CLIENT_PROVENANCE_ALLOWLIST or key in snapshot or value in (None, ""):
                 continue
             snapshot[key] = value
     return snapshot
@@ -285,7 +371,7 @@ def ingest_chunks(
     content_encoding: str = DEFAULT_CONTENT_ENCODING,
     provenance: dict[str, Any] | None = None,
     now: datetime | None = None,
-) -> ScanArtifact:
+) -> IngestedArtifact:
     artifact_key = validate_artifact_key(artifact_key)
     stage = validate_artifact_token(stage, field="stage")
     tool = validate_artifact_token(tool, field="tool")
@@ -310,7 +396,7 @@ def ingest_chunks(
         if existing is not None:
             if existing.sha256 == digest and existing.size_bytes == size:
                 temp_path.unlink(missing_ok=True)
-                return existing
+                return IngestedArtifact(artifact=existing)
             raise ArtifactConflict()
         storage_key = generate_storage_key(job.tenant_id, job.id)
         final_path = resolve_storage_path(storage_key, root=root)
@@ -335,7 +421,7 @@ def ingest_chunks(
         )
         db.add(row)
         db.flush()
-        return row
+        return IngestedArtifact(artifact=row, created_path=final_path)
     except ArtifactError:
         temp_path.unlink(missing_ok=True)
         if final_path is not None:
@@ -359,7 +445,7 @@ def ingest_upload_file(
     media_type: str | None = None,
     content_encoding: str | None = None,
     provenance: str | dict[str, Any] | None = None,
-) -> ScanArtifact:
+) -> IngestedArtifact:
     handle = upload.file
     return ingest_chunks(
         db,
@@ -371,6 +457,56 @@ def ingest_upload_file(
         media_type=media_type or DEFAULT_MEDIA_TYPE,
         content_encoding=content_encoding or DEFAULT_CONTENT_ENCODING,
         provenance=parse_provenance(provenance),
+    )
+
+
+def commit_ingested_artifact(db: Session, ingested: IngestedArtifact) -> None:
+    try:
+        db.commit()
+    except Exception:
+        if ingested.created_path is not None:
+            ingested.created_path.unlink(missing_ok=True)
+        raise
+
+
+def apply_raw_evidence_declaration(
+    db: Session,
+    job: ScanJob,
+    *,
+    ok: bool,
+    declaration: RawEvidenceDeclaration | dict[str, Any] | None,
+) -> None:
+    if not ok:
+        return
+    if declaration is None:
+        raise RawEvidenceError("Raw evidence declaration is required to complete a successful run")
+    if isinstance(declaration, RawEvidenceDeclaration):
+        status = declaration.status
+        keys = list(declaration.artifact_keys or [])
+    else:
+        status = declaration.get("status")
+        keys = list(declaration.get("artifact_keys") or [])
+    if status not in RAW_EVIDENCE_STATUSES:
+        raise RawEvidenceError("Raw evidence status is invalid")
+    normalized_keys = [validate_artifact_key(str(key)) for key in keys]
+    existing = {
+        row.artifact_key
+        for row in db.query(ScanArtifact).filter(ScanArtifact.scan_job_id == job.id).all()
+    }
+    if status == RAW_EVIDENCE_CAPTURED:
+        if not normalized_keys:
+            raise RawEvidenceError("captured raw evidence requires artifact_keys")
+        missing = [key for key in normalized_keys if key not in existing]
+        if missing:
+            raise RawEvidenceError("Declared raw evidence artifacts were not persisted")
+    else:
+        if normalized_keys:
+            raise RawEvidenceError(f"{status} raw evidence must not declare artifact_keys")
+        if existing:
+            raise RawEvidenceError(f"{status} raw evidence cannot complete with persisted artifacts")
+    job.runtime_provenance = merge_provenance(
+        job.runtime_provenance,
+        {"raw_evidence": {"status": status, "artifact_keys": normalized_keys}},
     )
 
 
@@ -392,7 +528,7 @@ def get_artifact(db: Session, artifact_id: int) -> ScanArtifact | None:
 
 
 def readable_artifact_path(artifact: ScanArtifact) -> Path:
-    if artifact.deleted_at is not None:
+    if artifact_is_expired(artifact):
         raise ArtifactError("Raw artifact is no longer available", status_code=410)
     try:
         path = resolve_storage_path(artifact.storage_key)

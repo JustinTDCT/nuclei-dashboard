@@ -19,7 +19,7 @@ alembic revision -m "describe the change"
 
 Current head revision: `0015_raw_scan_evidence` (after frozen `0001_baseline` through `0014_reports_auditor_access`).
 
-`0001_baseline` through `0014_reports_auditor_access` are immutable. Candidate Tranche B raw scan evidence metadata lives in `0015_raw_scan_evidence`. 0015 remains reviewable until independently frozen.
+`0001_baseline` through `0015_raw_scan_evidence` are immutable. Do not edit 0015; raw-evidence corrections must not add 0016 unless a schema change is actually required.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -59,6 +59,9 @@ The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`sc
 - `RAW_ARTIFACT_MAX_BYTES` defaults to 268435456 (256 MiB). Oversized uploads are rejected; artifacts are never silently truncated.
 - Compose volume `scan-artifacts` is mounted only on the API. Remote LAN agents upload over HTTPS; they do not receive the volume.
 - Default retention is 365 days (`raw_scan_artifact_retention_days` in Admin → Settings). The value at upload time sets that artifact's `retention_expires_at`. Changing the setting does not bulk-delete existing artifacts.
+- Successful `complete?ok=true` requires an explicit raw-evidence declaration (`captured`, `dry_run`, or `none_executed`). A stale client that omits it is rejected and the run is not marked successful. Failed completes remain optional.
+- Client-supplied artifact provenance is allowlisted to runtime/tool/template version metadata. Secret-bearing keys are rejected.
+- Read-time expiry is enforced even before hourly cleanup. Expired artifacts are not downloadable. Missing pre-expiry bytes are `unavailable`, not `expired`.
 - Hourly cleanup deletes expired bytes, keeps the metadata row, and records `scan_artifact.retention_delete`. Normalized Assets, Observations, Findings, history, and ScanJobs are untouched.
 - Viewer access follows Tenant grants. Direct IDs for other tenants fail closed as 404. Successful downloads record `scan_artifact.download`.
 - Existing Scan Runs created before 0015 have no artifact rows because raw bytes were never retained. Do not treat that as “the scanner produced no output”.

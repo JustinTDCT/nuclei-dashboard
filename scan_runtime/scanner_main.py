@@ -28,7 +28,9 @@ def main() -> None:
                     finish_pipeline_run(
                         result=result,
                         upload=lambda artifact, current_id=job_id: client.upload_artifact(current_id, artifact),
-                        complete=lambda ok, error, current_id=job_id: client.complete(current_id, ok=ok, error=error),
+                        complete=lambda ok, error, raw_evidence=None, current_id=job_id: client.complete(
+                            current_id, ok=ok, error=error, raw_evidence=raw_evidence
+                        ),
                         provenance_fn=lambda payload, current_id=job_id: client.provenance(current_id, payload),
                         devices_fn=lambda devices, current_id=job_id: client.devices(current_id, devices),
                         coverage_fn=lambda payload, current_id=job_id: client.detector_coverage(current_id, payload),
@@ -41,7 +43,9 @@ def main() -> None:
                         finish_pipeline_run(
                             result=result,
                             upload=lambda artifact, current_id=job_id: client.upload_artifact(current_id, artifact),
-                            complete=lambda ok, error, current_id=job_id: client.complete(current_id, ok=ok, error=error),
+                            complete=lambda ok, error, raw_evidence=None, current_id=job_id: client.complete(
+                            current_id, ok=ok, error=error, raw_evidence=raw_evidence
+                        ),
                             provenance_fn=lambda payload, current_id=job_id: client.provenance(current_id, payload),
                             devices_fn=lambda devices, current_id=job_id: client.devices(current_id, devices),
                             coverage_fn=lambda payload, current_id=job_id: client.detector_coverage(current_id, payload),

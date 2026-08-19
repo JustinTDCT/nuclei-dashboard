@@ -77,7 +77,17 @@ def finish_pipeline_run(
     if pipeline_error:
         complete(False, pipeline_error)
         return
-    complete(True, None)
+    complete(True, None, raw_evidence=raw_evidence_declaration(result))
+
+
+def raw_evidence_declaration(result: dict[str, Any]) -> dict[str, Any]:
+    artifacts = list(result.get("artifacts") or [])
+    keys = [str(row["artifact_key"]) for row in artifacts if row.get("artifact_key")]
+    if result.get("dry_run"):
+        return {"status": "dry_run", "artifact_keys": []}
+    if keys:
+        return {"status": "captured", "artifact_keys": keys}
+    return {"status": "none_executed", "artifact_keys": []}
 
 
 def provenance_form_value(payload: dict[str, Any] | None) -> str:

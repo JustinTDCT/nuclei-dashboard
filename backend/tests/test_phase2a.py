@@ -113,11 +113,15 @@ def _post_findings(client, world, job_id: int, items=None):
     return posted.json()
 
 
-def _complete(client, world, job_id: int, ok=True, error=None):
+def _complete(client, world, job_id: int, ok=True, error=None, raw_evidence=None):
+    payload = raw_evidence
+    if ok and payload is None:
+        payload = {"status": "none_executed", "artifact_keys": []}
     posted = client.post(
         f"/api/agent/jobs/{job_id}/complete",
         headers=_agent_headers(world["agent1"]),
         params={"ok": "true" if ok else "false", "error": error or ""},
+        json=payload,
     )
     return posted
 
@@ -783,6 +787,7 @@ def test_agent_and_central_use_same_lifecycle_and_legacy_api(reset_db):
             f"/api/internal/scanner/jobs/{job_id}/complete",
             headers=_scanner_headers(),
             params={"ok": "true"},
+            json={"status": "none_executed", "artifact_keys": []},
         )
         assert done.status_code == 200, done.text
         from app.database import SessionLocal

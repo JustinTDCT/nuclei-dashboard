@@ -859,9 +859,9 @@ function Scans({ tenantId }: { tenantId: number }) {
                     <div>Size: {artifact.size_bytes} bytes</div>
                     <div>Created: {formatUtc(artifact.created_at, defaultTimezone)}</div>
                     <div>Retain until: {formatUtc(artifact.retention_expires_at, defaultTimezone)}</div>
-                    <div>Status: {artifact.available ? "Available" : "Expired"}</div>
+                    <div>Status: {artifactStatusLabel(artifact)}</div>
                     <div className="break-all">SHA-256: {artifact.sha256}</div>
-                    {artifact.available && (
+                    {artifact.status === "available" && (
                       <button
                         className="text-cyan-400"
                         onClick={() =>
@@ -887,6 +887,12 @@ function Scans({ tenantId }: { tenantId: number }) {
       )}
     </div>
   );
+}
+
+function artifactStatusLabel(artifact: ScanArtifact) {
+  if (artifact.status === "available") return "Available";
+  if (artifact.status === "expired") return "Expired";
+  return "Unavailable";
 }
 
 function dash(value: string | number | null | undefined) {

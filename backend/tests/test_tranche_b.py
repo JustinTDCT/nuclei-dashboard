@@ -38,6 +38,8 @@ RUNTIME_ROOT = REPO_ROOT / "scan_runtime"
 FRONTEND_SRC = REPO_ROOT / "frontend" / "src"
 MIGRATION_0014 = BACKEND_ROOT / "alembic" / "versions" / "0014_reports_auditor_access.py"
 MIGRATION_0015 = BACKEND_ROOT / "alembic" / "versions" / "0015_raw_scan_evidence.py"
+TRANCHE_B_SHA256 = "fb0cac18676e410821b61c9c6182d7ad8bc532a7598f76b58440e5bc998e7428"
+TRANCHE_B_GIT_BLOB = "3b650a2efc8cfb9074baf102fa4906aeb5688b03"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
 
@@ -169,6 +171,10 @@ def test_0014_frozen_and_0015_is_head(reset_db):
     blob = __import__("subprocess").check_output(["git", "hash-object", str(MIGRATION_0014)], cwd=REPO_ROOT, text=True).strip()
     assert blob == PHASE3C_GIT_BLOB
     assert MIGRATION_0015.is_file()
+    assert hashlib.sha256(MIGRATION_0015.read_bytes()).hexdigest() == TRANCHE_B_SHA256
+    assert FROZEN_MIGRATION_HASHES["0015_raw_scan_evidence.py"] == TRANCHE_B_SHA256
+    blob15 = __import__("subprocess").check_output(["git", "hash-object", str(MIGRATION_0015)], cwd=REPO_ROOT, text=True).strip()
+    assert blob15 == TRANCHE_B_GIT_BLOB
     assert "scan_artifacts" in sa_inspect(engine).get_table_names()
     assert "BYTEA" not in MIGRATION_0015.read_text()
     assert "LargeBinary" not in MIGRATION_0015.read_text()
@@ -189,6 +195,7 @@ def test_upload_stores_metadata_not_body_and_is_idempotent(reset_db, tmp_path, m
         assert body["sha256"] == digest
         assert body["size_bytes"] == len(gz)
         assert body["available"] is True
+        assert body["status"] == "available"
         assert "storage_key" not in body
         assert "raw-artifacts" not in json.dumps(body)
         assert not str(body).startswith("/")
@@ -388,9 +395,26 @@ def test_artifact_upload_failure_prevents_successful_completion(reset_db, tmp_pa
                 "staging_dir": None,
             },
             upload=upload,
-            complete=lambda ok, error: completed.append((ok, error)),
+            complete=lambda ok, error, raw_evidence=None: completed.append((ok, error)),
         )
     assert completed == []
+
+
+def test_finish_pipeline_run_declares_raw_evidence():
+    from job_finish import finish_pipeline_run, raw_evidence_declaration
+
+    completed = []
+    finish_pipeline_run(
+        result={
+            "artifacts": [{"path": "x", "artifact_key": "port_discovery.naabu"}],
+            "staging_dir": None,
+        },
+        upload=lambda _artifact: None,
+        complete=lambda ok, error, raw_evidence=None: completed.append((ok, error, raw_evidence)),
+    )
+    assert completed == [(True, None, {"status": "captured", "artifact_keys": ["port_discovery.naabu"]})]
+    assert raw_evidence_declaration({"artifacts": [], "dry_run": True}) == {"status": "dry_run", "artifact_keys": []}
+    assert raw_evidence_declaration({"artifacts": []}) == {"status": "none_executed", "artifact_keys": []}
 
 
 @requires_postgres
@@ -510,6 +534,7 @@ def test_missing_and_deleted_download_have_no_success_audit(reset_db, tmp_path, 
         listed = client.get(f"/api/jobs/{job_id}/artifacts", headers=_headers(token)).json()
         assert listed[0]["deleted_at"] is not None
         assert listed[0]["available"] is False
+        assert listed[0]["status"] == "expired"
         assert _audits("scan_artifact.retention_delete")
 
 
@@ -542,7 +567,12 @@ def test_retention_setting_and_cleanup_leaves_normalized_data(reset_db, tmp_path
             headers=_agent_headers(agent),
             json=[{"ip": "10.1.0.8", "scope": "lan", "hostname": "keep-me", "ports": [80]}],
         )
-        client.post(f"/api/agent/jobs/{job_id}/complete", headers=_agent_headers(agent), params={"ok": "true"})
+        client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=_agent_headers(agent),
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": [uploaded["artifact_key"]]},
+        )
 
         from app.database import SessionLocal
         from app.models import Asset, AssetFinding, AssetObservation, Finding, ScanArtifact, ScanJob
@@ -669,6 +699,7 @@ def test_pipeline_captures_native_output_and_cleans_temp(tmp_path, monkeypatch):
     monkeypatch.setenv("SCAN_DRY_RUN", "1")
     dry = runtime_runner.run_pipeline(job)
     assert dry["artifacts"] == []
+    assert dry["dry_run"] is True
     assert dry["findings"]
 
 
@@ -717,6 +748,7 @@ def test_ui_copy_and_admin_retention_controls():
     assert "No retained raw artifacts are recorded for this run." in tenant
     assert "Available" in tenant
     assert "Expired" in tenant
+    assert "Unavailable" in tenant
     assert "Download" in tenant
     assert "No findings" not in tenant.split("Raw evidence")[1].split("Related controls")[0]
     assert "Scanner produced no output" not in tenant
@@ -726,4 +758,270 @@ def test_ui_copy_and_admin_retention_controls():
     assert "storage root" not in admin.lower()
     assert "/var/lib/nuclei-dashboard" not in admin
     assert "raw_scan_artifact_retention_days" in types
+    assert "status" in types.split("export interface ScanArtifact")[1].split("export interface")[0]
+    assert "unavailable" in types.split("export interface ScanArtifact")[1].split("export interface")[0]
     assert "storage_key" not in types.split("export interface ScanArtifact")[1].split("export interface")[0]
+
+
+def test_real_client_artifact_upload_passes_single_timeout(tmp_path):
+    from api_client import ARTIFACT_UPLOAD_TIMEOUT, CentralClient, ScannerClient
+
+    artifact_path = tmp_path / "port_discovery.naabu.jsonl.gz"
+    artifact_path.write_bytes(b"gz-bytes")
+    artifact = {
+        "path": str(artifact_path),
+        "artifact_key": "port_discovery.naabu",
+        "stage": "port_discovery",
+        "tool": "naabu",
+        "provenance": {"naabu_version": "2.3.0"},
+    }
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"id":1}'
+
+        def json(self):
+            return {"id": 1, "artifact_key": "port_discovery.naabu"}
+
+    def fake_request(method, url, **kwargs):
+        calls.append({"method": method, "url": url, "kwargs": kwargs})
+        return FakeResponse()
+
+    with patch("api_client.httpx.request", side_effect=fake_request):
+        CentralClient("http://api.example:8000").upload_artifact("agent-token", 9, artifact)
+        ScannerClient("http://api.example:8000", "scanner-token").upload_artifact(9, artifact)
+
+    assert len(calls) == 2
+    assert calls[0]["url"].endswith("/api/agent/jobs/9/artifacts")
+    assert calls[1]["url"].endswith("/api/internal/scanner/jobs/9/artifacts")
+    for call in calls:
+        assert call["kwargs"]["timeout"] == ARTIFACT_UPLOAD_TIMEOUT
+        assert "files" in call["kwargs"]
+
+
+@requires_postgres
+def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, monkeypatch):
+    _artifact_root(tmp_path, monkeypatch)
+    gz = _gzip_jsonl(['{"ip":"10.1.0.1","port":80}'])
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        job_id, agent = _claim_lan(client, token, world)
+        headers = _agent_headers(agent)
+        stale = client.post(f"/api/agent/jobs/{job_id}/complete", headers=headers, params={"ok": "true"})
+        assert stale.status_code == 409
+        from app.database import SessionLocal
+        from app.models import ScanJob
+
+        db = SessionLocal()
+        try:
+            assert db.get(ScanJob, job_id).status == "running"
+        finally:
+            db.close()
+
+        missing = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": ["port_discovery.naabu"]},
+        )
+        assert missing.status_code == 409
+        uploaded = _upload(
+            client,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            headers,
+            gz,
+            artifact_key="port_discovery.naabu",
+            stage="port_discovery",
+            tool="naabu",
+        )
+        assert uploaded.status_code == 200, uploaded.text
+        dry_with_bytes = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "dry_run", "artifact_keys": []},
+        )
+        assert dry_with_bytes.status_code == 409
+        captured = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": ["port_discovery.naabu"]},
+        )
+        assert captured.status_code == 200, captured.text
+        assert captured.json()["status"] == "done"
+
+        empty_job, empty_agent = _claim_lan(client, token, world)
+        dry = client.post(
+            f"/api/agent/jobs/{empty_job}/complete",
+            headers=_agent_headers(empty_agent),
+            params={"ok": "true"},
+            json={"status": "dry_run", "artifact_keys": []},
+        )
+        assert dry.status_code == 200, dry.text
+        none_job, none_agent = _claim_lan(client, token, world)
+        none = client.post(
+            f"/api/agent/jobs/{none_job}/complete",
+            headers=_agent_headers(none_agent),
+            params={"ok": "true"},
+            json={"status": "none_executed", "artifact_keys": []},
+        )
+        assert none.status_code == 200, none.text
+        failed_job, failed_agent = _claim_lan(client, token, world)
+        failed = client.post(
+            f"/api/agent/jobs/{failed_job}/complete",
+            headers=_agent_headers(failed_agent),
+            params={"ok": "false", "error": "nuclei crashed"},
+        )
+        assert failed.status_code == 200, failed.text
+
+        wan_id = _claim_wan(client, token, world)
+        wan_stale = client.post(
+            f"/api/internal/scanner/jobs/{wan_id}/complete",
+            headers=_scanner_headers(),
+            params={"ok": "true"},
+        )
+        assert wan_stale.status_code == 409
+
+
+@requires_postgres
+def test_secret_provenance_is_rejected(reset_db, tmp_path, monkeypatch):
+    _artifact_root(tmp_path, monkeypatch)
+    gz = _gzip_jsonl(['{"ok":true}'])
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        job_id, agent = _claim_lan(client, token, world)
+        headers = _agent_headers(agent)
+        secret = _upload(
+            client,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            headers,
+            gz,
+            artifact_key="fingerprint.httpx",
+            stage="fingerprint",
+            tool="httpx",
+            provenance=json.dumps({"token": "leak", "authorization": "Bearer x", "password": "p"}),
+        )
+        assert secret.status_code == 400
+        mixed = _upload(
+            client,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            headers,
+            gz,
+            artifact_key="fingerprint.httpx",
+            stage="fingerprint",
+            tool="httpx",
+            provenance=json.dumps({"nuclei_version": "3.1", "token": "leak"}),
+        )
+        assert mixed.status_code == 400
+        allowed = _upload(
+            client,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            headers,
+            gz,
+            artifact_key="fingerprint.httpx",
+            stage="fingerprint",
+            tool="httpx",
+            provenance=json.dumps({"nuclei_version": "3.1", "ignored_extra": "drop-me"}),
+        )
+        assert allowed.status_code == 200, allowed.text
+        body = allowed.json()
+        assert body["provenance"]["nuclei_version"] == "3.1"
+        serialized = json.dumps(body)
+        assert "ignored_extra" not in serialized
+        assert "token" not in serialized
+        assert "authorization" not in serialized
+        assert "password" not in serialized
+        listed = client.get(f"/api/jobs/{job_id}/artifacts", headers=_headers(token)).json()
+        assert "token" not in json.dumps(listed)
+        from app.database import SessionLocal
+        from app.models import ScanArtifact
+
+        db = SessionLocal()
+        try:
+            row = db.get(ScanArtifact, body["id"])
+            assert "token" not in json.dumps(row.provenance)
+            assert row.provenance.get("nuclei_version") == "3.1"
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_route_commit_failure_removes_orphan_bytes(reset_db, tmp_path, monkeypatch):
+    from sqlalchemy.orm import Session
+
+    root = _artifact_root(tmp_path, monkeypatch)
+    gz = _gzip_jsonl(['{"ok":true}'])
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        job_id, agent = _claim_lan(client, token, world)
+        with pytest.raises(RuntimeError, match="commit failed"):
+            with patch.object(Session, "commit", side_effect=RuntimeError("commit failed")):
+                _upload(client, f"/api/agent/jobs/{job_id}/artifacts", _agent_headers(agent), gz)
+        assert list(root.rglob("*.jsonl.gz")) == []
+        from app.database import SessionLocal
+        from app.models import ScanArtifact
+
+        db = SessionLocal()
+        try:
+            assert db.query(ScanArtifact).count() == 0
+        finally:
+            db.close()
+
+
+@requires_postgres
+def test_read_time_expiry_and_unavailable_vs_expired(reset_db, tmp_path, monkeypatch):
+    from app.config import settings as app_settings
+    from app.database import SessionLocal
+    from app.models import ScanArtifact
+
+    root = _artifact_root(tmp_path, monkeypatch)
+    gz = _gzip_jsonl(['{"ok":true}'])
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        job_id, agent = _claim_lan(client, token, world)
+        headers = _agent_headers(agent)
+        expired = _upload(
+            client,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            headers,
+            gz,
+            artifact_key="vulnerability.nuclei",
+        ).json()
+        missing = _upload(
+            client,
+            f"/api/agent/jobs/{job_id}/artifacts",
+            headers,
+            gz,
+            artifact_key="fingerprint.httpx",
+            stage="fingerprint",
+            tool="httpx",
+        ).json()
+        db = SessionLocal()
+        try:
+            expired_row = db.get(ScanArtifact, expired["id"])
+            missing_row = db.get(ScanArtifact, missing["id"])
+            expired_path = Path(app_settings.raw_artifact_dir) / expired_row.storage_key
+            missing_path = Path(app_settings.raw_artifact_dir) / missing_row.storage_key
+            assert expired_path.is_file()
+            assert missing_path.is_file()
+            missing_path.unlink()
+            expired_row.retention_expires_at = datetime.now(timezone.utc) - timedelta(minutes=30)
+            db.commit()
+        finally:
+            db.close()
+        listed = {row["id"]: row for row in client.get(f"/api/jobs/{job_id}/artifacts", headers=_headers(token)).json()}
+        assert listed[expired["id"]]["status"] == "expired"
+        assert listed[expired["id"]]["available"] is False
+        assert listed[missing["id"]]["status"] == "unavailable"
+        assert listed[missing["id"]]["available"] is False
+        assert client.get(f"/api/scan-artifacts/{expired['id']}/download", headers=_headers(token)).status_code == 410
+        assert client.get(f"/api/scan-artifacts/{missing['id']}/download", headers=_headers(token)).status_code == 409
+        assert _audits("scan_artifact.download") == []
+        assert expired_path.is_file()
+        assert root == Path(app_settings.raw_artifact_dir)

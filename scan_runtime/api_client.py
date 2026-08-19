@@ -43,8 +43,9 @@ class CentralClient:
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         url = f"{self.base}{path}"
         kwargs.setdefault("verify", _tls_verify())
+        timeout = kwargs.pop("timeout", self.timeout)
         try:
-            response = httpx.request(method, url, timeout=self.timeout, **kwargs)
+            response = httpx.request(method, url, timeout=timeout, **kwargs)
         except httpx.HTTPError as exc:
             raise ApiError(str(exc)) from exc
         if response.status_code >= 400:
@@ -106,13 +107,21 @@ class CentralClient:
             "POST", f"/api/agent/jobs/{job_id}/provenance", headers=_auth(token), json=payload
         ).json()
 
-    def complete(self, token: str, job_id: int, ok: bool = True, error: str | None = None) -> dict:
+    def complete(
+        self,
+        token: str,
+        job_id: int,
+        ok: bool = True,
+        error: str | None = None,
+        raw_evidence: dict[str, Any] | None = None,
+    ) -> dict:
         params = {"ok": str(ok).lower()}
         if error:
             params["error"] = error
-        return self._request(
-            "POST", f"/api/agent/jobs/{job_id}/complete", headers=_auth(token), params=params
-        ).json()
+        kwargs: dict[str, Any] = {"headers": _auth(token), "params": params}
+        if raw_evidence is not None:
+            kwargs["json"] = raw_evidence
+        return self._request("POST", f"/api/agent/jobs/{job_id}/complete", **kwargs).json()
 
     def upload_artifact(self, token: str, job_id: int, artifact: dict[str, Any]) -> dict:
         return _upload_artifact(
@@ -135,8 +144,9 @@ class ScannerClient:
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
         url = f"{self.base}{path}"
         headers = {**self._headers(), **(kwargs.pop("headers", {}) or {})}
+        timeout = kwargs.pop("timeout", self.timeout)
         try:
-            response = httpx.request(method, url, timeout=self.timeout, headers=headers, **kwargs)
+            response = httpx.request(method, url, timeout=timeout, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
             raise ApiError(str(exc)) from exc
         if response.status_code >= 400:
@@ -161,11 +171,20 @@ class ScannerClient:
     def provenance(self, job_id: int, payload: dict[str, Any]) -> dict:
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/provenance", json=payload).json()
 
-    def complete(self, job_id: int, ok: bool = True, error: str | None = None) -> dict:
+    def complete(
+        self,
+        job_id: int,
+        ok: bool = True,
+        error: str | None = None,
+        raw_evidence: dict[str, Any] | None = None,
+    ) -> dict:
         params = {"ok": str(ok).lower()}
         if error:
             params["error"] = error
-        return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/complete", params=params).json()
+        kwargs: dict[str, Any] = {"params": params}
+        if raw_evidence is not None:
+            kwargs["json"] = raw_evidence
+        return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/complete", **kwargs).json()
 
     def upload_artifact(self, job_id: int, artifact: dict[str, Any]) -> dict:
         return _upload_artifact(self._request, f"/api/internal/scanner/jobs/{job_id}/artifacts", artifact)
