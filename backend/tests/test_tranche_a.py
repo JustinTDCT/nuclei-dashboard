@@ -511,9 +511,9 @@ def test_tranche_a_does_not_change_migrations(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    from tests.test_migrations import TRANCHE_C_HEAD
+    from tests.test_migrations import SECURITY_H_HEAD
 
-    assert revision == head_revision() == current_revision() == TRANCHE_C_HEAD
+    assert revision == head_revision() == current_revision() == SECURITY_H_HEAD
     assert hashlib.sha256(MIGRATION_0014.read_bytes()).hexdigest() == PHASE3C_SHA256
     assert FROZEN_MIGRATION_HASHES["0014_reports_auditor_access.py"] == PHASE3C_SHA256
     blob = subprocess.check_output(["git", "hash-object", str(MIGRATION_0014)], cwd=REPO_ROOT, text=True).strip()

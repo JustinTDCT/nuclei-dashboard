@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -78,21 +79,41 @@ def mark_stale_devices() -> None:
 def expire_stuck_jobs() -> None:
     db: Session = SessionLocal()
     try:
-        minutes = int(get_settings(db).get("job_timeout_minutes") or 180)
-        cutoff = _now() - timedelta(minutes=max(30, minutes))
-        q = db.query(ScanJob).filter(ScanJob.status == "running", ScanJob.started_at < cutoff)
-        jobs = q.all()
-        for job in jobs:
-            from app.jobs import transition_job_to_failed
+        from app.job_control import cancel_grace, job_timeout_minutes, mark_cancel_requested
+        from app.jobs import transition_job_to_cancelled
+        from app.models import JOB_RUNNING
 
-            transition_job_to_failed(
-                db,
-                job,
-                job.error or f"Timed out after {minutes} minutes with no completion",
+        minutes = job_timeout_minutes(db)
+        now = _now()
+        cutoff = now - timedelta(minutes=minutes)
+        grace = cancel_grace()
+        jobs = (
+            db.query(ScanJob)
+            .filter(
+                ScanJob.status == JOB_RUNNING,
+                or_(
+                    and_(ScanJob.deadline_at.isnot(None), ScanJob.deadline_at <= now),
+                    and_(ScanJob.deadline_at.is_(None), ScanJob.started_at.isnot(None), ScanJob.started_at < cutoff),
+                ),
             )
-        if jobs:
+            .all()
+        )
+        changed = 0
+        for job in jobs:
+            reason = job.error or f"Timed out after {minutes} minutes with no completion"
+            if job.cancel_requested_at is None:
+                mark_cancel_requested(job, now=now, reason=reason)
+                changed += 1
+                continue
+            requested = job.cancel_requested_at
+            if requested.tzinfo is None:
+                requested = requested.replace(tzinfo=timezone.utc)
+            if now - requested >= grace:
+                transition_job_to_cancelled(db, job, reason)
+                changed += 1
+        if changed:
             db.commit()
-            log.info("Expired %s stuck running jobs", len(jobs))
+            log.info("Requested or forced cancel on %s stuck running jobs", changed)
     except Exception:
         log.exception("Stuck job pass failed")
         db.rollback()

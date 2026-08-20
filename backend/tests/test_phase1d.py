@@ -20,7 +20,7 @@ PHASE1D_HEAD = "0006_scan_definition_execution"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0016_scanner_runtime_inventory"
+PHASE3A_HEAD = "0017_security_h6_h8"
 RUNTIME_ROOT = BACKEND_ROOT.parent / "scan_runtime"
 if str(RUNTIME_ROOT) not in sys.path:
     sys.path.insert(0, str(RUNTIME_ROOT))
@@ -175,7 +175,7 @@ def test_0005_to_0006_preserves_ids_and_does_not_fabricate_snapshots(reset_db):
 
     from app.database import SessionLocal, engine
     from app.migrate import alembic_config, current_revision, head_revision
-    from app.models import AuthorizedWanTarget, Scan, ScanJob, ScanNetworkTarget, ScanWanTarget
+    from app.models import AuthorizedWanTarget, Scan, ScanNetworkTarget, ScanWanTarget
 
     command.upgrade(alembic_config(), PHASE1C_HEAD)
     now = datetime.now(timezone.utc)
@@ -248,11 +248,18 @@ def test_0005_to_0006_preserves_ids_and_does_not_fabricate_snapshots(reset_db):
     try:
         assert db.get(Scan, lan_scan) is not None
         assert db.get(Scan, wan_scan) is not None
-        job = db.get(ScanJob, job_id)
-        assert job is not None
-        assert job.execution_snapshot is None
-        assert job.snapshot_version == "legacy_pre_1d"
-        assert job.hosts_found == 3
+        job = db.execute(
+            text(
+                """
+                SELECT execution_snapshot, snapshot_version, hosts_found
+                FROM scan_jobs WHERE id = :id
+                """
+            ),
+            {"id": job_id},
+        ).mappings().one()
+        assert job["execution_snapshot"] is None
+        assert job["snapshot_version"] == "legacy_pre_1d"
+        assert job["hosts_found"] == 3
         lan = db.get(Scan, lan_scan)
         assert lan.site_id == site_id
         assert lan.definition_revision == 1

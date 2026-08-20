@@ -41,15 +41,35 @@ read_pin() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$VERSIONS_FILE" "$1"
 }
 
+verify_sha256() {
+  file="$1"
+  expected="$2"
+  if [ -z "$expected" ]; then
+    echo "Missing SHA-256 pin for ${file}" >&2
+    rm -f "$file"
+    exit 1
+  fi
+  actual="$(sha256sum "$file" | awk '{print $1}')"
+  if [ "$actual" != "$expected" ]; then
+    echo "SHA-256 mismatch for ${file}" >&2
+    echo "expected ${expected}" >&2
+    echo "actual   ${actual}" >&2
+    rm -f "$file"
+    exit 1
+  fi
+}
+
 install_pd() {
   bin="$1"
   echo "Installing pinned ${bin} (${PDARCH})"
   url="$(python3 "$DOWNLOADER" zip "$bin" "$PDARCH" "$VERSIONS_FILE")"
+  expected="$(python3 "$DOWNLOADER" checksum zip "$bin" "$PDARCH" "$VERSIONS_FILE")"
   echo "Fetching ${url}"
   if ! curl -fsSL "$url" -o "/tmp/${bin}.zip"; then
     echo "Pinned ${bin} release was not found. Refusing to fall back to latest: ${url}" >&2
     exit 1
   fi
+  verify_sha256 "/tmp/${bin}.zip" "$expected"
   unzip -o "/tmp/${bin}.zip" -d /tmp/pdout
   find /tmp/pdout -type f -name "$bin" -exec mv {} "/usr/local/bin/${bin}" \;
   chmod +x "/usr/local/bin/${bin}"
@@ -60,12 +80,14 @@ install_pd() {
 install_templates() {
   tag="$(read_pin nuclei_templates_version)"
   url="$(python3 "$DOWNLOADER" templates "$VERSIONS_FILE")"
+  expected="$(python3 "$DOWNLOADER" checksum templates "$VERSIONS_FILE")"
   echo "Installing pinned nuclei-templates ${tag}"
   echo "Fetching ${url}"
   if ! curl -fsSL "$url" -o /tmp/nuclei-templates.tar.gz; then
     echo "Pinned nuclei-templates release was not found. Refusing to fall back to latest: ${url}" >&2
     exit 1
   fi
+  verify_sha256 /tmp/nuclei-templates.tar.gz "$expected"
   mkdir -p /tmp/templates-src /opt/nuclei-templates /root/nuclei-templates
   tar -xzf /tmp/nuclei-templates.tar.gz -C /tmp/templates-src
   top="$(find /tmp/templates-src -mindepth 1 -maxdepth 1 -type d | head -n 1)"

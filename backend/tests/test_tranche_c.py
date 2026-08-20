@@ -112,8 +112,23 @@ def _complete_captured(client: TestClient, job_id: int, agent: dict, gz: bytes, 
 def test_pin_files_agree_and_install_path_never_uses_latest():
     runtime_pins = json.loads((RUNTIME_ROOT / "pinned_versions.json").read_text(encoding="utf-8"))
     backend_pins = json.loads((BACKEND_ROOT / "app" / "pinned_scanner_versions.json").read_text(encoding="utf-8"))
-    assert runtime_pins == backend_pins == FULL_INVENTORY
-    from pinned_download import templates_archive_url, tool_zip_url
+    assert runtime_pins == backend_pins
+    assert {key: runtime_pins[key] for key in FULL_INVENTORY} == FULL_INVENTORY
+    checksums = runtime_pins["checksums_sha256"]
+    assert isinstance(checksums, dict)
+    for key in (
+        "nuclei_linux_amd64",
+        "nuclei_linux_arm64",
+        "naabu_linux_amd64",
+        "naabu_linux_arm64",
+        "httpx_linux_amd64",
+        "httpx_linux_arm64",
+        "nuclei_templates",
+    ):
+        digest = checksums[key]
+        assert len(digest) == 64
+        assert all(char in "0123456789abcdef" for char in digest)
+    from pinned_download import checksum_for, templates_archive_url, tool_zip_url
 
     nuclei = tool_zip_url("nuclei", "amd64", runtime_pins)
     naabu = tool_zip_url("naabu", "amd64", runtime_pins)
@@ -133,6 +148,10 @@ def test_pin_files_agree_and_install_path_never_uses_latest():
         assert "releases/latest" not in source
     assert "Refusing to fall back to latest" in install
     assert "curl -fsSL" in install
+    assert "verify_sha256" in install
+    assert "SHA-256 mismatch" in install
+    assert checksum_for("zip", binary="nuclei", arch="amd64") == checksums["nuclei_linux_amd64"]
+    assert checksum_for("templates") == checksums["nuclei_templates"]
     missing = dict(runtime_pins)
     missing["nuclei_version"] = "v0.0.0-does-not-exist"
     missing_url = tool_zip_url("nuclei", "amd64", missing)
@@ -545,6 +564,13 @@ def test_scan_run_required_version_provenance(reset_db, tmp_path, monkeypatch):
             assert db.query(ScanArtifact).filter(ScanArtifact.scan_job_id == missing_job).count() == len(keys)
         finally:
             db.close()
+
+        leftover = client.post(
+            f"/api/agent/jobs/{missing_job}/complete",
+            headers=headers,
+            params={"ok": "false", "error": "version provenance missing"},
+        )
+        assert leftover.status_code == 200, leftover.text
 
         failed_job, failed_agent = _claim_lan(client, token, world)
         failed_headers = _agent_headers(failed_agent)

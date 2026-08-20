@@ -10,7 +10,7 @@ from api_client import ApiError, CentralClient
 from job_finish import finish_pipeline_run
 from keys import load_or_create_keypair, sign
 from runner import PipelineError, run_pipeline
-from artifact_io import cleanup_staging
+from artifact_io import JobControl, cleanup_staging, use_job_control
 from tool_versions import collect_runtime_inventory
 
 INVENTORY_REFRESH_SECONDS = 3600
@@ -72,13 +72,15 @@ def jittered_interval(base: float = CONTROL_INTERVAL_SECONDS, jitter: float = CO
     return base + random.uniform(0.0, span)
 
 
-def run_job(client: CentralClient, token: str, job: dict, refresh_token) -> None:
+def run_job(client: CentralClient, token: str, job: dict, refresh_token, cancel_event=None) -> None:
     job_id = job["job_id"]
     print(f"Starting job {job_id}", flush=True)
     started = client.start(token, job_id)
     result: dict = {"artifacts": [], "staging_dir": None}
+    control = JobControl.from_job(started, cancel_event=cancel_event)
     try:
-        result = run_pipeline(started, log=lambda message: print(message, flush=True))
+        with use_job_control(control):
+            result = run_pipeline(started, log=lambda message: print(message, flush=True), control=control)
         token = refresh_token() or token
         finish_pipeline_run(
             result=result,
@@ -161,6 +163,7 @@ class AgentRuntime:
         self._work_ready = threading.Event()
         self._idle = threading.Event()
         self._idle.set()
+        self._cancel = threading.Event()
 
     def stop(self) -> None:
         self._stop.set()
@@ -202,7 +205,9 @@ class AgentRuntime:
             return
         job_id, activity = self.current_job()
         inventory = self._inventory(force=force_inventory)
-        self.client.heartbeat(token, runtime_inventory=inventory, job_id=job_id, activity=activity)
+        result = self.client.heartbeat(token, runtime_inventory=inventory, job_id=job_id, activity=activity)
+        if result.get("cancel_requested"):
+            self._cancel.set()
 
     def _heartbeat_loop(self) -> None:
         first = True
@@ -234,7 +239,14 @@ class AgentRuntime:
                 if not token:
                     print("Scan worker has no token; returning job to idle", flush=True)
                     continue
-                self._run_job(self.client, token, job, refresh_token=self.refresh_token)
+                self._cancel.clear()
+                self._run_job(
+                    self.client,
+                    token,
+                    job,
+                    refresh_token=self.refresh_token,
+                    cancel_event=self._cancel,
+                )
             except Exception:
                 traceback.print_exc()
             finally:

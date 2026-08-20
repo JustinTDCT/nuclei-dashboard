@@ -168,6 +168,9 @@ class ScannerClient(_PooledClient):
     def start(self, job_id: int) -> dict:
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/start").json()
 
+    def job_status(self, job_id: int) -> dict:
+        return self._request("GET", f"/api/internal/scanner/jobs/{job_id}").json()
+
     def devices(self, job_id: int, devices: list[dict]) -> dict:
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/devices", json=devices).json()
 

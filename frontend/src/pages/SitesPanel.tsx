@@ -439,7 +439,6 @@ function SiteAgents({
   write: boolean;
   onChanged: () => void;
 }) {
-  const { defaultTimezone } = useTimezone();
   const [name, setName] = useState("");
   const [created, setCreated] = useState<Agent | null>(null);
   const [error, setError] = useState("");

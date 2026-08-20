@@ -2,8 +2,10 @@ import os
 import time
 import traceback
 
+import threading
+
 from api_client import ApiError, ScannerClient
-from artifact_io import cleanup_staging
+from artifact_io import JobControl, cleanup_staging, use_job_control
 from job_finish import finish_pipeline_run
 from runner import PipelineError, run_pipeline
 
@@ -23,8 +25,26 @@ def main() -> None:
                 print(f"Starting WAN job {job_id}", flush=True)
                 started = client.start(job_id)
                 result: dict = {"artifacts": [], "staging_dir": None}
+                cancel = threading.Event()
+                control = JobControl.from_job(started, cancel_event=cancel)
+
+                def _watch_cancel() -> None:
+                    while not cancel.is_set():
+                        try:
+                            status = client.job_status(job_id)
+                        except ApiError:
+                            time.sleep(5)
+                            continue
+                        if status.get("cancel_requested"):
+                            cancel.set()
+                            return
+                        time.sleep(5)
+
+                watcher = threading.Thread(target=_watch_cancel, name=f"wan-cancel-{job_id}", daemon=True)
+                watcher.start()
                 try:
-                    result = run_pipeline(started)
+                    with use_job_control(control):
+                        result = run_pipeline(started, control=control)
                     finish_pipeline_run(
                         result=result,
                         upload=lambda artifact, current_id=job_id: client.upload_artifact(current_id, artifact),
@@ -60,6 +80,8 @@ def main() -> None:
                     traceback.print_exc()
                     cleanup_staging(result.get("staging_dir"))
                     client.complete(job_id, ok=False, error=str(exc))
+                finally:
+                    cancel.set()
         except ApiError as exc:
             print(f"API error: {exc}", flush=True)
         except Exception:

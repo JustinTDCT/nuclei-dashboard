@@ -4,7 +4,10 @@ from sqlalchemy.orm import Session
 
 from app.locality import LanScanInvalidError
 from app.models import (
+    JOB_CANCELLED,
+    JOB_DONE,
     JOB_FAILED,
+    JOB_MISSED,
     JOB_QUEUED,
     JOB_RUNNING,
     JOB_WAITING_FOR_AGENT,
@@ -49,12 +52,39 @@ def create_job(
     return job
 
 
+def _is_terminal(job: ScanJob) -> bool:
+    return job.status in {JOB_FAILED, JOB_CANCELLED, JOB_DONE, JOB_MISSED}
+
+
 def transition_job_to_failed(db: Session, job: ScanJob, detail: str, *, clear_claim: bool = False) -> bool:
     if job.status == JOB_FAILED:
+        return False
+    if job.status == JOB_CANCELLED:
+        if detail and not job.error:
+            job.error = detail
         return False
     job.status = JOB_FAILED
     job.error = detail
     job.finished_at = _now()
+    if clear_claim:
+        job.claimed_agent_id = None
+        job.claimed_by = None
+    from app.events import emit_scan_failed
+
+    emit_scan_failed(db, job, reason=detail)
+    return True
+
+
+def transition_job_to_cancelled(db: Session, job: ScanJob, detail: str, *, clear_claim: bool = False) -> bool:
+    if _is_terminal(job):
+        if job.status == JOB_CANCELLED and detail and not job.error:
+            job.error = detail
+        return False
+    job.status = JOB_CANCELLED
+    job.error = detail
+    job.finished_at = _now()
+    if job.cancel_requested_at is None:
+        job.cancel_requested_at = job.finished_at
     if clear_claim:
         job.claimed_agent_id = None
         job.claimed_by = None

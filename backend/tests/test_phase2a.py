@@ -31,7 +31,7 @@ PHASE2A_COVERAGE = "0008_phase2a_finding_identity_repair"
 PHASE2A_HEAD = "0009_phase2a_detector_identity_partition"
 PHASE2B_HEAD = "0010_cve_intelligence_priority"
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
-PHASE3A_HEAD = "0016_scanner_runtime_inventory"
+PHASE3A_HEAD = "0017_security_h6_h8"
 FROZEN = (
     "0001_baseline_current_schema.py",
     "0002_sites_networks.py",

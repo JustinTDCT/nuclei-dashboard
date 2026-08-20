@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.audit import record_audit
 from app.access import apply_tenant_scope, require_object_tenant, require_visible_site, require_visible_tenant
 from app.auth import require_any, require_user
+from app.agent_source import AgentSourceError
 from app.compose_gen import agent_compose, agent_env
 from app.database import get_db
 from app.locality import drop_cross_site_authorizations, get_agent, get_site, get_tenant, require_active_site
@@ -258,7 +259,10 @@ def download_compose(agent_id: int, user: User = Depends(require_user), db: Sess
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     include = agent.status in ("pending_enrollment", "pending_approval")
-    body = agent_compose(agent, central_url(db), include_secret=include)
+    try:
+        body = agent_compose(agent, central_url(db), include_secret=include)
+    except AgentSourceError as exc:
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     _audit_deployment_material(db, user, agent, fmt="compose", include_secret=include)
     return PlainTextResponse(body, media_type="text/yaml")
 

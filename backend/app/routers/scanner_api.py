@@ -11,7 +11,8 @@ from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError
 from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
 from app.scan_dispatch import CENTRAL_WORKER, atomic_claim_central_job
-from app.scan_execution import require_active_phase1d_run, run_scope, snapshot_scope_clause
+from app.job_control import job_control_payload
+from app.scan_execution import require_owned_run_for_persist, run_scope, snapshot_scope_clause
 from app.scan_security import ExecutionBlocked, revalidate_wan_start
 from app.raw_artifacts import (
     ArtifactError,
@@ -96,7 +97,7 @@ def start_job(job_id: int, _: None = Depends(require_scanner), db: Session = Dep
         raise HTTPException(status_code=404, detail="Job not available")
     claimed.runtime_provenance = merge_provenance(claimed.runtime_provenance, {"worker": CENTRAL_WORKER})
     db.commit()
-    return payload
+    return job_payload(db, claimed)
 
 
 @router.post("/jobs/{job_id}/devices")
@@ -149,7 +150,7 @@ def complete_job(
     _: None = Depends(require_scanner),
     db: Session = Depends(get_db),
 ):
-    job = _owned(db, job_id)
+    job = _owned(db, job_id, completing_ok=ok)
     try:
         apply_raw_evidence_declaration(db, job, ok=ok, declaration=raw_evidence)
         apply_version_provenance_requirement(job, ok=ok)
@@ -212,9 +213,19 @@ def post_artifact(
     return serialize_artifact(ingested.artifact)
 
 
-def _owned(db: Session, job_id: int) -> ScanJob:
+@router.get("/jobs/{job_id}")
+def job_status(job_id: int, _: None = Depends(require_scanner), db: Session = Depends(get_db)):
+    job = db.query(ScanJob).filter(ScanJob.id == job_id, ScanJob.claimed_by == "central").first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not available")
+    return job_control_payload(job)
+
+
+def _owned(db: Session, job_id: int, *, completing_ok: bool | None = None) -> ScanJob:
     job = db.query(ScanJob).filter(ScanJob.id == job_id, ScanJob.claimed_by == "central").first()
     try:
-        return require_active_phase1d_run(job, claimed_by="central")
-    except ExecutionBlocked:
-        raise HTTPException(status_code=409, detail="Job is not an active Phase 1D run") from None
+        if completing_ok is None:
+            return require_owned_run_for_persist(job, claimed_by="central")
+        return require_owned_run_for_persist(job, claimed_by="central", completing_ok=completing_ok)
+    except ExecutionBlocked as exc:
+        raise HTTPException(status_code=409, detail=exc.detail or "Job is not an active Phase 1D run") from None

@@ -25,6 +25,7 @@ PHASE3B_HEAD = "0013_event_alert_engine"
 PHASE3C_HEAD = "0014_reports_auditor_access"
 TRANCHE_B_HEAD = "0015_raw_scan_evidence"
 TRANCHE_C_HEAD = "0016_scanner_runtime_inventory"
+SECURITY_H_HEAD = "0017_security_h6_h8"
 FROZEN_MIGRATION_HASHES = {
     "0001_baseline_current_schema.py": "8daecbb5da9582ebdd2f6b13c157cadcb91368879532dd121a3804a49c99ed03",
     "0002_sites_networks.py": "e0988e97238ffd6d00f32cf1f1d3ea59cfb1f3acad17c3db6b3deaf586472278",
@@ -41,6 +42,7 @@ FROZEN_MIGRATION_HASHES = {
     "0013_event_alert_engine.py": "72792866df1caf6a6a263bad8dc348b2abee8e507e2a4bd656cda97e8dba6578",
     "0014_reports_auditor_access.py": "4f8167d0c2f22c37eec0ae96fff5cdfe637977ab7b531bc0084270b09e46bfc5",
     "0015_raw_scan_evidence.py": "fb0cac18676e410821b61c9c6182d7ad8bc532a7598f76b58440e5bc998e7428",
+    "0016_scanner_runtime_inventory.py": "4f6c40578283cddebc668c0d5f2164f3bf1529cbcda9100d61edf88079725061",
 }
 PHASE1B_TABLES = {
     "assets",
@@ -70,7 +72,7 @@ def test_fresh_database_reaches_head(reset_db):
 
     assert "users" not in _tables(engine)
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == TRANCHE_C_HEAD
+    assert revision == head_revision() == current_revision() == SECURITY_H_HEAD
     expected = {
         "alembic_version",
         "users",
@@ -116,11 +118,15 @@ def test_fresh_database_reaches_head(reset_db):
         "alert_event_routes",
         "viewer_tenant_grants",
         "scan_artifacts",
+        "agent_challenges",
+        "auth_throttles",
     }.issubset(_tables(engine))
     assert "viewer_all_tenants" in _columns(engine, "users")
     assert "viewer_expires_at" in _columns(engine, "users")
     assert "runtime_inventory" in _columns(engine, "agents")
     assert "runtime_inventory_reported_at" in _columns(engine, "agents")
+    assert "deadline_at" in _columns(engine, "scan_jobs")
+    assert "cancel_requested_at" in _columns(engine, "scan_jobs")
     assert "priority" in _columns(engine, "asset_findings")
     assert "asset_finding_id" in _columns(engine, "findings")
     assert "asset_id" in _columns(engine, "devices")
@@ -215,7 +221,7 @@ def test_existing_schema_adoption_preserves_data(reset_db):
         }
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == TRANCHE_C_HEAD
+    assert revision == head_revision() == current_revision() == SECURITY_H_HEAD
 
     db = SessionLocal()
     try:
@@ -373,7 +379,7 @@ def test_legacy_compatibility_restores_missing_columns_without_dropping_rows(res
         conn.execute(text("ALTER TABLE devices DROP COLUMN IF EXISTS description"))
 
     revision = apply_schema()
-    assert revision == TRANCHE_C_HEAD
+    assert revision == SECURITY_H_HEAD
     assert "hostname" in _columns(engine, "findings")
     assert "description" in _columns(engine, "devices")
 
@@ -558,6 +564,10 @@ def test_phase1a_and_baseline_revisions_remain_frozen():
     assert "subprocess" not in phase_tranche_c
     assert "requests" not in phase_tranche_c
     assert "urllib" not in phase_tranche_c
+    phase_security = (BACKEND_ROOT / "alembic" / "versions" / "0017_security_h6_h8.py").read_text()
+    assert "from app.database import Base" not in phase_security
+    assert "import app.models" not in phase_security
+    assert 'down_revision: str | None = "0016_scanner_runtime_inventory"' in phase_security
     import hashlib
 
     for name, digest in FROZEN_MIGRATION_HASHES.items():
@@ -600,7 +610,7 @@ def test_0014_to_0015_preserves_jobs_and_fabricates_no_artifacts(reset_db):
         ).scalar_one()
 
     revision = apply_schema()
-    assert revision == TRANCHE_C_HEAD
+    assert revision == SECURITY_H_HEAD
     assert "scan_artifacts" in _tables(engine)
     assert {
         "id",
@@ -713,7 +723,7 @@ def test_0015_to_0016_preserves_agents_with_null_inventory(reset_db):
         ).scalar_one()
 
     revision = apply_schema()
-    assert revision == TRANCHE_C_HEAD
+    assert revision == SECURITY_H_HEAD
     assert "runtime_inventory" in _columns(engine, "agents")
     assert "runtime_inventory_reported_at" in _columns(engine, "agents")
     db = SessionLocal()
@@ -741,6 +751,8 @@ def test_0016_empty_downgrade_succeeds_and_populated_refuses(reset_db):
     assert current_revision() == TRANCHE_B_HEAD
 
     apply_schema()
+    command.downgrade(alembic_config(), TRANCHE_C_HEAD)
+    assert current_revision() == TRANCHE_C_HEAD
     db = SessionLocal()
     try:
         tenant = Tenant(name="Inventory Tenant", notes="")
@@ -766,4 +778,50 @@ def test_0016_empty_downgrade_succeeds_and_populated_refuses(reset_db):
     with pytest.raises(Exception, match="Refusing to downgrade 0016_scanner_runtime_inventory"):
         command.downgrade(alembic_config(), TRANCHE_B_HEAD)
     assert current_revision() == TRANCHE_C_HEAD
+
+
+@requires_postgres
+def test_0017_empty_downgrade_succeeds_and_populated_refuses(reset_db):
+    from alembic import command
+
+    from app.database import SessionLocal
+    from app.migrate import alembic_config, apply_schema, current_revision
+    from app.models import Agent, AgentChallenge, Site, Tenant
+
+    apply_schema()
+    command.downgrade(alembic_config(), TRANCHE_C_HEAD)
+    assert current_revision() == TRANCHE_C_HEAD
+
+    apply_schema()
+    db = SessionLocal()
+    try:
+        tenant = Tenant(name="Challenge Tenant", notes="")
+        db.add(tenant)
+        db.flush()
+        site = Site(tenant_id=tenant.id, name="HQ")
+        db.add(site)
+        db.flush()
+        agent = Agent(
+            tenant_id=tenant.id,
+            site_id=site.id,
+            name="Challenged",
+            uuid="dddddddd-eeee-ffff-0000-111111111111",
+            status="approved",
+        )
+        db.add(agent)
+        db.flush()
+        db.add(
+            AgentChallenge(
+                agent_id=agent.id,
+                nonce="abc",
+                expires_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    with pytest.raises(Exception, match="Refusing to downgrade 0017_security_h6_h8"):
+        command.downgrade(alembic_config(), TRANCHE_C_HEAD)
+    assert current_revision() == SECURITY_H_HEAD
 

@@ -129,7 +129,28 @@ def _named_world(client: TestClient, token: str, name: str) -> dict:
     }
 
 
+def _fail_running_jobs(agent_id: int, *, reason: str = "test released prior running job") -> None:
+    from app.database import SessionLocal
+    from app.jobs import transition_job_to_failed
+    from app.models import JOB_RUNNING, ScanJob
+
+    db = SessionLocal()
+    try:
+        running = (
+            db.query(ScanJob)
+            .filter(ScanJob.claimed_agent_id == agent_id, ScanJob.status == JOB_RUNNING)
+            .all()
+        )
+        for job in running:
+            transition_job_to_failed(db, job, reason)
+        if running:
+            db.commit()
+    finally:
+        db.close()
+
+
 def _claim_lan(client: TestClient, token: str, world: dict, **scan_extra) -> tuple[int, dict]:
+    _fail_running_jobs(world["agent1"]["id"])
     scan = _lan_scan(client, token, world, **scan_extra)
     run = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token))
     assert run.status_code == 200, run.text
@@ -197,7 +218,9 @@ def test_0014_frozen_and_0015_is_head(reset_db):
     from app.migrate import apply_schema, current_revision, head_revision
 
     revision = apply_schema()
-    assert revision == head_revision() == current_revision() == TRANCHE_C_HEAD
+    from tests.test_migrations import SECURITY_H_HEAD
+
+    assert revision == head_revision() == current_revision() == SECURITY_H_HEAD
     assert hashlib.sha256(MIGRATION_0014.read_bytes()).hexdigest() == PHASE3C_SHA256
     assert FROZEN_MIGRATION_HASHES["0014_reports_auditor_access.py"] == PHASE3C_SHA256
     blob = __import__("subprocess").check_output(["git", "hash-object", str(MIGRATION_0014)], cwd=REPO_ROOT, text=True).strip()

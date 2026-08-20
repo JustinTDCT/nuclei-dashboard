@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,7 @@ from app.models import AGENT_HEALTH_SECONDS, Agent, Alert, AlertDelivery, AssetF
 from app.scan_intensity import DEFAULT_CAPS
 from app.schemas import DisplaySettingsOut, SettingsIn, SettingsOut
 from app.scanner_versions import APPROVED_SETTING_KEYS
+from app.settings_crypto import SettingsCryptoError
 from app.settings_store import get_settings, public_settings, save_settings
 from app.timezones import list_iana_timezones, validate_iana_timezone
 
@@ -37,7 +38,11 @@ def write_settings(body: SettingsIn, user: User = Depends(require_admin), db: Se
     current = get_settings(db)
     payload = body.model_dump()
     payload["default_timezone"] = timezone
-    saved = save_settings(db, payload)
+    try:
+        saved = save_settings(db, payload)
+    except SettingsCryptoError as exc:
+        raise HTTPException(status_code=400, detail=exc.detail) from exc
+    saved = get_settings(db)
     cap_keys = ("preferred_agent_grace_seconds", "agent_job_wait_minutes", *DEFAULT_CAPS)
     cap_changes = {
         key: {"before": current.get(key), "after": saved.get(key)}

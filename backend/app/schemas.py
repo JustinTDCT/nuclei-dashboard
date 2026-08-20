@@ -476,6 +476,7 @@ class SettingsOut(BaseModel):
     default_timezone: str = "UTC"
     preferred_agent_grace_seconds: int = 60
     agent_job_wait_minutes: int = 30
+    job_timeout_minutes: int = 180
     scan_cap_naabu_rate: int = 5000
     scan_cap_naabu_concurrency: int = 100
     scan_cap_naabu_timeout_ms: int = 10000

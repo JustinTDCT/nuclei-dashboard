@@ -12,7 +12,7 @@ export function Compliance() {
   const [controls, setControls] = useState<ComplianceControl[]>([]);
   const [q, setQ] = useState("");
   const [family, setFamily] = useState("");
-  const [error, setError] = useState("");
+  const [error] = useState("");
 
   function load() {
     api<ComplianceFramework[]>("/api/compliance/frameworks?include_archived=true").then(setFrameworks);

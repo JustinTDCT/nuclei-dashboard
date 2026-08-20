@@ -1,16 +1,19 @@
 # Reference only. Prefer agent/docker-compose.yml plus a downloaded .env,
 # or the per-agent compose file from the dashboard.
-# Rebuild the image after control-plane changes on main. A restart is not enough.
+# Rebuild the image after control-plane changes. Pin the git context to a
+# commit or tag — not refs/heads/main.
 
 services:
   nuclei-agent:
     image: nuclei-dashboard-agent:latest
     pull_policy: build
     build:
-      context: https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime
+      context: https://github.com/JustinTDCT/nuclei-dashboard.git#9211fc9f4100f5fbd3b4a42f0c817e83a0103c21:scan_runtime
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
+    security_opt:
+      - no-new-privileges:true
     environment:
       CENTRAL_URL: https://10.150.10.155:8118
       AGENT_UUID: 00000000-0000-0000-0000-000000000000

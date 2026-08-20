@@ -384,9 +384,10 @@ JOB_WAITING_FOR_AGENT = "waiting_for_agent"
 JOB_RUNNING = "running"
 JOB_DONE = "done"
 JOB_FAILED = "failed"
+JOB_CANCELLED = "cancelled"
 JOB_MISSED = "missed"
 JOB_STATUSES = frozenset(
-    {JOB_QUEUED, JOB_WAITING_FOR_AGENT, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_MISSED}
+    {JOB_QUEUED, JOB_WAITING_FOR_AGENT, JOB_RUNNING, JOB_DONE, JOB_FAILED, JOB_CANCELLED, JOB_MISSED}
 )
 
 EXCLUSION_SCOPE_GLOBAL = "global"
@@ -609,6 +610,41 @@ class Agent(Base):
     network_links: Mapped[list["NetworkAgent"]] = relationship(
         back_populates="agent", cascade="all, delete-orphan"
     )
+    challenges: Mapped[list["AgentChallenge"]] = relationship(
+        back_populates="agent", cascade="all, delete-orphan"
+    )
+
+
+class AgentChallenge(Base):
+    __tablename__ = "agent_challenges"
+    __table_args__ = (
+        UniqueConstraint("nonce", name="uq_agent_challenges_nonce"),
+        Index("ix_agent_challenges_agent_id_expires_at", "agent_id", "expires_at"),
+        Index("ix_agent_challenges_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    nonce: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    source_ip: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    agent: Mapped["Agent"] = relationship(back_populates="challenges")
+
+
+class AuthThrottle(Base):
+    __tablename__ = "auth_throttles"
+    __table_args__ = (UniqueConstraint("scope", "subject", name="uq_auth_throttles_scope_subject"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(40))
+    subject: Mapped[str] = mapped_column(String(255))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    window_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Scan(Base):
@@ -677,6 +713,8 @@ class ScanJob(Base):
     )
     waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     wait_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     runtime_provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     scan: Mapped["Scan"] = relationship(back_populates="jobs")

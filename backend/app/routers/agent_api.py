@@ -4,10 +4,12 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadF
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.agent_challenges import consume_challenge, create_challenge
 from app.alerts import impersonation_alert
 from app.audit import record_audit, request_source_ip
 from app.auth import create_agent_token, decode_token
-from app.crypto_util import new_nonce, public_key_fingerprint, verify_ed25519
+from app.job_control import job_control_payload
+from app.crypto_util import public_key_fingerprint, verify_ed25519
 from app.database import get_db
 from app.finding_lifecycle import FindingLifecycleError, complete_scan_run, store_detector_coverage
 from app.inventory import store_findings, upsert_devices
@@ -29,7 +31,7 @@ from app.scan_dispatch import (
     is_agent_healthy,
     queued_lan_jobs_for_agent,
 )
-from app.scan_execution import require_active_phase1d_run, run_scope
+from app.scan_execution import require_owned_run_for_persist, run_scope
 from app.scan_security import ExecutionBlocked, revalidate_lan_claim
 from app.raw_artifacts import (
     ArtifactError,
@@ -61,7 +63,6 @@ from app.schemas import (
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 bearer = HTTPBearer(auto_error=False)
-_challenges: dict[str, tuple[str, float]] = {}
 
 
 def _now() -> datetime:
@@ -157,13 +158,12 @@ def enroll(body: EnrollIn, request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/challenge")
-def challenge(uuid: str, db: Session = Depends(get_db)):
+def challenge(uuid: str, request: Request, db: Session = Depends(get_db)):
     agent = _get_agent(db, uuid)
     if not agent.public_key:
         raise HTTPException(status_code=400, detail="Agent has not enrolled")
-    nonce = new_nonce()
-    _challenges[uuid] = (nonce, _now().timestamp() + 120)
-    return {"nonce": nonce}
+    row = create_challenge(db, agent, source_ip=_client_ip(request))
+    return {"nonce": row.nonce}
 
 
 @router.post("/token")
@@ -171,9 +171,7 @@ def token(body: AgentTokenIn, request: Request, db: Session = Depends(get_db)):
     agent = _get_agent(db, body.uuid)
     if not agent.public_key:
         raise HTTPException(status_code=400, detail="Agent has not enrolled")
-    stored = _challenges.pop(body.uuid, None)
-    if not stored or stored[0] != body.nonce or stored[1] < _now().timestamp():
-        raise HTTPException(status_code=401, detail="Invalid or expired nonce")
+    consume_challenge(db, agent, body.nonce)
     if not verify_ed25519(agent.public_key, body.nonce, body.signature):
         impersonation_alert(
             db,
@@ -239,8 +237,17 @@ def heartbeat(
                     "reported_at": reported_at.isoformat(),
                 },
             )
+    payload = {"ok": True, "status": agent.status, "cancel_requested": False}
+    if body is not None and body.job_id is not None:
+        job = db.query(ScanJob).filter(ScanJob.id == body.job_id).first()
+        if job is None or job.claimed_by != agent.uuid:
+            payload["cancel_requested"] = True
+        else:
+            control = job_control_payload(job)
+            payload["cancel_requested"] = control["cancel_requested"]
+            payload["deadline_at"] = control.get("deadline_at")
     db.commit()
-    return {"ok": True, "status": agent.status}
+    return payload
 
 
 @router.get("/jobs")
@@ -375,7 +382,7 @@ def complete_job(
     agent: Agent = Depends(current_agent),
     db: Session = Depends(get_db),
 ):
-    job = _owned_job(db, job_id, agent.uuid)
+    job = _owned_job(db, job_id, agent.uuid, completing_ok=ok)
     try:
         apply_raw_evidence_declaration(db, job, ok=ok, declaration=raw_evidence)
         apply_version_provenance_requirement(job, ok=ok)
@@ -393,12 +400,14 @@ def complete_job(
     return {"ok": True, "status": job.status}
 
 
-def _owned_job(db: Session, job_id: int, claimed_by: str) -> ScanJob:
+def _owned_job(db: Session, job_id: int, claimed_by: str, *, completing_ok: bool | None = None) -> ScanJob:
     job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
     try:
-        return require_active_phase1d_run(job, claimed_by=claimed_by)
-    except ExecutionBlocked:
-        raise HTTPException(status_code=409, detail="Job is not an active Phase 1D run") from None
+        if completing_ok is None:
+            return require_owned_run_for_persist(job, claimed_by=claimed_by)
+        return require_owned_run_for_persist(job, claimed_by=claimed_by, completing_ok=completing_ok)
+    except ExecutionBlocked as exc:
+        raise HTTPException(status_code=409, detail=exc.detail or "Job is not an active Phase 1D run") from None
 
 
 @router.post("/jobs/{job_id}/provenance")

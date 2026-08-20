@@ -18,13 +18,13 @@ from sqlalchemy import event, inspect, text
 from sqlalchemy.orm import Session
 
 from tests.conftest import requires_postgres
+from tests.test_migrations import FROZEN_MIGRATION_HASHES, SECURITY_H_HEAD
 from tests.test_phase1d import _client, _create_staff, _headers, _login, _world
-from tests.test_migrations import FROZEN_MIGRATION_HASHES
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE3A_HEAD = "0012_policy_engine"
 PHASE3B_HEAD = "0013_event_alert_engine"
-PHASE3C_HEAD = "0016_scanner_runtime_inventory"
+PHASE3C_HEAD = SECURITY_H_HEAD
 PHASE3A_GIT_BLOB = "a4c0b9c7a204b31db7c042b00d1cd3d91b5b3e9d"
 PHASE3A_SHA256 = "fc539d809f4decf5107fb5e4d88c9aeb50f1131a5154366bca68c0f1bedeefb9"
 

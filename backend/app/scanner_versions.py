@@ -66,7 +66,15 @@ def load_pinned_scanner_versions() -> dict[str, str]:
     data = json.loads(_PINNED_PATH.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("pinned scanner versions must be an object")
-    return {str(key): str(value).strip() for key, value in data.items() if str(value).strip()}
+    pins: dict[str, str] = {}
+    for key in INVENTORY_FIELDS:
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            pins[key] = value.strip()
+    if len(pins) != len(INVENTORY_FIELDS):
+        missing = [key for key in INVENTORY_FIELDS if not pins.get(key)]
+        raise ValueError("missing pinned scanner versions: " + ", ".join(missing))
+    return pins
 
 
 def approved_settings_defaults() -> dict[str, str]:

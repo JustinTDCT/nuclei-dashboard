@@ -11,7 +11,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import JOB_RUNNING, Agent, ScanJob
+from app.job_control import job_cancel_requested
+from app.models import JOB_CANCELLED, JOB_FAILED, JOB_RUNNING, Agent, ScanJob
 from app.scan_exclusions import effective_exclusions, exclusion_networks_from_rows, serialize_exclusions
 from app.scan_security import ExecutionBlocked, pin_fqdn_targets
 from app.scan_snapshot import job_payload_from_snapshot, worker_targets_from_snapshot
@@ -109,6 +110,9 @@ def worker_execution_payload(db: Session, job: ScanJob) -> dict[str, Any]:
     payload["targets"] = pinned
     payload["exclusions"] = combined
     payload["cidrs"] = [row["value"] for row in pinned if row["type"] in {"ip", "cidr"}]
+    if job.deadline_at is not None:
+        payload["deadline_at"] = job.deadline_at.isoformat()
+    payload["cancel_requested"] = job_cancel_requested(job)
     return payload
 
 
@@ -122,3 +126,26 @@ def require_active_phase1d_run(job: ScanJob | None, *, claimed_by: str | None = 
     if not job.execution_snapshot:
         raise ExecutionBlocked("Job is not an active Phase 1D run")
     return job
+
+
+def require_owned_run_for_persist(
+    job: ScanJob | None,
+    *,
+    claimed_by: str | None = None,
+    completing_ok: bool = False,
+) -> ScanJob:
+    if job is None:
+        raise ExecutionBlocked("Job not found")
+    if claimed_by is not None and job.claimed_by != claimed_by:
+        raise ExecutionBlocked("Job not found")
+    if not job.execution_snapshot:
+        raise ExecutionBlocked("Job is not an active Phase 1D run")
+    if completing_ok:
+        if job.status != JOB_RUNNING or job_cancel_requested(job):
+            raise ExecutionBlocked("Cancelled or expired run cannot complete successfully")
+        return job
+    if job.status == JOB_RUNNING:
+        return job
+    if job.status in {JOB_CANCELLED, JOB_FAILED}:
+        return job
+    raise ExecutionBlocked("Job is not an active Phase 1D run")

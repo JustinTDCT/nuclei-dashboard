@@ -2,11 +2,16 @@
 #   curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/JustinTDCT/nuclei-dashboard/main/agent/docker-compose.yml
 #   docker compose --env-file agent.env up -d --build
 #
-# Docker clones scan_runtime from this public repo and builds the image.
-# Rebuild after we push agent changes: docker compose up -d --build
+# Docker clones scan_runtime from an immutable commit pin and builds the image.
+# After Agent/runtime changes land, bump the #commit below, then rebuild:
+#   docker compose up -d --build
 # This image includes an independent heartbeat/control loop. A container
 # restart is not enough after a control-plane change — rebuild the image.
-# Linux sites should keep network_mode: host so LAN subnets are reachable.
+#
+# Privilege / networking: Naabu SYN and host-discovery need raw sockets, and
+# the site LAN is not routed into a Docker bridge. This service therefore
+# uses network_mode: host and runs as root. Do not add privileged: true.
+# The central WAN scanner does not use host networking.
 #
 # TLS verification is on by default. For an internal CA:
 #   mkdir -p agent-certs && cp /path/on/host/ca.pem agent-certs/ca.pem
@@ -19,10 +24,12 @@ services:
     image: nuclei-dashboard-agent:latest
     pull_policy: build
     build:
-      context: https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime
+      context: https://github.com/JustinTDCT/nuclei-dashboard.git#9211fc9f4100f5fbd3b4a42f0c817e83a0103c21:scan_runtime
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
+    security_opt:
+      - no-new-privileges:true
     environment:
       CENTRAL_URL: ${CENTRAL_URL}
       AGENT_UUID: ${AGENT_UUID}

@@ -14,11 +14,14 @@ from typing import Any, Callable
 
 from artifact_io import (
     JsonlParseError,
+    JobControl,
+    ScanCancelled,
     artifact_meta,
     parse_jsonl_file,
     parse_jsonl_text,
     run_command_to_file,
     stream_gzip,
+    use_job_control,
     validate_nuclei_row,
 )
 from classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
@@ -204,7 +207,13 @@ def _unpack_stage(result: Any) -> tuple[list[dict[str, Any]], dict[str, Any] | N
     return result or [], None
 
 
-def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any]:
+def run_pipeline(job: dict[str, Any], log: LogFn | None = None, control: JobControl | None = None) -> dict[str, Any]:
+    active = control or JobControl.from_job(job)
+    with use_job_control(active):
+        return _run_pipeline(job, log=log)
+
+
+def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any]:
     stages = job_stages(job)
     intensity = job_intensity(job)
     targets = resolve_execution_targets(job, log=log)
@@ -323,6 +332,26 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any
         }
     except PipelineError:
         raise
+    except ScanCancelled as exc:
+        used_tools = {str(row.get("tool") or "") for row in artifacts if row.get("tool")}
+        try:
+            provenance = collect_run_provenance(used_tools=used_tools, dry_run=False, log=log)
+        except VersionCollectionError:
+            provenance = collect_runtime_inventory(log=log)
+        if not artifacts:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            staging_out = None
+        else:
+            staging_out = staging_dir
+        raise PipelineError(
+            str(exc),
+            artifacts=artifacts,
+            staging_dir=staging_out,
+            devices=devices,
+            findings=findings,
+            provenance=provenance,
+            detector_coverage=[],
+        ) from exc
     except StageExecutionError as exc:
         if exc.artifact:
             artifacts.append(exc.artifact)
@@ -768,7 +797,7 @@ def _append_gzipped_jsonl(src_gz: Path | None, dest_jsonl: Path | None) -> None:
         return
     dest_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(src_gz, "rb") as incoming, dest_jsonl.open("ab") as outgoing:
-        outgoing.write(incoming.read())
+        shutil.copyfileobj(incoming, outgoing, length=1024 * 1024)
 
 
 def _combined_jsonl_artifact(

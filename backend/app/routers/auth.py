@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.access import VIEWER_EXPIRED_DETAIL, assert_staff_usable, viewer_is_expired
 from app.audit import record_audit, request_source_ip
 from app.auth import create_token, get_current_user, verify_password
+from app.auth_throttle import assert_login_allowed, record_login_failure, record_login_success
 from app.database import get_db
 from app.models import User
 from app.routers.users import serialize_user
@@ -40,20 +41,25 @@ def _login_denied(
 def login(body: LoginIn, request: Request, db: Session = Depends(get_db)):
     source_ip = request_source_ip(request)
     username = (body.username or "").strip()
+    assert_login_allowed(db, username=username, source_ip=source_ip)
     user = db.query(User).filter(User.username == body.username).first()
     if not user:
+        record_login_failure(db, username=username)
         _login_denied(db, actor=None, username=username, reason="invalid_credentials", source_ip=source_ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
+        record_login_failure(db, username=username)
         _login_denied(db, actor=user, username=username, reason="account_inactive", source_ip=source_ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not verify_password(body.password, user.password_hash):
+        record_login_failure(db, username=username)
         _login_denied(db, actor=user, username=username, reason="invalid_credentials", source_ip=source_ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if viewer_is_expired(user):
         _login_denied(db, actor=user, username=username, reason="viewer_expired", source_ip=source_ip)
         raise HTTPException(status_code=401, detail=VIEWER_EXPIRED_DETAIL)
     assert_staff_usable(user)
+    record_login_success(db, username=username)
     record_audit(
         db,
         actor=user,

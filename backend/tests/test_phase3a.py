@@ -11,13 +11,14 @@ from alembic.util import CommandError
 from sqlalchemy import event, inspect, text
 
 from tests.conftest import requires_postgres
+from tests.test_migrations import SECURITY_H_HEAD
 from tests.test_phase1d import _client, _create_staff, _headers, _login, _world
 from tests.test_phase2a import _finding_payload, _run_clean, _run_detected
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE2C_HEAD = "0011_phase2c_treatments_compliance"
 PHASE3A_HEAD = "0012_policy_engine"
-PHASE3B_HEAD = "0016_scanner_runtime_inventory"
+PHASE3B_HEAD = SECURITY_H_HEAD
 PHASE2C_GIT_BLOB = "430857e2a96017a43ffffd164eb78b0ab684918e"
 PHASE2C_SHA256 = "f78ddcd7fb8753ec652ef8377d74758f737394c505012c4786b6b71868fb22d1"
 

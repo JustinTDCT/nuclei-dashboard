@@ -26,7 +26,8 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       PUBLIC_URL: ${PUBLIC_URL:-https://10.150.10.155:8118}
       AGENT_IMAGE: ${AGENT_IMAGE:-nuclei-dashboard-agent:latest}
-      AGENT_GIT_CONTEXT: ${AGENT_GIT_CONTEXT:-https://github.com/JustinTDCT/nuclei-dashboard.git#refs/heads/main:scan_runtime}
+      AGENT_GIT_CONTEXT: ${AGENT_GIT_CONTEXT:-https://github.com/JustinTDCT/nuclei-dashboard.git#9211fc9f4100f5fbd3b4a42f0c817e83a0103c21:scan_runtime}
+      SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       AGENT_TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118}
       NVD_API_KEY: ${NVD_API_KEY:-}
@@ -79,6 +80,10 @@ services:
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
+    # Host networking + root are required for Naabu SYN/host-discovery on the
+    # site LAN. Do not add privileged: true. The WAN scanner stays bridged.
+    security_opt:
+      - no-new-privileges:true
     environment:
       CENTRAL_URL: ${AGENT_CENTRAL_URL:-${PUBLIC_URL:-https://10.150.10.155:8118}}
       AGENT_UUID: ${AGENT_UUID:-}

@@ -3,5 +3,14 @@
   "nuclei_version": "v3.11.1",
   "nuclei_templates_version": "v10.4.7",
   "naabu_version": "v2.6.1",
-  "httpx_version": "v1.10.0"
+  "httpx_version": "v1.10.0",
+  "checksums_sha256": {
+    "nuclei_linux_amd64": "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6",
+    "nuclei_linux_arm64": "8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07",
+    "naabu_linux_amd64": "018c4c9884dea971eda860435ede3021d1150732f34cfd245498c6726d8cab90",
+    "naabu_linux_arm64": "3adc2bb2395c3efff89623499b20eea66ef54924c485d3ae86762393a31736ea",
+    "httpx_linux_amd64": "63eac4dcd6e5c9867c94765fdaaf66e7b4eeae3474a1f06e600e266a1c81a53e",
+    "httpx_linux_arm64": "7f3eaf5a6839504f5e2ce29c3ce94aa2ddeeaa7619d9a497e017232c6dc49b1c",
+    "nuclei_templates": "e1e2b1acf375bb80c558c968f87ea8639de1914cd47099351b54b06afa8643c4"
+  }
 }

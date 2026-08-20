@@ -25,6 +25,7 @@ from app.models import (
     Scan,
     ScanJob,
 )
+from app.job_control import deadline_for_start
 from app.settings_store import get_settings
 
 CENTRAL_WORKER = "central"
@@ -245,6 +246,7 @@ def atomic_claim_central_job(db: Session, job_id: int, *, now: datetime | None =
             status=JOB_RUNNING,
             claimed_by=CENTRAL_WORKER,
             started_at=current,
+            deadline_at=deadline_for_start(db, now=current),
         )
         .returning(ScanJob.id)
     )
@@ -270,6 +272,7 @@ def atomic_claim_job(db: Session, job_id: int, agent: Agent, *, now: datetime | 
             claimed_agent_id=agent.id,
             claimed_by=agent.uuid,
             started_at=current,
+            deadline_at=deadline_for_start(db, now=current),
         )
         .returning(ScanJob.id)
     )

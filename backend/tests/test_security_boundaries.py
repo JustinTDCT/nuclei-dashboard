@@ -283,6 +283,8 @@ def test_smtp_password_is_masked_on_settings_read(reset_db):
         assert kept.json()["smtp_host"] == "mail.example.com"
         assert kept.json()["smtp_password_configured"] is True
         from app.database import SessionLocal
+        from app.models import Setting
+        from app.settings_crypto import is_encrypted_secret
         from app.settings_store import get_settings
 
         db = SessionLocal()
@@ -290,6 +292,9 @@ def test_smtp_password_is_masked_on_settings_read(reset_db):
             stored = get_settings(db)
             assert stored["smtp_password"] == "smtp-super-secret"
             assert "smtp_password_configured" not in stored
+            raw = db.query(Setting).filter(Setting.key == "system").one().value
+            assert is_encrypted_secret(raw["smtp_password"])
+            assert "smtp-super-secret" not in raw["smtp_password"]
         finally:
             db.close()
 

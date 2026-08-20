@@ -1,12 +1,16 @@
 const TOKEN_KEY = "nd_token";
 
+function tokenStore(): Storage {
+  return sessionStorage;
+}
+
 export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return tokenStore().getItem(TOKEN_KEY);
 }
 
 export function setToken(token: string | null) {
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else localStorage.removeItem(TOKEN_KEY);
+  if (token) tokenStore().setItem(TOKEN_KEY, token);
+  else tokenStore().removeItem(TOKEN_KEY);
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {

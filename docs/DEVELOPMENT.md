@@ -17,9 +17,9 @@ alembic history
 alembic revision -m "describe the change"
 ```
 
-Current head revision: `0016_scanner_runtime_inventory` (after frozen `0001_baseline` through `0015_raw_scan_evidence`).
+Current head revision: `0017_security_h6_h8` (after frozen `0001_baseline` through `0016_scanner_runtime_inventory`).
 
-`0001_baseline` through `0015_raw_scan_evidence` are immutable. Do not edit 0015. `0016_scanner_runtime_inventory` is the Candidate Tranche C schema for Agent runtime inventory and remains mutable until independently reviewed.
+`0001_baseline` through `0016_scanner_runtime_inventory` are immutable. Do not edit 0016. `0017_security_h6_h8` adds durable Agent challenges, login/challenge lockouts, and ScanJob deadline/cancel columns.
 
 `alembic downgrade` from `0001_baseline` drops the application schema and **destroys data**. There is no non-destructive downgrade from the baseline.
 
@@ -53,6 +53,8 @@ Current head revision: `0016_scanner_runtime_inventory` (after frozen `0001_base
 
 `alembic downgrade` from `0016_scanner_runtime_inventory` is **refused when any Agent has `runtime_inventory` or `runtime_inventory_reported_at`**. An empty inventory (all NULL) may downgrade to 0015. Downgrade never fabricates or silently destroys recorded version evidence.
 
+`alembic downgrade` from `0017_security_h6_h8` is **refused when `agent_challenges` or `auth_throttles` contain rows, or any ScanJob has `deadline_at` / `cancel_requested_at`**. Empty security-control state may downgrade to 0016.
+
 ## Raw scan evidence
 
 The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`scan_artifacts`). Artifact bytes are gzip JSONL files on a dedicated Docker volume.
@@ -71,7 +73,9 @@ The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`sc
 
 ## Scanner runtime pinning and version inventory
 
-Pinned scanner build inputs live in `scan_runtime/pinned_versions.json`. The API copy `backend/app/pinned_scanner_versions.json` must match that file. Image construction downloads exact Nuclei, Naabu, ProjectDiscovery httpx, and nuclei-templates releases. It does not resolve ProjectDiscovery `releases/latest`, and a missing pin fails the build instead of falling back.
+Pinned scanner build inputs live in `scan_runtime/pinned_versions.json`. The API copy `backend/app/pinned_scanner_versions.json` must match that file. Image construction downloads exact Nuclei, Naabu, ProjectDiscovery httpx, and nuclei-templates releases and SHA-256-verifies each archive against `checksums_sha256`. It does not resolve ProjectDiscovery `releases/latest`. A missing pin or checksum mismatch fails the build instead of falling back.
+
+Generated Agent compose must use an immutable `AGENT_GIT_CONTEXT` commit or `refs/tags/...` pin. `refs/heads/main` is rejected. After merging Agent/runtime changes, bump the pin to that commit. LAN Agents keep `network_mode: host` and root because Naabu SYN/host-discovery needs raw sockets and site LAN reachability; do not add `privileged: true`. The WAN scanner stays on the Docker bridge. `security_opt: no-new-privileges:true` is required on generated LAN Agents.
 
 The scanner runtime release ID (`runtime_version`) is a scanner-image identifier, not the overall application version. Ordinary Nuclei scans pass `-duc` so template releases do not change during a job. Fresh images bake templates under `/opt/nuclei-templates`. Existing `nuclei-templates` volumes are not deleted or rewritten by this upgrade; they may show mismatch until an operator rebuilds/redeploys the agent image.
 
@@ -144,14 +148,22 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Frontend typecheck and production build:
+Frontend typecheck, lint, focused tests, and production build:
 
 ```bash
 cd frontend
 npm ci
-npx tsc --noEmit
+npm run typecheck
+npm run lint
+npm run test
 npm run build
 ```
+
+Staff bearer tokens are stored in `sessionStorage` so they do not survive a browser restart. They remain XSS-readable in page JavaScript; httpOnly cookies are a later control-plane change. MFA remains deferred.
+
+Set `SETTINGS_ENCRYPTION_KEY` before storing an SMTP password. The API encrypts the password at rest inside `Setting.value` and still masks it on read. A blank save keeps the existing secret.
+
+GitHub Actions runs backend pytest plus the frontend typecheck/lint/test/build. Protect `main` so those checks are required before merge. That protection is a repository setting, not application code.
 
 Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or use `TEST_DATABASE_URL` if you set it.
 

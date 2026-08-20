@@ -38,6 +38,7 @@ from app.models import (
     HISTORY_REOPENED,
     HISTORY_RESOLVED,
     HOST_COVERAGE_KINDS,
+    JOB_CANCELLED,
     JOB_DONE,
     JOB_FAILED,
     SOURCE_SCANNER,
@@ -1278,14 +1279,27 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
     db.flush()
 
 
+def _is_cancel_completion(job: ScanJob, error: str | None) -> bool:
+    if job.cancel_requested_at is not None:
+        return True
+    text = (error or "").lower()
+    return "scan cancelled" in text or "scan deadline exceeded" in text or "timed out after" in text
+
+
 def complete_scan_run(db: Session, job: ScanJob, *, ok: bool, error: str | None = None) -> ScanJob:
     finished = utcnow()
     if not ok:
-        from app.jobs import transition_job_to_failed
+        from app.jobs import transition_job_to_cancelled, transition_job_to_failed
 
-        transition_job_to_failed(db, job, error or "scan failed")
+        detail = error or "scan failed"
+        if _is_cancel_completion(job, detail):
+            transition_job_to_cancelled(db, job, detail)
+        else:
+            transition_job_to_failed(db, job, detail)
         job.finished_at = finished
         return job
+    if job.cancel_requested_at is not None or job.status == JOB_CANCELLED:
+        raise FindingLifecycleError("Cancelled or expired run cannot complete successfully")
     if not job.execution_snapshot:
         raise FindingLifecycleError("Successful completion requires an immutable execution snapshot")
     job.finished_at = finished

@@ -1,20 +1,30 @@
+from app.agent_source import assert_immutable_agent_git_context, assert_immutable_agent_image
 from app.config import settings
 from app.models import Agent
 
 
 def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -> str:
+    git_context = assert_immutable_agent_git_context(settings.agent_git_context)
+    image = assert_immutable_agent_image(settings.agent_image)
     secret_line = ""
     if include_secret and agent.enrollment_secret:
         secret_line = f"      ENROLLMENT_SECRET: {agent.enrollment_secret}\n"
     return f"""# Site agent for {agent.name} ({agent.uuid})
 # On the LAN host (outbound HTTPS to GitHub and {central_url}):
 #   docker compose --env-file agent.env up -d --build
-# Docker clones scan_runtime from the public repo and builds the image.
-# Scanner tool versions are pinned in scan_runtime/pinned_versions.json at image build.
-# After we push agent changes: docker compose up -d --build
+# Docker clones scan_runtime from an immutable commit/tag pin and builds the image.
+# Scanner tool versions and SHA-256 checksums are pinned in scan_runtime/pinned_versions.json.
+# After we push agent changes: bump AGENT_GIT_CONTEXT to that commit, then:
+#   docker compose up -d --build
 # This image includes an independent heartbeat/control loop. Rebuild after
 # control-plane changes; a container restart is not enough.
-# Linux sites should keep network_mode: host so LAN subnets are reachable.
+#
+# Privilege / networking (constrained, not removed):
+# Naabu SYN and host-discovery use raw sockets. The LAN Agent therefore runs
+# as root with network_mode: host so site RFC1918 subnets are reachable and
+# raw sockets work. Do not add privileged: true. The WAN scanner stays on the
+# Docker bridge and does not use host networking. security_opt no-new-privileges
+# blocks further privilege escalation after start.
 #
 # TLS verification is on by default (TLS_VERIFY=1).
 # Publicly trusted certificates: no extra files.
@@ -25,13 +35,15 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
 
 services:
   nuclei-agent:
-    image: {settings.agent_image}
+    image: {image}
     pull_policy: build
     build:
-      context: {settings.agent_git_context}
+      context: {git_context}
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
+    security_opt:
+      - no-new-privileges:true
     environment:
       CENTRAL_URL: {central_url}
       AGENT_UUID: {agent.uuid}

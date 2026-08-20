@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import Setting
 from app.schemas import SettingsOut
+from app.settings_crypto import SettingsCryptoError, decrypt_secret, encrypt_secret, encryption_key_configured, is_encrypted_secret
 from app.timezones import FALLBACK_TIMEZONE, coerce_timezone
 
 DEFAULTS = SettingsOut().model_dump()
@@ -30,6 +31,9 @@ def get_settings(db: Session) -> dict:
             data["central_port"] = 80
         data["central_tls"] = parsed.scheme != "http"
     data["default_timezone"] = coerce_timezone(data.get("default_timezone") or FALLBACK_TIMEZONE)
+    stored_password = data.get("smtp_password") or ""
+    if stored_password:
+        data["smtp_password"] = decrypt_secret(stored_password)
     return data
 
 
@@ -55,8 +59,19 @@ def save_settings(db: Session, values: dict) -> dict:
     data = get_settings(db)
     incoming = {key: value for key, value in values.items() if key not in _SETTINGS_RESPONSE_ONLY}
     incoming_password = incoming.get("smtp_password")
+    row = db.query(Setting).filter(Setting.key == "system").first()
+    raw_password = ""
+    if row and isinstance(row.value, dict):
+        raw_password = row.value.get("smtp_password") or ""
     if incoming_password in (None, "", SMTP_PASSWORD_MASK):
-        incoming["smtp_password"] = data.get("smtp_password") or ""
+        keep = raw_password
+        if keep and not is_encrypted_secret(keep) and encryption_key_configured():
+            keep = encrypt_secret(decrypt_secret(keep))
+        incoming["smtp_password"] = keep
+    else:
+        if not encryption_key_configured():
+            raise SettingsCryptoError("SETTINGS_ENCRYPTION_KEY is required to store an SMTP password")
+        incoming["smtp_password"] = encrypt_secret(incoming_password)
     data.update(incoming)
     for key in _SETTINGS_RESPONSE_ONLY:
         data.pop(key, None)

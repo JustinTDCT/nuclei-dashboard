@@ -121,7 +121,7 @@ def test_control_loop_heartbeats_while_one_job_runs():
                 return [{"job_id": 7}]
             return []
 
-    def fake_run_job(client, token, job, refresh_token):
+    def fake_run_job(client, token, job, refresh_token, cancel_event=None):
         time.sleep(0.7)
 
     runtime = agent_main.AgentRuntime(
