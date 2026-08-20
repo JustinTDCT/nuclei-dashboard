@@ -12,7 +12,7 @@ import re
 import subprocess
 from collections.abc import Callable
 
-PINNED_AGENT_GIT_COMMIT = "9211fc9f4100f5fbd3b4a42f0c817e83a0103c21"
+PINNED_AGENT_GIT_COMMIT = "71db1c129fd31977c1f8e06fe4144e84596ece4c"
 DEFAULT_AGENT_GIT_CONTEXT = (
     f"https://github.com/JustinTDCT/nuclei-dashboard.git#{PINNED_AGENT_GIT_COMMIT}:scan_runtime"
 )
