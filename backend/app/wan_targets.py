@@ -87,7 +87,7 @@ def assert_wan_target_policy(target_type: str, normalized: str) -> None:
 
 
 def assert_wan_address_policy(address: ipaddress._BaseAddress) -> None:
-    if _ipv4_mapped_address(address) is not None:
+    if _is_ipv4_mapped_address(address):
         raise WanTargetInvalidError("WAN targets cannot use IPv4-mapped IPv6 addresses")
     if _prohibited_address(address):
         raise WanTargetInvalidError("WAN targets cannot resolve to private, loopback, link-local, multicast, or reserved addresses")
@@ -99,11 +99,19 @@ def _assert_wan_fqdn_policy(normalized: str) -> None:
         raise WanTargetInvalidError("WAN FQDN targets cannot use localhost, mDNS, or cloud-metadata names")
 
 
+def _is_ipv4_mapped_address(address: ipaddress._BaseAddress) -> bool:
+    if address.version != 6:
+        return False
+    return address in IPV4_MAPPED_NETWORK or address in IPV4_COMPATIBLE_NETWORK
+
+
 def _ipv4_mapped_address(address: ipaddress._BaseAddress) -> ipaddress.IPv4Address | None:
+    if not _is_ipv4_mapped_address(address):
+        return None
     mapped = getattr(address, "ipv4_mapped", None)
     if mapped is not None:
         return mapped
-    return getattr(address, "ipv4_compatible", None)
+    return ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
 
 
 def _is_ipv4_mapped_network(network: ipaddress._BaseNetwork) -> bool:

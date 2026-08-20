@@ -114,6 +114,21 @@ def test_wan_target_policy_rejects_unsafe_scope():
     assert_wan_target_policy("cidr", "2001:db8::/112")
 
 
+def test_resolved_ipv4_compatible_address_is_rejected():
+    import ipaddress
+
+    from app.wan_targets import WanTargetInvalidError, assert_wan_address_policy
+
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_address_policy(ipaddress.ip_address("::8.8.8.8"))
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_address_policy(ipaddress.ip_address("::ffff:8.8.8.8"))
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_address_policy(ipaddress.ip_address("::ffff:10.0.0.1"))
+    assert_wan_address_policy(ipaddress.ip_address("203.0.113.25"))
+    assert_wan_address_policy(ipaddress.ip_address("2001:db8::1"))
+
+
 def test_request_source_ip_uses_rightmost_forwarded_hop():
     from app.audit import request_source_ip
 

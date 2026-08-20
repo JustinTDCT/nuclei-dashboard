@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import shutil
@@ -467,16 +468,35 @@ def _exclusion_hosts(job: dict[str, Any]) -> list[str]:
     return hosts
 
 
+def _fqdns_for_ip(targets: list[dict[str, str]]) -> dict[str, list[str]]:
+    by_ip: dict[str, list[str]] = defaultdict(list)
+    for row in targets:
+        fqdn = str(row.get("source_fqdn") or "").strip()
+        value = str(row.get("value") or "").strip()
+        if not fqdn or not value or fqdn in by_ip[value]:
+            continue
+        by_ip[value].append(fqdn)
+    return by_ip
+
+
 def _apply_source_fqdns(hosts: list[dict[str, Any]], targets: list[dict[str, str]]) -> None:
-    by_ip = {
-        row["value"]: row["source_fqdn"]
-        for row in targets
-        if row.get("source_fqdn") and row.get("value")
-    }
+    """Attach authorized FQDNs to discovered IPs, fanning one IP out to every vhost."""
+    by_ip = _fqdns_for_ip(targets)
+    expanded: list[dict[str, Any]] = []
     for host in hosts:
-        fqdn = host.get("source_fqdn") or by_ip.get(host.get("ip") or "")
-        if fqdn:
-            host["source_fqdn"] = fqdn
+        existing = str(host.get("source_fqdn") or "").strip()
+        if existing:
+            expanded.append(host)
+            continue
+        fqdns = by_ip.get(str(host.get("ip") or ""), [])
+        if not fqdns:
+            expanded.append(host)
+            continue
+        for fqdn in fqdns:
+            row = dict(host)
+            row["source_fqdn"] = fqdn
+            expanded.append(row)
+    hosts[:] = expanded
 
 
 def _probe_line(ip: str, port: Any = None) -> str:
@@ -738,6 +758,42 @@ def run_httpx(
     return combined, artifact
 
 
+def _artifact_gz_path(artifact: dict[str, Any] | None) -> Path | None:
+    path = Path(str(artifact.get("path") or "")) if artifact else None
+    return path if path and path.exists() else None
+
+
+def _append_gzipped_jsonl(src_gz: Path | None, dest_jsonl: Path | None) -> None:
+    if dest_jsonl is None or src_gz is None or not src_gz.exists():
+        return
+    dest_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(src_gz, "rb") as incoming, dest_jsonl.open("ab") as outgoing:
+        outgoing.write(incoming.read())
+
+
+def _combined_jsonl_artifact(
+    staging_dir: Path,
+    *,
+    artifact_key: str,
+    stage: str,
+    tool: str,
+    raw_path: Path,
+    part_key: str,
+) -> dict[str, Any] | None:
+    part_gz = staging_dir / f"{part_key}.jsonl.gz"
+    part_raw = staging_dir / f"{part_key}.jsonl"
+    if not raw_path.exists():
+        part_gz.unlink(missing_ok=True)
+        part_raw.unlink(missing_ok=True)
+        return None
+    gz_path = staging_dir / f"{artifact_key}.jsonl.gz"
+    stream_gzip(raw_path, gz_path)
+    raw_path.unlink(missing_ok=True)
+    part_gz.unlink(missing_ok=True)
+    part_raw.unlink(missing_ok=True)
+    return artifact_meta(artifact_key=artifact_key, stage=stage, tool=tool, gz_path=gz_path)
+
+
 def run_nuclei(
     targets: list[Any],
     severities: str,
@@ -764,32 +820,34 @@ def run_nuclei(
         return [], None
     grouped = _group_by_sni(normalized)
     all_rows: list[dict[str, Any]] = []
-    artifact = None
     last_error: StageExecutionError | None = None
-    for sni, group in grouped.items():
-        with tempfile.NamedTemporaryFile("w", delete=False) as handle:
-            handle.write("\n".join(item["value"] for item in group) + "\n")
-            path = handle.name
-        try:
-            cmd = build_nuclei_command(
-                binary,
-                path,
-                severities=severities,
-                tags=tags,
-                intensity=intensity,
-                sni=sni or None,
-            )
-            if staging_dir is None:
-                text = _run(cmd, log)
-                rows = _parse_jsonl(text, strict=True)
-                for raw in rows:
-                    validate_nuclei_row(raw)
-            else:
+    raw_path = (staging_dir / "vulnerability.nuclei.jsonl") if staging_dir is not None else None
+    try:
+        for sni, group in grouped.items():
+            with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+                handle.write("\n".join(item["value"] for item in group) + "\n")
+                path = handle.name
+            try:
+                cmd = build_nuclei_command(
+                    binary,
+                    path,
+                    severities=severities,
+                    tags=tags,
+                    intensity=intensity,
+                    sni=sni or None,
+                )
+                if staging_dir is None:
+                    text = _run(cmd, log)
+                    rows = _parse_jsonl(text, strict=True)
+                    for raw in rows:
+                        validate_nuclei_row(raw)
+                    all_rows.extend(rows)
+                    continue
                 try:
-                    rows, artifact = _execute_stage(
+                    rows, part = _execute_stage(
                         cmd,
                         staging_dir,
-                        artifact_key="vulnerability.nuclei",
+                        artifact_key="vulnerability.nuclei.part",
                         stage="vulnerability",
                         tool="nuclei",
                         log=log,
@@ -798,20 +856,35 @@ def run_nuclei(
                     )
                     for raw in rows:
                         validate_nuclei_row(raw)
+                    _append_gzipped_jsonl(_artifact_gz_path(part), raw_path)
+                    all_rows.extend(rows)
                 except StageExecutionError as exc:
-                    last_error = StageExecutionError(
-                        str(exc),
-                        findings=_nuclei_findings(exc.rows),
-                        artifact=exc.artifact,
-                    )
+                    _append_gzipped_jsonl(_artifact_gz_path(exc.artifact), raw_path)
+                    all_rows.extend(exc.rows)
+                    last_error = StageExecutionError(str(exc))
                     continue
-        except JsonlParseError as exc:
-            raise StageExecutionError(str(exc), findings=[], artifact=artifact) from exc
-        finally:
-            Path(path).unlink(missing_ok=True)
-        all_rows.extend(rows)
+                except JsonlParseError as exc:
+                    _append_gzipped_jsonl(_artifact_gz_path(part), raw_path)
+                    last_error = StageExecutionError(str(exc))
+                    continue
+            except JsonlParseError as exc:
+                raise StageExecutionError(str(exc), findings=[]) from exc
+            finally:
+                Path(path).unlink(missing_ok=True)
+    finally:
+        artifact = None
+        if staging_dir is not None and raw_path is not None:
+            artifact = _combined_jsonl_artifact(
+                staging_dir,
+                artifact_key="vulnerability.nuclei",
+                stage="vulnerability",
+                tool="nuclei",
+                raw_path=raw_path,
+                part_key="vulnerability.nuclei.part",
+            )
     if last_error is not None:
-        last_error.findings = _nuclei_findings(all_rows) + last_error.findings
+        last_error.findings = _nuclei_findings(all_rows)
+        last_error.artifact = artifact
         raise last_error
     return _nuclei_findings(all_rows), artifact
 

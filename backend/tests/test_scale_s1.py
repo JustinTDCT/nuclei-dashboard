@@ -283,6 +283,171 @@ def test_nuclei_presents_source_fqdn_as_sni_while_connecting_to_pinned_ip(tmp_pa
     assert "Host: portal.customer.com" in cmd
 
 
+def test_shared_ip_fans_out_each_authorized_fqdn():
+    import runner as runtime_runner
+
+    hosts = [{"ip": "203.0.113.25", "port": 443}]
+    runtime_runner._apply_source_fqdns(
+        hosts,
+        [
+            {"type": "ip", "value": "203.0.113.25", "source_fqdn": "portal.customer.com"},
+            {"type": "ip", "value": "203.0.113.25", "source_fqdn": "admin.customer.com"},
+        ],
+    )
+    assert [(row["ip"], row["port"], row["source_fqdn"]) for row in hosts] == [
+        ("203.0.113.25", 443, "portal.customer.com"),
+        ("203.0.113.25", 443, "admin.customer.com"),
+    ]
+
+
+def test_shared_ip_virtual_hosts_are_scanned_separately(tmp_path, monkeypatch):
+    import runner as runtime_runner
+
+    captured: list[dict[str, str]] = []
+
+    def fake_run(cmd, dest, log=None):
+        sni = cmd[cmd.index("-sni") + 1]
+        captured.append({"sni": sni, "targets": Path(cmd[cmd.index("-l") + 1]).read_text(encoding="utf-8")})
+        dest.write_text(
+            json.dumps(
+                {
+                    "template-id": sni,
+                    "host": f"https://{sni}",
+                    "info": {"name": "x", "severity": "high"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(runtime_runner, "run_command_to_file", fake_run)
+    monkeypatch.setattr(runtime_runner, "_which", lambda name: "/bin/nuclei")
+    findings, artifact = runtime_runner.run_nuclei(
+        [
+            {"value": "https://203.0.113.25", "source_fqdn": "portal.customer.com"},
+            {"value": "https://203.0.113.25", "source_fqdn": "admin.customer.com"},
+        ],
+        "critical",
+        "",
+        staging_dir=tmp_path,
+    )
+    assert {row["sni"] for row in captured} == {"portal.customer.com", "admin.customer.com"}
+    assert all("203.0.113.25" in row["targets"] and "customer.com" not in row["targets"] for row in captured)
+    assert {row["template_id"] for row in findings} == {"portal.customer.com", "admin.customer.com"}
+    assert artifact is not None
+    assert artifact["artifact_key"] == "vulnerability.nuclei"
+    import gzip
+
+    raw = gzip.open(artifact["path"], "rt", encoding="utf-8").read()
+    assert "portal.customer.com" in raw
+    assert "admin.customer.com" in raw
+    assert raw.count("\n") == 2
+
+
+def test_nuclei_keeps_every_sni_group_in_combined_artifact_on_partial_failure(tmp_path, monkeypatch):
+    import gzip
+
+    import runner as runtime_runner
+
+    def fake_run(cmd, dest, log=None):
+        sni = cmd[cmd.index("-sni") + 1]
+        dest.write_text(
+            json.dumps(
+                {
+                    "template-id": sni,
+                    "host": f"https://{sni}",
+                    "info": {"name": "x", "severity": "high"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if sni == "admin.customer.com":
+            raise RuntimeError("nuclei crashed (exit 1)")
+
+    monkeypatch.setattr(runtime_runner, "run_command_to_file", fake_run)
+    monkeypatch.setattr(runtime_runner, "_which", lambda name: "/bin/nuclei")
+    with pytest.raises(runtime_runner.StageExecutionError) as exc:
+        runtime_runner.run_nuclei(
+            [
+                {"value": "https://203.0.113.25", "source_fqdn": "portal.customer.com"},
+                {"value": "https://203.0.113.25", "source_fqdn": "admin.customer.com"},
+            ],
+            "critical",
+            "",
+            staging_dir=tmp_path,
+        )
+    assert {row["template_id"] for row in exc.value.findings} == {
+        "portal.customer.com",
+        "admin.customer.com",
+    }
+    assert exc.value.artifact is not None
+    assert exc.value.artifact["artifact_key"] == "vulnerability.nuclei"
+    raw = gzip.open(exc.value.artifact["path"], "rt", encoding="utf-8").read()
+    assert "portal.customer.com" in raw
+    assert "admin.customer.com" in raw
+
+
+def test_pipeline_fans_shared_ip_into_each_virtual_host(monkeypatch):
+    import runner as runtime_runner
+
+    captured: dict[str, list] = {}
+
+    def fake_httpx(hosts, **_kwargs):
+        captured["httpx"] = [dict(row) for row in hosts]
+        return (
+            [
+                {"url": f"https://{row['ip']}", "source_fqdn": row.get("source_fqdn") or ""}
+                for row in hosts
+            ],
+            None,
+        )
+
+    def fake_nuclei(targets, **_kwargs):
+        captured["nuclei"] = list(targets)
+        return [], None
+
+    monkeypatch.setattr(
+        runtime_runner,
+        "run_naabu",
+        lambda *args, **kwargs: ([{"ip": "203.0.113.25", "port": 443}], None),
+    )
+    monkeypatch.setattr(runtime_runner, "run_httpx", fake_httpx)
+    monkeypatch.setattr(runtime_runner, "run_nuclei", fake_nuclei)
+    monkeypatch.setattr(runtime_runner, "collect_run_provenance", lambda **kwargs: {"runtime_version": "test"})
+    result = runtime_runner.run_pipeline(
+        {
+            "scope": "wan",
+            "targets": [
+                {"type": "ip", "value": "203.0.113.25", "source_fqdn": "portal.customer.com"},
+                {"type": "ip", "value": "203.0.113.25", "source_fqdn": "admin.customer.com"},
+            ],
+            "stages": {
+                "discovery": False,
+                "port_mode": "common",
+                "fingerprint": True,
+                "vulnerability": True,
+                "nuclei_severities": "critical",
+                "nuclei_tags": "",
+            },
+            "intensity": {},
+            "exclusions": [],
+        }
+    )
+    assert {row["source_fqdn"] for row in captured["httpx"]} == {
+        "portal.customer.com",
+        "admin.customer.com",
+    }
+    assert {row["source_fqdn"] for row in captured["nuclei"]} == {
+        "portal.customer.com",
+        "admin.customer.com",
+    }
+    assert set(result["detector_coverage"][0]["targets"]) == {
+        "https://portal.customer.com",
+        "https://admin.customer.com",
+    }
+
+
 def test_failed_nuclei_retains_valid_positive_rows_without_coverage(tmp_path, monkeypatch):
     import runner as runtime_runner
 
