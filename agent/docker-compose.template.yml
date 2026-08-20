@@ -1,7 +1,7 @@
 # Reference only. Prefer agent/docker-compose.yml plus a downloaded .env,
 # or the per-agent compose file from the dashboard.
 # Rebuild the image after control-plane changes. Pin the git context to a
-# commit or tag — not refs/heads/main.
+# 40-character commit — not a branch or an unresolved tag.
 
 services:
   nuclei-agent:
@@ -12,6 +12,11 @@ services:
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
     security_opt:
       - no-new-privileges:true
     environment:
@@ -21,9 +26,10 @@ services:
       TLS_VERIFY: "1"
       TLS_CA_FILE: ${TLS_CA_FILE:-}
       SCAN_DRY_RUN: "0"
+      HOME: /home/scanner
     volumes:
       - agent-keys:/data
-      - nuclei-templates:/root/nuclei-templates
+      - nuclei-templates:/home/scanner/nuclei-templates
       - ${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro
 
 volumes:

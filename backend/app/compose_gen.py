@@ -12,19 +12,20 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
     return f"""# Site agent for {agent.name} ({agent.uuid})
 # On the LAN host (outbound HTTPS to GitHub and {central_url}):
 #   docker compose --env-file agent.env up -d --build
-# Docker clones scan_runtime from an immutable commit/tag pin and builds the image.
+# Docker clones scan_runtime from an immutable 40-character commit and builds the image.
 # Scanner tool versions and SHA-256 checksums are pinned in scan_runtime/pinned_versions.json.
 # After we push agent changes: bump AGENT_GIT_CONTEXT to that commit, then:
 #   docker compose up -d --build
 # This image includes an independent heartbeat/control loop. Rebuild after
 # control-plane changes; a container restart is not enough.
 #
-# Privilege / networking (constrained, not removed):
-# Naabu SYN and host-discovery use raw sockets. The LAN Agent therefore runs
-# as root with network_mode: host so site RFC1918 subnets are reachable and
-# raw sockets work. Do not add privileged: true. The WAN scanner stays on the
-# Docker bridge and does not use host networking. security_opt no-new-privileges
-# blocks further privilege escalation after start.
+# Privilege / networking:
+# network_mode: host is required so site RFC1918 subnets are reachable.
+# The process runs as uid 1000. Capabilities are dropped and only NET_RAW is
+# added because Naabu SYN and host-discovery need raw sockets. Do not add
+# privileged: true. The WAN scanner stays on the Docker bridge with the same
+# user/capability set. security_opt no-new-privileges blocks further
+# privilege escalation after start.
 #
 # TLS verification is on by default (TLS_VERIFY=1).
 # Publicly trusted certificates: no extra files.
@@ -42,6 +43,11 @@ services:
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
     security_opt:
       - no-new-privileges:true
     environment:
@@ -50,9 +56,10 @@ services:
 {secret_line}      TLS_VERIFY: "${{TLS_VERIFY:-1}}"
       TLS_CA_FILE: ${{TLS_CA_FILE:-}}
       SCAN_DRY_RUN: "0"
+      HOME: /home/scanner
     volumes:
       - agent-keys:/data
-      - nuclei-templates:/root/nuclei-templates
+      - nuclei-templates:/home/scanner/nuclei-templates
       - ${{TLS_CA_HOST_DIR:-./agent-certs}}:/certs:ro
 
 volumes:

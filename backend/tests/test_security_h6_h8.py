@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tests.conftest import requires_postgres
+from tests.conftest import TEST_SETTINGS_ENCRYPTION_KEY, requires_postgres
 from tests.test_phase1d import _agent_headers, _client, _headers, _lan_scan, _login, _world
 from tests.test_security_boundaries import REPO_ROOT
 
@@ -35,6 +35,12 @@ def test_mutable_agent_git_context_is_rejected():
         "https://github.com/JustinTDCT/nuclei-dashboard.git#9211fc9f4100f5fbd3b4a42f0c817e83a0103c21:scan_runtime"
     )
     assert "9211fc9f4100f5fbd3b4a42f0c817e83a0103c21" in pinned
+    resolved = assert_immutable_agent_git_context(
+        "https://github.com/JustinTDCT/nuclei-dashboard.git#refs/tags/v1.0.0:scan_runtime",
+        resolve_ref=lambda _repo, _ref: "e35ed6f1957808a99d859a123f5ca3d91a326e1d",
+    )
+    assert resolved.endswith("#e35ed6f1957808a99d859a123f5ca3d91a326e1d:scan_runtime")
+    assert "refs/tags" not in resolved
 
 
 def test_generated_agent_compose_is_immutably_pinned(monkeypatch):
@@ -57,13 +63,23 @@ def test_generated_agent_compose_is_immutably_pinned(monkeypatch):
     assert "9211fc9f4100f5fbd3b4a42f0c817e83a0103c21" in compose
     assert "no-new-privileges:true" in compose
     assert "network_mode: host" in compose
+    assert 'user: "1000:1000"' in compose
+    assert "cap_drop:" in compose
+    assert "NET_RAW" in compose
     assert "\n    privileged:" not in compose
+    assert "refs/tags/" not in compose
     root = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     agent_file = (REPO_ROOT / "agent" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "refs/heads/main" not in root
     assert "refs/heads/main" not in agent_file
     assert "9211fc9f4100f5fbd3b4a42f0c817e83a0103c21" in root
     assert "9211fc9f4100f5fbd3b4a42f0c817e83a0103c21" in agent_file
+    dockerfile = (RUNTIME_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "USER 1000:1000" in dockerfile
+    assert "user: \"1000:1000\"" in root
+    assert "NET_RAW" in root
+    assert "user: \"1000:1000\"" in agent_file
+    assert "NET_RAW" in agent_file
 
 
 def test_checksum_mismatch_fails_closed(tmp_path):
@@ -161,6 +177,51 @@ def test_login_lockout_after_repeated_failures(reset_db, monkeypatch):
         assert third.status_code == 429
         blocked = client.post("/api/auth/login", json={"username": "admin", "password": "test-admin-pass"})
         assert blocked.status_code == 429
+
+
+@requires_postgres
+def test_login_ip_throttle_is_atomic_under_concurrency(reset_db, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from fastapi import HTTPException
+
+    from app.auth_throttle import assert_login_allowed
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.models import AuthThrottle
+
+    monkeypatch.setattr(settings, "login_ip_limit", 5)
+    monkeypatch.setattr(settings, "login_ip_window_seconds", 900)
+    monkeypatch.setattr(settings, "login_lockout_seconds", 600)
+    monkeypatch.setattr(settings, "login_failure_limit", 100)
+    with _client():
+        pass
+
+    def _attempt() -> str:
+        db = SessionLocal()
+        try:
+            assert_login_allowed(db, username="admin", source_ip="203.0.113.88")
+            return "ok"
+        except HTTPException as exc:
+            return str(exc.status_code)
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        results = list(pool.map(lambda _: _attempt(), range(20)))
+    assert results.count("ok") <= 5
+    assert results.count("429") >= 15
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(AuthThrottle)
+            .filter(AuthThrottle.scope == "login_ip", AuthThrottle.subject == "203.0.113.88")
+            .one()
+        )
+        assert row.attempt_count >= 6
+        assert row.locked_until is not None
+    finally:
+        db.close()
 
 
 @requires_postgres
@@ -321,3 +382,70 @@ def test_smtp_password_requires_encryption_key(reset_db, monkeypatch):
                 save_settings(db, {"smtp_password": "another-secret"})
         finally:
             db.close()
+
+
+def test_settings_encryption_key_must_be_fernet_and_distinct():
+    from app.settings_crypto import SettingsCryptoError, encrypt_secret, is_valid_fernet_key
+    from app.startup_security import InsecureConfigurationError, validate_runtime_secrets
+
+    assert is_valid_fernet_key(TEST_SETTINGS_ENCRYPTION_KEY)
+    assert not is_valid_fernet_key("password1")
+    with pytest.raises(SettingsCryptoError, match="Fernet"):
+        encrypt_secret("smtp-secret", key="password1")
+    reused = TEST_SETTINGS_ENCRYPTION_KEY
+    cfg = type("Cfg", (), {})()
+    cfg.database_url = "postgresql://nuclei:other-db-pass@localhost:5432/nuclei"
+    cfg.secret_key = reused
+    cfg.scanner_token = "phase0-test-scanner-token-not-for-production"
+    cfg.admin_password = "bootstrap-admin-1"
+    cfg.settings_encryption_key = reused
+    with pytest.raises(InsecureConfigurationError, match="must be distinct"):
+        validate_runtime_secrets(cfg)
+    cfg.secret_key = "phase0-test-secret-not-for-production"
+    cfg.settings_encryption_key = "password1"
+    with pytest.raises(InsecureConfigurationError, match="Fernet"):
+        validate_runtime_secrets(cfg)
+
+
+@requires_postgres
+def test_smtp_password_startup_migrates_plaintext_and_refuses_wrong_key(reset_db, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.models import Setting
+    from app.settings_crypto import encrypt_secret, is_encrypted_secret
+    from app.settings_store import validate_and_migrate_smtp_password
+    from app.startup_security import InsecureConfigurationError
+
+    with _client():
+        pass
+    db = SessionLocal()
+    try:
+        row = db.query(Setting).filter(Setting.key == "system").first()
+        if row is None:
+            db.add(Setting(key="system", value={"smtp_password": "legacy-plaintext"}))
+        else:
+            value = dict(row.value or {})
+            value["smtp_password"] = "legacy-plaintext"
+            row.value = value
+        db.commit()
+        monkeypatch.setattr(settings, "settings_encryption_key", "")
+        with pytest.raises(InsecureConfigurationError, match="SMTP password is stored"):
+            validate_and_migrate_smtp_password(db)
+        monkeypatch.setattr(
+            settings, "settings_encryption_key", TEST_SETTINGS_ENCRYPTION_KEY
+        )
+        validate_and_migrate_smtp_password(db)
+        stored = db.query(Setting).filter(Setting.key == "system").one().value["smtp_password"]
+        assert is_encrypted_secret(stored)
+        assert "legacy-plaintext" not in stored
+        other = Fernet.generate_key().decode()
+        monkeypatch.setattr(settings, "settings_encryption_key", other)
+        with pytest.raises(InsecureConfigurationError, match="could not be decrypted"):
+            validate_and_migrate_smtp_password(db)
+        monkeypatch.setattr(settings, "settings_encryption_key", "")
+        with pytest.raises(InsecureConfigurationError, match="SMTP password is stored"):
+            validate_and_migrate_smtp_password(db)
+    finally:
+        db.close()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -24,17 +25,18 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _row(db: Session, scope: str, subject: str) -> AuthThrottle:
-    row = (
+def _locked_row(db: Session, scope: str, subject: str) -> AuthThrottle:
+    db.execute(
+        insert(AuthThrottle)
+        .values(scope=scope, subject=subject, attempt_count=0)
+        .on_conflict_do_nothing(constraint="uq_auth_throttles_scope_subject")
+    )
+    return (
         db.query(AuthThrottle)
         .filter(AuthThrottle.scope == scope, AuthThrottle.subject == subject)
-        .first()
+        .with_for_update()
+        .one()
     )
-    if row is None:
-        row = AuthThrottle(scope=scope, subject=subject, attempt_count=0)
-        db.add(row)
-        db.flush()
-    return row
 
 
 def _reset_window(row: AuthThrottle, now: datetime, window: timedelta) -> None:
@@ -69,15 +71,22 @@ def _record_attempt(
     increment: bool,
 ) -> AuthThrottle:
     now = _now()
-    row = _row(db, scope, subject)
-    _raise_if_locked(row, now, detail)
+    row = _locked_row(db, scope, subject)
+    try:
+        _raise_if_locked(row, now, detail)
+    except HTTPException:
+        db.commit()
+        raise
     _reset_window(row, now, timedelta(seconds=max(1, window_seconds)))
     if increment:
         row.attempt_count = int(row.attempt_count or 0) + 1
     row.last_attempt_at = now
-    if increment and row.attempt_count > limit:
-        if lockout_seconds:
-            row.locked_until = now + timedelta(seconds=max(1, lockout_seconds))
+    blocked = increment and row.attempt_count > limit
+    if blocked and lockout_seconds:
+        row.locked_until = now + timedelta(seconds=max(1, lockout_seconds))
+    db.commit()
+    db.refresh(row)
+    if blocked:
         raise HTTPException(status_code=429, detail=detail)
     return row
 
@@ -95,35 +104,35 @@ def assert_login_allowed(db: Session, *, username: str, source_ip: str) -> None:
         detail=LOGIN_RATE_DETAIL,
         increment=True,
     )
-    row = _row(db, SCOPE_LOGIN_USER, name)
-    _raise_if_locked(row, _now(), LOGIN_RATE_DETAIL)
+    row = _locked_row(db, SCOPE_LOGIN_USER, name)
+    try:
+        _raise_if_locked(row, _now(), LOGIN_RATE_DETAIL)
+    finally:
+        db.commit()
 
 
 def record_login_failure(db: Session, *, username: str) -> None:
     name = (username or "").strip().lower() or "unknown"
-    try:
-        _record_attempt(
-            db,
-            scope=SCOPE_LOGIN_USER,
-            subject=name,
-            limit=max(1, settings.login_failure_limit),
-            window_seconds=settings.login_failure_window_seconds,
-            lockout_seconds=settings.login_lockout_seconds,
-            detail=LOGIN_RATE_DETAIL,
-            increment=True,
-        )
-    except HTTPException:
-        db.commit()
-        raise
+    _record_attempt(
+        db,
+        scope=SCOPE_LOGIN_USER,
+        subject=name,
+        limit=max(1, settings.login_failure_limit),
+        window_seconds=settings.login_failure_window_seconds,
+        lockout_seconds=settings.login_lockout_seconds,
+        detail=LOGIN_RATE_DETAIL,
+        increment=True,
+    )
 
 
 def record_login_success(db: Session, *, username: str) -> None:
     name = (username or "").strip().lower() or "unknown"
-    row = _row(db, SCOPE_LOGIN_USER, name)
+    row = _locked_row(db, SCOPE_LOGIN_USER, name)
     row.attempt_count = 0
     row.locked_until = None
     row.window_started_at = _now()
     row.last_attempt_at = _now()
+    db.commit()
 
 
 def assert_challenge_allowed(db: Session, *, agent_uuid: str, source_ip: str) -> None:

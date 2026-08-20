@@ -5,7 +5,16 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import Setting
 from app.schemas import SettingsOut
-from app.settings_crypto import SettingsCryptoError, decrypt_secret, encrypt_secret, encryption_key_configured, is_encrypted_secret
+from app.settings_crypto import (
+    FERNET_KEY_HELP,
+    SettingsCryptoError,
+    decrypt_secret,
+    encrypt_secret,
+    encryption_key_configured,
+    is_encrypted_secret,
+    is_valid_fernet_key,
+)
+from app.startup_security import InsecureConfigurationError
 from app.timezones import FALLBACK_TIMEZONE, coerce_timezone
 
 DEFAULTS = SettingsOut().model_dump()
@@ -55,6 +64,48 @@ def public_settings(data: dict) -> dict:
     return out
 
 
+def raw_smtp_password(db: Session) -> str:
+    row = db.query(Setting).filter(Setting.key == "system").first()
+    if row is None or not isinstance(row.value, dict):
+        return ""
+    return str(row.value.get("smtp_password") or "")
+
+
+def validate_and_migrate_smtp_password(db: Session) -> None:
+    """Refuse to run with an unprotected or undecryptable SMTP password.
+
+    No SMTP password → encryption key may be absent.
+    SMTP password present → a distinct generated Fernet key is mandatory.
+    Legacy plaintext is encrypted in place when a valid key exists.
+    """
+    stored = raw_smtp_password(db)
+    key = (settings.settings_encryption_key or "").strip()
+    if not stored:
+        if key and not is_valid_fernet_key(key):
+            raise InsecureConfigurationError(FERNET_KEY_HELP)
+        return
+    if not key:
+        raise InsecureConfigurationError(
+            "SETTINGS_ENCRYPTION_KEY is required because an SMTP password is stored"
+        )
+    if not is_valid_fernet_key(key):
+        raise InsecureConfigurationError(FERNET_KEY_HELP)
+    if is_encrypted_secret(stored):
+        try:
+            decrypt_secret(stored, key=key)
+        except SettingsCryptoError as exc:
+            raise InsecureConfigurationError(
+                "Encrypted SMTP password could not be decrypted with SETTINGS_ENCRYPTION_KEY"
+            ) from exc
+        return
+    row = db.query(Setting).filter(Setting.key == "system").first()
+    assert row is not None and isinstance(row.value, dict)
+    updated = dict(row.value)
+    updated["smtp_password"] = encrypt_secret(stored, key=key)
+    row.value = updated
+    db.commit()
+
+
 def save_settings(db: Session, values: dict) -> dict:
     data = get_settings(db)
     incoming = {key: value for key, value in values.items() if key not in _SETTINGS_RESPONSE_ONLY}
@@ -65,7 +116,9 @@ def save_settings(db: Session, values: dict) -> dict:
         raw_password = row.value.get("smtp_password") or ""
     if incoming_password in (None, "", SMTP_PASSWORD_MASK):
         keep = raw_password
-        if keep and not is_encrypted_secret(keep) and encryption_key_configured():
+        if keep and not is_encrypted_secret(keep):
+            if not encryption_key_configured():
+                raise SettingsCryptoError("SETTINGS_ENCRYPTION_KEY is required to store an SMTP password")
             keep = encrypt_secret(decrypt_secret(keep))
         incoming["smtp_password"] = keep
     else:

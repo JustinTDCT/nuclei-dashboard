@@ -75,7 +75,7 @@ The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`sc
 
 Pinned scanner build inputs live in `scan_runtime/pinned_versions.json`. The API copy `backend/app/pinned_scanner_versions.json` must match that file. Image construction downloads exact Nuclei, Naabu, ProjectDiscovery httpx, and nuclei-templates releases and SHA-256-verifies each archive against `checksums_sha256`. It does not resolve ProjectDiscovery `releases/latest`. A missing pin or checksum mismatch fails the build instead of falling back.
 
-Generated Agent compose must use an immutable `AGENT_GIT_CONTEXT` commit or `refs/tags/...` pin. `refs/heads/main` is rejected. After merging Agent/runtime changes, bump the pin to that commit. LAN Agents keep `network_mode: host` and root because Naabu SYN/host-discovery needs raw sockets and site LAN reachability; do not add `privileged: true`. The WAN scanner stays on the Docker bridge. `security_opt: no-new-privileges:true` is required on generated LAN Agents.
+Generated Agent compose must pin a 40-character `AGENT_GIT_CONTEXT` commit. An operator tag is resolved to that commit when Compose is generated; the file never contains `refs/heads/main` or `refs/tags/...`. After merging Agent/runtime changes, bump the pin to that commit. LAN Agents keep `network_mode: host` so site RFC1918 is reachable. They run as uid 1000 with `cap_drop: ALL` and `cap_add: NET_RAW` because Naabu SYN/host-discovery needs raw sockets; do not add `privileged: true`. The WAN scanner uses the same user/capability set on the Docker bridge. `security_opt: no-new-privileges:true` is required.
 
 The scanner runtime release ID (`runtime_version`) is a scanner-image identifier, not the overall application version. Ordinary Nuclei scans pass `-duc` so template releases do not change during a job. Fresh images bake templates under `/opt/nuclei-templates`. Existing `nuclei-templates` volumes are not deleted or rewritten by this upgrade; they may show mismatch until an operator rebuilds/redeploys the agent image.
 
@@ -87,7 +87,7 @@ Agents report current installed inventory on authenticated heartbeat (`runtime_v
 
 `POST /api/agent/jobs/{id}/start` serializes claims with `SELECT Agent ... FOR UPDATE` before the per-job atomic claim. Two concurrent starts for the same Agent identity cannot both succeed. No schema change.
 
-Pinned httpx v1.10.0 initializes a DIT page classifier on `-json` and would otherwise download ~92MB from Hugging Face. Image build seeds `/root/.dit/model.json` with `{}` so runtime stays offline. We do not consume PageType. Do not add `-no-classify`; that flag is not in v1.10.0.
+Pinned httpx v1.10.0 initializes a DIT page classifier on `-json` and would otherwise download ~92MB from Hugging Face. Image build seeds `$HOME/.dit/model.json` (`/home/scanner/.dit/model.json`) with `{}` so runtime stays offline. We do not consume PageType. Do not add `-no-classify`; that flag is not in v1.10.0.
 
 `ScanJob.runtime_provenance` is historical evidence for that run. Never infer it from the Agent's current inventory. Pre-Tranche-C Scan Runs display **Not Recorded**.
 
@@ -161,7 +161,7 @@ npm run build
 
 Staff bearer tokens are stored in `sessionStorage` so they do not survive a browser restart. They remain XSS-readable in page JavaScript; httpOnly cookies are a later control-plane change. MFA remains deferred.
 
-Set `SETTINGS_ENCRYPTION_KEY` before storing an SMTP password. The API encrypts the password at rest inside `Setting.value` and still masks it on read. A blank save keeps the existing secret.
+`SETTINGS_ENCRYPTION_KEY` must be a generated Fernet key and must differ from `SECRET_KEY`, `SCANNER_TOKEN`, and the database password. It may be empty only when no SMTP password is stored. If an SMTP password exists, startup migrates leftover plaintext and refuses to start when the key is missing or cannot decrypt. The API still masks the password on read. A blank save keeps the existing secret.
 
 GitHub Actions runs backend pytest plus the frontend typecheck/lint/test/build. Protect `main` so those checks are required before merge. That protection is a repository setting, not application code.
 

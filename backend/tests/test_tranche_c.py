@@ -144,6 +144,7 @@ def test_pin_files_agree_and_install_path_never_uses_latest():
     install = (RUNTIME_ROOT / "install_tools.sh").read_text(encoding="utf-8")
     downloader = (RUNTIME_ROOT / "pinned_download.py").read_text(encoding="utf-8")
     dockerfile = (RUNTIME_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "USER 1000:1000" in dockerfile
     for source in (install, downloader, dockerfile):
         assert "releases/latest" not in source
     assert "Refusing to fall back to latest" in install

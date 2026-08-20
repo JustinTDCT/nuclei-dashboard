@@ -2,16 +2,15 @@
 #   curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/JustinTDCT/nuclei-dashboard/main/agent/docker-compose.yml
 #   docker compose --env-file agent.env up -d --build
 #
-# Docker clones scan_runtime from an immutable commit pin and builds the image.
+# Docker clones scan_runtime from an immutable 40-character commit and builds the image.
 # After Agent/runtime changes land, bump the #commit below, then rebuild:
 #   docker compose up -d --build
 # This image includes an independent heartbeat/control loop. A container
 # restart is not enough after a control-plane change — rebuild the image.
 #
-# Privilege / networking: Naabu SYN and host-discovery need raw sockets, and
-# the site LAN is not routed into a Docker bridge. This service therefore
-# uses network_mode: host and runs as root. Do not add privileged: true.
-# The central WAN scanner does not use host networking.
+# Privilege / networking: host networking reaches the site LAN. The process
+# runs as uid 1000 with only NET_RAW for Naabu SYN/host-discovery. Do not add
+# privileged: true. The central WAN scanner does not use host networking.
 #
 # TLS verification is on by default. For an internal CA:
 #   mkdir -p agent-certs && cp /path/on/host/ca.pem agent-certs/ca.pem
@@ -28,6 +27,11 @@ services:
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
     security_opt:
       - no-new-privileges:true
     environment:
@@ -37,9 +41,10 @@ services:
       TLS_VERIFY: ${TLS_VERIFY:-1}
       TLS_CA_FILE: ${TLS_CA_FILE:-}
       SCAN_DRY_RUN: "0"
+      HOME: /home/scanner
     volumes:
       - agent-keys:/data
-      - nuclei-templates:/root/nuclei-templates
+      - nuclei-templates:/home/scanner/nuclei-templates
       - ${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro
 
 volumes:

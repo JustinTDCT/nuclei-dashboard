@@ -140,6 +140,7 @@ def _nuclei_templates_version() -> str | None:
         return compact_version(token) or token[:MAX_VERSION_CHARS]
     for candidate in (
         Path("/opt/nuclei-templates/.nd-templates-version"),
+        Path("/home/scanner/nuclei-templates/.nd-templates-version"),
         Path("/root/nuclei-templates/.nd-templates-version"),
     ):
         if candidate.is_file():

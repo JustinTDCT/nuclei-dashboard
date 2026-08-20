@@ -5,6 +5,7 @@ from __future__ import annotations
 from urllib.parse import unquote, urlparse
 
 from app.config import Settings
+from app.settings_crypto import FERNET_KEY_HELP, is_valid_fernet_key
 
 INSECURE_SECRET_VALUES = frozenset(
     {
@@ -65,6 +66,12 @@ def validate_runtime_secrets(cfg: Settings, *, require_admin_password: bool = Tr
         provided["ADMIN_PASSWORD"] = admin_password
     if database_password:
         provided["POSTGRES_PASSWORD"] = database_password
+    encryption_key = _normalized_secret(getattr(cfg, "settings_encryption_key", ""))
+    if encryption_key:
+        if not is_valid_fernet_key(encryption_key):
+            problems.append(FERNET_KEY_HELP)
+        else:
+            provided["SETTINGS_ENCRYPTION_KEY"] = encryption_key
     seen: dict[str, str] = {}
     for label, value in provided.items():
         owner = seen.get(value)

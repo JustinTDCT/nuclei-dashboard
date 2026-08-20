@@ -57,12 +57,20 @@ services:
     image: nuclei-dashboard-agent:latest
     pull_policy: build
     command: ["python", "scanner_main.py"]
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
     environment:
       CENTRAL_URL: http://api:8000
       SCANNER_TOKEN: ${SCANNER_TOKEN:?Set SCANNER_TOKEN in .env}
       SCAN_DRY_RUN: ${SCAN_DRY_RUN:-0}
+      HOME: /home/scanner
     volumes:
-      - nuclei-templates:/root/nuclei-templates
+      - nuclei-templates:/home/scanner/nuclei-templates
     depends_on:
       api:
         condition: service_healthy
@@ -80,8 +88,14 @@ services:
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
-    # Host networking + root are required for Naabu SYN/host-discovery on the
-    # site LAN. Do not add privileged: true. The WAN scanner stays bridged.
+    # Host networking reaches site RFC1918. The process is uid 1000 with
+    # only NET_RAW so Naabu SYN/host-discovery can open raw sockets.
+    # Do not add privileged: true. The WAN scanner stays bridged.
+    user: "1000:1000"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
     security_opt:
       - no-new-privileges:true
     environment:
@@ -91,9 +105,10 @@ services:
       TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
       TLS_CA_FILE: ${TLS_CA_FILE:-}
       SCAN_DRY_RUN: "0"
+      HOME: /home/scanner
     volumes:
       - agent-keys:/data
-      - nuclei-templates:/root/nuclei-templates
+      - nuclei-templates:/home/scanner/nuclei-templates
       - ${TLS_CA_HOST_DIR:-./agent-certs}:/certs:ro
 
   caddy:

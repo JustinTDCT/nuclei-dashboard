@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.auth import hash_password
 from app.config import settings
 from app.models import User
-from app.settings_store import save_settings
+from app.settings_store import save_settings, validate_and_migrate_smtp_password
 from app.startup_security import validate_runtime_secrets
 
 
@@ -21,6 +21,7 @@ def seed(db: Session) -> None:
             )
         )
         db.commit()
+    validate_and_migrate_smtp_password(db)
     save_settings(db, {})
     from app.compliance import import_builtin_frameworks
 

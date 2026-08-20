@@ -1,19 +1,21 @@
 """Application-level encryption for SMTP credentials at rest.
 
-Uses a dedicated SETTINGS_ENCRYPTION_KEY. The SMTP password must remain
-reversible because the mailer needs the original credential.
+Uses a dedicated SETTINGS_ENCRYPTION_KEY that must be a generated Fernet
+key. The SMTP password must remain reversible because the mailer needs
+the original credential.
 """
 
 from __future__ import annotations
-
-import base64
-import hashlib
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import settings
 
 SECRET_PREFIX = "enc:v1:"
+FERNET_KEY_HELP = (
+    "SETTINGS_ENCRYPTION_KEY must be a Fernet key from "
+    "`python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`"
+)
 
 
 class SettingsCryptoError(RuntimeError):
@@ -22,19 +24,28 @@ class SettingsCryptoError(RuntimeError):
         super().__init__(detail)
 
 
+def is_valid_fernet_key(raw: str | None) -> bool:
+    text = (raw or "").strip()
+    if not text:
+        return False
+    try:
+        Fernet(text.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
 def _fernet_from_key(raw: str) -> Fernet:
     text = (raw or "").strip()
     if not text:
         raise SettingsCryptoError("SETTINGS_ENCRYPTION_KEY is required to protect the SMTP password")
-    try:
-        return Fernet(text.encode("utf-8"))
-    except (ValueError, TypeError):
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        return Fernet(base64.urlsafe_b64encode(digest))
+    if not is_valid_fernet_key(text):
+        raise SettingsCryptoError(FERNET_KEY_HELP)
+    return Fernet(text.encode("utf-8"))
 
 
 def encryption_key_configured() -> bool:
-    return bool((settings.settings_encryption_key or "").strip())
+    return is_valid_fernet_key(settings.settings_encryption_key)
 
 
 def encrypt_secret(plaintext: str, *, key: str | None = None) -> str:
