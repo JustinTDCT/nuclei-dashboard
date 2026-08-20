@@ -3,9 +3,9 @@
 Flags are limited to options actually supported by ProjectDiscovery CLIs:
 - naabu: -host, -p, -top-ports, -json, -silent, -rate, -c, -timeout, -retries, -exclude-hosts
 - httpx: -l, -json, -silent, -title, -tech-detect, -status-code, -cname, -web-server, -tls-grab,
-         -rl, -t, -timeout, -retries
+         -sni, -H, -rl, -t, -timeout, -retries
   (v1.10.0 has no -no-classify; DIT download is avoided by seeding ~/.dit/model.json)
-- nuclei: -l, -jsonl, -silent, -severity, -tags, -rl, -c, -timeout, -retries, -duc
+- nuclei: -l, -jsonl, -silent, -severity, -tags, -sni, -H, -rl, -c, -timeout, -retries, -duc
 """
 
 from __future__ import annotations
@@ -88,6 +88,7 @@ def build_httpx_command(
     *,
     intensity: dict[str, Any] | None = None,
     tls_grab: bool = True,
+    sni: str | None = None,
 ) -> list[str]:
     cmd = [
         binary,
@@ -103,6 +104,8 @@ def build_httpx_command(
     ]
     if tls_grab:
         cmd.append("-tls-grab")
+    if sni:
+        cmd.extend(["-sni", sni, "-H", f"Host: {sni}"])
     intensity = intensity or {}
     if intensity.get("httpx_rate") is not None:
         cmd.extend(["-rl", str(int(intensity["httpx_rate"]))])
@@ -122,10 +125,13 @@ def build_nuclei_command(
     severities: str,
     tags: str = "",
     intensity: dict[str, Any] | None = None,
+    sni: str | None = None,
 ) -> list[str]:
     cmd = [binary, "-l", list_path, "-jsonl", "-silent", "-severity", severities, "-duc"]
     if tags:
         cmd.extend(["-tags", tags])
+    if sni:
+        cmd.extend(["-sni", sni, "-H", f"Host: {sni}"])
     intensity = intensity or {}
     if intensity.get("nuclei_rate") is not None:
         cmd.extend(["-rl", str(int(intensity["nuclei_rate"]))])

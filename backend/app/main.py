@@ -33,12 +33,10 @@ from app.routers import (
 from app.scheduler import start_scheduler
 from app.inventory import refresh_discovery_metadata
 from app.seed import seed
-from app.startup_security import validate_runtime_secrets
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    validate_runtime_secrets(settings)
     apply_schema()
     # Retained until existing-install adoption is proven. Do not add new ALTER TABLE here.
     ensure_columns()

@@ -378,6 +378,11 @@ def test_wan_authorization_and_audit(reset_db):
             {"target_type": "cidr", "value": "0.0.0.0/0"},
             {"target_type": "cidr", "value": "10.0.0.0/8"},
             {"target_type": "cidr", "value": "8.8.0.0/8"},
+            {"target_type": "ip", "value": "::ffff:127.0.0.1"},
+            {"target_type": "ip", "value": "::ffff:10.0.0.1"},
+            {"target_type": "ip", "value": "::8.8.8.8"},
+            {"target_type": "cidr", "value": "::ffff:0:0/96"},
+            {"target_type": "cidr", "value": "2001:db8::/32"},
             {"target_type": "fqdn", "value": "metadata.google.internal"},
         ):
             resp = client.post(f"/api/tenants/{tenant_id}/wan-targets", headers=_headers(admin), json={"name": "x", **bad})
@@ -1478,15 +1483,19 @@ def test_fqdn_is_pinned_at_start_and_runtime_fail_closes_on_later_exclusion(rese
         payload = started.json()
         assert payload["scope"] == "wan"
         assert all(row["type"] != "fqdn" for row in payload["targets"])
-        assert any(row["type"] == "ip" and row["value"] == "203.0.113.51" for row in payload["targets"])
+        assert any(
+            row["type"] == "ip" and row["value"] == "203.0.113.51" and row.get("source_fqdn") == "edge.example.com"
+            for row in payload["targets"]
+        )
 
         import runner as runtime_runner
 
         with patch("runner.socket.getaddrinfo") as dns:
             pinned = runtime_runner.resolve_execution_targets(payload)
             dns.assert_not_called()
-        assert pinned == [{"type": "ip", "value": "203.0.113.51"}] or all(
-            row["type"] == "ip" and row["value"] == "203.0.113.51" for row in pinned
+        assert pinned == [{"type": "ip", "value": "203.0.113.51", "source_fqdn": "edge.example.com"}] or all(
+            row["type"] == "ip" and row["value"] == "203.0.113.51" and row.get("source_fqdn") == "edge.example.com"
+            for row in pinned
         )
 
         leftover = {

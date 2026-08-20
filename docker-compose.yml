@@ -22,7 +22,7 @@ services:
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       SCANNER_TOKEN: ${SCANNER_TOKEN:?Set SCANNER_TOKEN in .env}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       PUBLIC_URL: ${PUBLIC_URL:-https://10.150.10.155:8118}
       AGENT_IMAGE: ${AGENT_IMAGE:-nuclei-dashboard-agent:latest}

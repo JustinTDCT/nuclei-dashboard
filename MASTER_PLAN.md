@@ -104,11 +104,11 @@ Inserted before later product work. PostgreSQL remains. Do not introduce shardin
 
 Inserted after a clean-room review of commit `312e0d0`. These are production-safety defects, not Scale work. They may be implemented without waiting for S2/S3. They must not change Finding-lifecycle meaning except to prevent an incomplete detector stage from counting as `EVALUATION_CLEAN`.
 
-- **Sec H1 — Fail-closed detector stages.** Any non-zero Nuclei/Naabu/httpx exit is a failed stage, even when stdout is non-empty. Partial positive evidence may be kept. Missing findings on that stage must never become clean/negative evidence. Detector-coverage persist failure must fail the run.
-- **Sec H2 — Deployment secrets.** Startup aborts when `SECRET_KEY`, `SCANNER_TOKEN`, `ADMIN_PASSWORD`, or the database password is empty or a known placeholder. Compose must not supply insecure fallbacks. Documentation is not the security control.
+- **Sec H1 — Fail-closed detector stages.** Any non-zero Nuclei/Naabu/httpx exit is a failed stage, even when stdout is non-empty. Vulnerability-stage JSONL must fail closed: a nonblank malformed line or a row missing the minimum Nuclei schema (`template-id` plus `host` or `matched-at`) is a failed run and must not publish detector coverage. Valid positive rows from a nonzero Nuclei exit may be stored, but that invocation must carry no clean coverage. Missing findings on a failed stage must never become clean/negative evidence. Detector-coverage persist failure must fail the run.
+- **Sec H2 — Deployment secrets.** Startup aborts when `SECRET_KEY`, `SCANNER_TOKEN`, or the database password is empty, a known placeholder, or reused across those control-plane credentials. `ADMIN_PASSWORD` is required only for initial bootstrap on an empty user table. Compose must not supply insecure fallbacks. Documentation is not the security control.
 - **Sec H3 — Control-plane exposure.** Caddy must not publish `/api/internal`. WAN job claim must use the same atomic update pattern as LAN claim.
-- **Sec H4 — WAN target safety policy.** Authorized WAN targets remain IP/CIDR/FQDN, but creation and live revalidation reject private, loopback, link-local, multicast, reserved, unspecified, cloud-metadata, and over-broad prefixes.
-- **Sec H5 — Session revocation and SMTP secret masking.** Staff tokens are bound to the current password hash so a reset invalidates outstanding JWTs. Password and email changes are audited. `GET /admin/settings` never returns the SMTP password.
+- **Sec H4 — WAN target safety policy.** Authorized WAN targets remain IP/CIDR/FQDN, but creation and live revalidation reject private, loopback, link-local, multicast, reserved, unspecified, cloud-metadata, IPv4-mapped/IPv4-compatible IPv6, and target sets larger than 65,536 addresses (IPv4 `/16` equivalent; IPv6 therefore `/112` or narrower). Authorized FQDNs are pinned to resolved IPs for connect/anti-rebinding; the scanner must still present the original FQDN for HTTP Host and TLS SNI and must not re-resolve the name on the worker.
+- **Sec H5 — Session revocation and SMTP secret masking.** Staff tokens are bound to the current password hash so a reset invalidates outstanding JWTs. Password and email changes are audited. `GET /admin/settings` never returns the SMTP password. SMTP password at-rest storage in `Setting.value` JSON remains plaintext and is still open.
 - **Sec H6 — Agent supply chain (open).** Pin generated Agent builds to an immutable tag/commit/digest. Checksum-verify tool and template downloads. Do not run the Agent as root on host networking without that pin.
 - **Sec H7 — Scanner deadlines (open).** Propagate job cancellation/timeout to the child scanner process. PostgreSQL job-expiry and process lifetime must be one reality.
 - **Sec H8 — Auth edge and challenge DoS (open).** Login rate-limit/lockout, CSP/HSTS/frame headers, and durable multi-record Agent challenges. Required before treating the login edge as production-hardened.
@@ -349,7 +349,7 @@ The backend and scanner must fail closed if a requested WAN target is outside th
 
 This is a safety and accountability boundary.
 
-Authorized WAN targets must also pass a safety policy: no private, loopback, link-local, multicast, reserved, unspecified, or cloud-metadata addresses, and no over-broad prefixes (IPv4 less specific than /16, IPv6 less specific than /32). Syntax validation and authorization remain separate from that policy.
+Authorized WAN targets must also pass a safety policy: no private, loopback, link-local, multicast, reserved, unspecified, cloud-metadata, or IPv4-mapped/IPv4-compatible IPv6 addresses, and no target set larger than 65,536 addresses (IPv4 `/16` equivalent; IPv6 `/112` or narrower). Syntax validation and authorization remain separate from that policy. An authorized FQDN is executed as a pinned connect address plus the original hostname for Host/SNI; workers must not resolve the FQDN again.
 
 Future domain/subdomain discovery may be added, but it must not silently expand authorized scope without explicit policy.
 
@@ -845,7 +845,7 @@ Future secrets must be encrypted at rest, access-controlled, audited, and rotata
 
 ## 13.8 WAN scope safety
 
-A scan run must never receive arbitrary WAN targets that bypass Tenant authorized target records.
+A scan run must never receive arbitrary WAN targets that bypass Tenant authorized target records. Authorized CIDRs are also bounded by address cardinality, not family-specific prefix constants. IPv4-mapped IPv6 (`::ffff:0:0/96` and embedded addresses) is rejected entirely. FQDN execution keeps two facts: the authorized logical name, and the pinned connect IP used only for the TCP/TLS connection.
 
 ## 13.9 Scanner version provenance
 

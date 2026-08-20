@@ -8,8 +8,9 @@ from app.startup_security import validate_runtime_secrets
 
 
 def seed(db: Session) -> None:
-    validate_runtime_secrets(settings)
-    if db.query(User).count() == 0:
+    bootstrap = db.query(User).count() == 0
+    validate_runtime_secrets(settings, require_admin_password=bootstrap)
+    if bootstrap:
         db.add(
             User(
                 username=settings.admin_username,

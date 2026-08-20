@@ -233,7 +233,7 @@ Generated agent compose/env and production defaults verify central-server TLS (`
 
 Caddy terminates HTTPS using `./certs/cert.pem` and `./certs/key.pem` (see `Caddyfile`). It does not auto-issue a certificate. Caddy answers `/api/internal*` with 404; the central scanner calls `http://api:8000` on the Docker network and never needs that namespace on the public listener.
 
-The API refuses to start when `SECRET_KEY`, `SCANNER_TOKEN`, `ADMIN_PASSWORD`, or the database password is empty or a known placeholder. Compose requires those variables to be set in `.env`.
+The API refuses to start when `SECRET_KEY`, `SCANNER_TOKEN`, or the database password is empty, a known placeholder, or reused across those credentials. `ADMIN_PASSWORD` is required only while the user table is empty. Compose requires `SECRET_KEY`, `SCANNER_TOKEN`, and `POSTGRES_PASSWORD` to be set in `.env`.
 
 Publicly trusted certificates need no extra agent configuration.
 

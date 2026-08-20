@@ -888,7 +888,7 @@ def test_httpx_urls_become_nuclei_coverage_targets():
                 "exclusions": [],
             }
         )
-    assert captured["targets"] == ["https://10.1.0.11"]
+    assert captured["targets"] == [{"value": "https://10.1.0.11", "source_fqdn": ""}]
     assert result["detector_coverage"] == [{"detector_type": "nuclei", "targets": ["https://10.1.0.11"]}]
 
 

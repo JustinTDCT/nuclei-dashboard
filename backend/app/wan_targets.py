@@ -23,8 +23,9 @@ from app.models import (
 
 _FQDN_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _SCHEME_PREFIX = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
-MIN_IPV4_PREFIX_LENGTH = 16
-MIN_IPV6_PREFIX_LENGTH = 32
+MAX_WAN_TARGET_ADDRESSES = 65536
+IPV4_MAPPED_NETWORK = ipaddress.ip_network("::ffff:0:0/96")
+IPV4_COMPATIBLE_NETWORK = ipaddress.ip_network("::/96")
 BLOCKED_FQDN_SUFFIXES = (".local", ".localhost")
 BLOCKED_FQDNS = frozenset(
     {
@@ -75,16 +76,19 @@ def assert_wan_target_policy(target_type: str, normalized: str) -> None:
         network = ipaddress.ip_network(normalized, strict=False)
     except ValueError as exc:
         raise WanTargetInvalidError("Invalid WAN target") from exc
-    minimum = MIN_IPV4_PREFIX_LENGTH if network.version == 4 else MIN_IPV6_PREFIX_LENGTH
-    if network.prefixlen < minimum:
+    if _is_ipv4_mapped_network(network):
+        raise WanTargetInvalidError("WAN targets cannot use IPv4-mapped IPv6 addresses")
+    if network.num_addresses > MAX_WAN_TARGET_ADDRESSES:
         raise WanTargetInvalidError(
-            f"WAN {network.version} CIDR prefix must be /{minimum} or more specific"
+            f"WAN target exceeds {MAX_WAN_TARGET_ADDRESSES} addresses"
         )
     if _prohibited_network(network):
         raise WanTargetInvalidError("WAN targets cannot include private, loopback, link-local, multicast, or reserved addresses")
 
 
 def assert_wan_address_policy(address: ipaddress._BaseAddress) -> None:
+    if _ipv4_mapped_address(address) is not None:
+        raise WanTargetInvalidError("WAN targets cannot use IPv4-mapped IPv6 addresses")
     if _prohibited_address(address):
         raise WanTargetInvalidError("WAN targets cannot resolve to private, loopback, link-local, multicast, or reserved addresses")
 
@@ -95,11 +99,32 @@ def _assert_wan_fqdn_policy(normalized: str) -> None:
         raise WanTargetInvalidError("WAN FQDN targets cannot use localhost, mDNS, or cloud-metadata names")
 
 
+def _ipv4_mapped_address(address: ipaddress._BaseAddress) -> ipaddress.IPv4Address | None:
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        return mapped
+    return getattr(address, "ipv4_compatible", None)
+
+
+def _is_ipv4_mapped_network(network: ipaddress._BaseNetwork) -> bool:
+    if network.version != 6:
+        return False
+    return bool(network.overlaps(IPV4_MAPPED_NETWORK) or network.overlaps(IPV4_COMPATIBLE_NETWORK))
+
+
+def _canonical_address(address: ipaddress._BaseAddress) -> ipaddress._BaseAddress:
+    mapped = _ipv4_mapped_address(address)
+    return mapped if mapped is not None else address
+
+
 def _prohibited_address(address: ipaddress._BaseAddress) -> bool:
+    address = _canonical_address(address)
     return any(address in blocked for blocked in PROHIBITED_NETWORKS if address.version == blocked.version)
 
 
 def _prohibited_network(network: ipaddress._BaseNetwork) -> bool:
+    if _is_ipv4_mapped_network(network):
+        return True
     return any(
         network.overlaps(blocked)
         for blocked in PROHIBITED_NETWORKS

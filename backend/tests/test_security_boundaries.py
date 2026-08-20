@@ -8,7 +8,16 @@ import pytest
 from fastapi import Request
 
 from tests.conftest import requires_postgres
-from tests.test_phase1d import _client, _create_staff, _headers, _login, _scanner_headers, _wan_scan, _world
+from tests.test_phase1d import (
+    _agent_headers,
+    _client,
+    _create_staff,
+    _headers,
+    _login,
+    _scanner_headers,
+    _wan_scan,
+    _world,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +43,34 @@ def test_runtime_test_secrets_are_accepted():
     validate_runtime_secrets(settings)
 
 
+def test_secret_key_must_differ_from_scanner_token():
+    from app.startup_security import InsecureConfigurationError, validate_runtime_secrets
+
+    reused = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    cfg = SimpleNamespace(
+        database_url="postgresql://nuclei:other-db-pass@localhost:5432/nuclei",
+        secret_key=reused,
+        scanner_token=reused,
+        admin_password="bootstrap-admin-1",
+    )
+    with pytest.raises(InsecureConfigurationError, match="must be distinct"):
+        validate_runtime_secrets(cfg)
+
+
+def test_admin_password_required_only_during_bootstrap():
+    from app.startup_security import InsecureConfigurationError, validate_runtime_secrets
+
+    cfg = SimpleNamespace(
+        database_url="postgresql://nuclei:other-db-pass@localhost:5432/nuclei",
+        secret_key="phase0-test-secret-not-for-production",
+        scanner_token="phase0-test-scanner-token-not-for-production",
+        admin_password="",
+    )
+    with pytest.raises(InsecureConfigurationError, match="ADMIN_PASSWORD"):
+        validate_runtime_secrets(cfg, require_admin_password=True)
+    validate_runtime_secrets(cfg, require_admin_password=False)
+
+
 def test_caddyfile_does_not_publish_internal_scanner_api():
     text = (REPO_ROOT / "Caddyfile").read_text(encoding="utf-8")
     assert "handle /api/internal*" in text
@@ -48,11 +85,33 @@ def test_wan_target_policy_rejects_unsafe_scope():
     assert (target_type, normalized) == ("ip", "192.168.0.1")
     with pytest.raises(WanTargetInvalidError, match="private"):
         assert_wan_target_policy(target_type, normalized)
-    with pytest.raises(WanTargetInvalidError, match="prefix"):
+    with pytest.raises(WanTargetInvalidError, match="65536"):
         assert_wan_target_policy("cidr", "0.0.0.0/0")
+    with pytest.raises(WanTargetInvalidError, match="65536"):
+        assert_wan_target_policy("cidr", "2001:db8::/32")
+    with pytest.raises(WanTargetInvalidError, match="65536"):
+        assert_wan_target_policy("cidr", "1.2.0.0/15")
+    with pytest.raises(WanTargetInvalidError, match="65536"):
+        assert_wan_target_policy("cidr", "2001:db8::/111")
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_target_policy("ip", "::ffff:127.0.0.1")
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_target_policy("cidr", "::ffff:0:0/96")
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_target_policy("ip", "::ffff:8.8.8.8")
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_target_policy("ip", "::ffff:10.0.0.1")
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_target_policy("ip", "::ffff:169.254.169.254")
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_target_policy("ip", "::8.8.8.8")
+    with pytest.raises(WanTargetInvalidError, match="IPv4-mapped"):
+        assert_wan_target_policy("cidr", "::/96")
     with pytest.raises(WanTargetInvalidError, match="metadata"):
         assert_wan_target_policy("fqdn", "metadata.google.internal")
     assert_wan_target_policy("cidr", "203.0.113.0/24")
+    assert_wan_target_policy("cidr", "1.2.0.0/16")
+    assert_wan_target_policy("cidr", "2001:db8::/112")
 
 
 def test_request_source_ip_uses_rightmost_forwarded_hop():
@@ -68,6 +127,124 @@ def test_request_source_ip_uses_rightmost_forwarded_hop():
         }
     )
     assert request_source_ip(request) == "203.0.113.10"
+
+
+@requires_postgres
+def test_malformed_nuclei_jsonl_cannot_count_clean(reset_db, monkeypatch):
+    import sys
+
+    runtime_root = REPO_ROOT / "scan_runtime"
+    if str(runtime_root) not in sys.path:
+        sys.path.insert(0, str(runtime_root))
+    import runner as runtime_runner
+    from job_finish import finish_pipeline_run
+    from tests.test_phase2a import _run_detected, _start_lan
+
+    def fake_run(cmd, dest, log=None):
+        dest.write_text('{not-json "template-id":"exposed-panel"\n', encoding="utf-8")
+
+    monkeypatch.setattr(runtime_runner, "run_command_to_file", fake_run)
+    monkeypatch.setattr(runtime_runner, "_which", lambda name: "/bin/nuclei" if name == "nuclei" else None)
+    monkeypatch.setattr(runtime_runner, "_pd_httpx", lambda: None)
+    monkeypatch.setattr(runtime_runner, "collect_run_provenance", lambda **kwargs: {"runtime_version": "test"})
+    monkeypatch.setattr(runtime_runner, "collect_runtime_inventory", lambda **kwargs: {"runtime_version": "test"})
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan, _first, _ = _run_detected(client, token, world, hostname="edge-1", ip="203.0.113.10")
+        job_id = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token)).json()["id"]
+        _start_lan(client, world, job_id)
+        with pytest.raises(runtime_runner.PipelineError) as exc:
+            runtime_runner.run_pipeline(
+                {
+                    "scope": "lan",
+                    "targets": [{"type": "ip", "value": "203.0.113.10"}],
+                    "stages": {
+                        "discovery": False,
+                        "port_mode": "none",
+                        "fingerprint": True,
+                        "vulnerability": True,
+                        "nuclei_severities": "critical,high,medium",
+                        "nuclei_tags": "",
+                    },
+                    "intensity": {},
+                    "exclusions": [],
+                }
+            )
+        result = exc.value.as_result()
+        assert result["detector_coverage"] == []
+        assert result["findings"] == []
+        assert "malformed JSONL" in str(exc.value)
+
+        headers = _agent_headers(world["agent1"])
+        posted_coverage: list[dict] = []
+        completes: list[tuple] = []
+
+        def coverage_fn(payload):
+            posted_coverage.append(payload)
+            return client.post(
+                f"/api/agent/jobs/{job_id}/detector-coverage",
+                headers=headers,
+                json=payload,
+            )
+
+        def complete(ok, error=None, raw_evidence=None):
+            posted = client.post(
+                f"/api/agent/jobs/{job_id}/complete",
+                headers=headers,
+                params={"ok": "true" if ok else "false", "error": error or ""},
+                json=raw_evidence,
+            )
+            completes.append((ok, posted.status_code, posted.text))
+            assert posted.status_code == 200, posted.text
+
+        finish_pipeline_run(
+            result=result,
+            upload=lambda _artifact: None,
+            complete=complete,
+            coverage_fn=coverage_fn,
+            findings_fn=lambda findings: client.post(
+                f"/api/agent/jobs/{job_id}/findings",
+                headers=headers,
+                json=findings,
+            ),
+            pipeline_error=str(exc.value),
+        )
+        assert posted_coverage == []
+        assert completes and completes[0][0] is False
+
+        from app.database import SessionLocal
+        from app.models import (
+            EVALUATION_CLEAN,
+            AssetFinding,
+            AssetFindingRunEvaluation,
+            ScanJob,
+            ScanRunDetectorCoverage,
+        )
+
+        db = SessionLocal()
+        try:
+            finding = db.query(AssetFinding).one()
+            assert finding.technical_state == "open"
+            assert finding.consecutive_clean_scans == 0
+            assert (
+                db.query(AssetFindingRunEvaluation)
+                .filter(AssetFindingRunEvaluation.outcome == EVALUATION_CLEAN)
+                .count()
+                == 0
+            )
+            assert (
+                db.query(ScanRunDetectorCoverage)
+                .filter(ScanRunDetectorCoverage.scan_job_id == job_id)
+                .count()
+                == 0
+            )
+            job = db.get(ScanJob, job_id)
+            assert job is not None
+            assert job.status == "failed"
+        finally:
+            db.close()
 
 
 @requires_postgres

@@ -495,7 +495,7 @@ or:
 vi .env
 ```
 
-At minimum, set these to unique strong values. The API refuses to start if any of them is empty or a known placeholder such as `changeme`:
+At minimum, set these to unique strong values. The API refuses to start if `SECRET_KEY`, `SCANNER_TOKEN`, or the database password is empty, a known placeholder such as `changeme`, or reused across those credentials. `ADMIN_PASSWORD` is required only to create the first administrator:
 
 ```dotenv
 POSTGRES_PASSWORD=use-a-strong-database-password
@@ -559,7 +559,7 @@ Use separate strong passwords for:
 
 Do not reuse one secret everywhere.
 
-> `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `ADMIN_EMAIL` seed the first administrator on an empty database. Changing those environment values later is not the normal procedure for resetting an existing administrator password.
+> `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `ADMIN_EMAIL` seed the first administrator on an empty database. After that user exists, `ADMIN_PASSWORD` may be removed from the environment. Changing those environment values later is not the normal procedure for resetting an existing administrator password.
 
 ---
 
@@ -1009,7 +1009,7 @@ Corporate LAN
 10.20.0.0/24
 ```
 
-If WAN scanning is needed, add authorized WAN Targets separately. WAN targets must be public IP/CIDR/FQDN scope — private, loopback, link-local, multicast, reserved, cloud-metadata, and over-broad prefixes such as `0.0.0.0/0` are rejected.
+If WAN scanning is needed, add authorized WAN Targets separately. WAN targets must be public IP/CIDR/FQDN scope — private, loopback, link-local, multicast, reserved, cloud-metadata, IPv4-mapped IPv6, and ranges larger than 65,536 addresses (`0.0.0.0/0`, IPv6 `/32`) are rejected. Authorized FQDNs are pinned to resolved IPs for the connection and still use the original hostname for HTTP Host / TLS SNI.
 
 At this point the **central server installation is complete**.
 
@@ -1808,11 +1808,11 @@ Use a trusted public certificate or configure the correct internal CA.
 
 ## Secrets
 
-The application will not start with empty or known-placeholder `SECRET_KEY`, `SCANNER_TOKEN`, `ADMIN_PASSWORD`, or database password values. Compose has no insecure fallbacks for those variables.
+The application will not start with empty, known-placeholder, or reused `SECRET_KEY` / `SCANNER_TOKEN` / database password values. `ADMIN_PASSWORD` is required only for initial bootstrap. Compose has no insecure fallbacks for the required variables.
 
 The public HTTPS listener does not expose `/api/internal/scanner`. The central scanner reaches that API on the Docker network only.
 
-`GET /api/admin/settings` returns a masked SMTP password. Leave the field blank to keep the stored value.
+`GET /api/admin/settings` returns a masked SMTP password. Leave the field blank to keep the stored value. The password is still stored plaintext in `Setting.value` JSON.
 
 Staff tokens are invalidated when that user's password is reset.
 

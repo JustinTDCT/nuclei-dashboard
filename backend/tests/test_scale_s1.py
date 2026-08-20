@@ -185,6 +185,122 @@ def test_run_command_emits_bounded_progress(tmp_path, monkeypatch):
     assert any("bytes written" in line for line in progress)
 
 
+def test_httpx_and_nuclei_commands_pin_sni_for_source_fqdn():
+    from commands import build_httpx_command, build_nuclei_command
+
+    httpx = build_httpx_command("httpx", "/tmp/t", sni="portal.customer.com")
+    assert httpx[httpx.index("-sni") + 1] == "portal.customer.com"
+    assert "Host: portal.customer.com" in httpx
+    nuclei = build_nuclei_command("nuclei", "/tmp/t", severities="critical", sni="portal.customer.com")
+    assert nuclei[nuclei.index("-sni") + 1] == "portal.customer.com"
+    assert "Host: portal.customer.com" in nuclei
+
+
+def test_malformed_nuclei_jsonl_fails_closed_without_coverage(tmp_path, monkeypatch):
+    import runner as runtime_runner
+
+    def fake_run(cmd, dest, log=None):
+        dest.write_text("{not-json\n", encoding="utf-8")
+
+    monkeypatch.setattr(runtime_runner, "run_command_to_file", fake_run)
+    monkeypatch.setattr(runtime_runner, "_which", lambda name: "/bin/nuclei" if name == "nuclei" else None)
+    monkeypatch.setattr(runtime_runner, "_pd_httpx", lambda: None)
+    monkeypatch.setattr(
+        runtime_runner,
+        "run_naabu",
+        lambda *args, **kwargs: ([{"ip": "203.0.113.10", "port": 443}], None),
+    )
+    with pytest.raises(runtime_runner.PipelineError) as exc:
+        runtime_runner.run_pipeline(
+            {
+                "scope": "wan",
+                "targets": [{"type": "ip", "value": "203.0.113.10", "source_fqdn": "portal.customer.com"}],
+                "stages": {
+                    "discovery": False,
+                    "port_mode": "none",
+                    "fingerprint": True,
+                    "vulnerability": True,
+                    "nuclei_severities": "critical",
+                    "nuclei_tags": "",
+                },
+                "intensity": {},
+                "exclusions": [],
+            }
+        )
+    result = exc.value.as_result()
+    assert result["detector_coverage"] == []
+    assert result["findings"] == []
+    assert "malformed JSONL" in str(exc.value)
+
+
+def test_schema_invalid_nuclei_row_fails_closed(tmp_path, monkeypatch):
+    import runner as runtime_runner
+
+    def fake_run(cmd, dest, log=None):
+        dest.write_text('{"info":{"name":"exposed"}}\n', encoding="utf-8")
+
+    monkeypatch.setattr(runtime_runner, "run_command_to_file", fake_run)
+    monkeypatch.setattr(runtime_runner, "_which", lambda name: "/bin/nuclei")
+    with pytest.raises(runtime_runner.StageExecutionError, match="template-id"):
+        runtime_runner.run_nuclei(["https://203.0.113.10"], "critical", "", staging_dir=tmp_path)
+
+
+def test_coverage_targets_use_source_fqdn_not_pinned_ip():
+    import runner as runtime_runner
+
+    assert runtime_runner._coverage_targets(
+        [{"value": "https://203.0.113.25", "source_fqdn": "portal.customer.com"}]
+    ) == ["https://portal.customer.com"]
+
+
+def test_nuclei_presents_source_fqdn_as_sni_while_connecting_to_pinned_ip(tmp_path, monkeypatch):
+    import runner as runtime_runner
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, dest, log=None):
+        captured["cmd"] = list(cmd)
+        captured["targets"] = Path(cmd[cmd.index("-l") + 1]).read_text(encoding="utf-8")
+        dest.write_text(
+            '{"template-id":"cve-1","host":"https://portal.customer.com","info":{"name":"x","severity":"high"}}\n',
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(runtime_runner, "run_command_to_file", fake_run)
+    monkeypatch.setattr(runtime_runner, "_which", lambda name: "/bin/nuclei")
+    findings, _artifact = runtime_runner.run_nuclei(
+        [{"value": "https://203.0.113.25", "source_fqdn": "portal.customer.com"}],
+        "critical",
+        "",
+        staging_dir=tmp_path,
+    )
+    assert findings[0]["template_id"] == "cve-1"
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert "https://203.0.113.25" in str(captured["targets"])
+    assert "portal.customer.com" not in str(captured["targets"])
+    assert cmd[cmd.index("-sni") + 1] == "portal.customer.com"
+    assert "Host: portal.customer.com" in cmd
+
+
+def test_failed_nuclei_retains_valid_positive_rows_without_coverage(tmp_path, monkeypatch):
+    import runner as runtime_runner
+
+    def fake_run(cmd, dest, log=None):
+        dest.write_text(
+            '{"template-id":"cve-2024-1","host":"https://203.0.113.10","matched-at":"https://203.0.113.10/","info":{"name":"x","severity":"high"}}\n',
+            encoding="utf-8",
+        )
+        raise RuntimeError("nuclei crashed (exit 1)")
+
+    monkeypatch.setattr(runtime_runner, "run_command_to_file", fake_run)
+    monkeypatch.setattr(runtime_runner, "_which", lambda name: "/bin/nuclei")
+    with pytest.raises(runtime_runner.StageExecutionError) as exc:
+        runtime_runner.run_nuclei(["https://203.0.113.10"], "critical", "", staging_dir=tmp_path)
+    assert exc.value.findings[0]["template_id"] == "cve-2024-1"
+    assert exc.value.artifact is not None
+
+
 def test_httpx_command_does_not_invent_no_classify_flag():
     from commands import build_httpx_command
 
