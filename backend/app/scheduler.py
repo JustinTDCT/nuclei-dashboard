@@ -17,6 +17,11 @@ from app.settings_store import get_settings
 log = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
 
+# In-process keyset cursor for discovery-metadata catch-up. Reset when a short
+# page shows the table walk is complete. Lost on process restart (harmless:
+# the next page is idempotent). S3B will relocate this job with the scheduler.
+_discovery_metadata_after_id = 0
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -167,6 +172,44 @@ def recalculate_finding_age_priority() -> None:
         db.close()
 
 
+def reset_discovery_metadata_cursor() -> None:
+    global _discovery_metadata_after_id
+    _discovery_metadata_after_id = 0
+
+
+def refresh_discovery_metadata_job():
+    """One Device keyset page per tick. Never load the whole Device table."""
+    global _discovery_metadata_after_id
+    from app.inventory import DISCOVERY_METADATA_BATCH_SIZE, refresh_discovery_metadata
+
+    db: Session = SessionLocal()
+    try:
+        page = refresh_discovery_metadata(
+            db,
+            batch_size=DISCOVERY_METADATA_BATCH_SIZE,
+            after_id=_discovery_metadata_after_id,
+        )
+        if page.complete:
+            _discovery_metadata_after_id = 0
+        else:
+            _discovery_metadata_after_id = page.last_id
+        if page.updated:
+            log.info(
+                "Discovery metadata page scanned=%s updated=%s last_id=%s complete=%s",
+                page.scanned,
+                page.updated,
+                page.last_id,
+                page.complete,
+            )
+        return page
+    except Exception:
+        log.exception("Discovery metadata refresh failed")
+        db.rollback()
+        return None
+    finally:
+        db.close()
+
+
 def cleanup_raw_artifacts() -> None:
     db: Session = SessionLocal()
     try:
@@ -191,6 +234,13 @@ def start_scheduler() -> None:
     scheduler.add_job(tick_schedules, "interval", seconds=30, id="schedules", replace_existing=True)
     scheduler.add_job(mark_stale_devices, "interval", minutes=30, id="stale", replace_existing=True)
     scheduler.add_job(mark_inactive_assets, "interval", minutes=30, id="asset-inactive", replace_existing=True)
+    scheduler.add_job(
+        refresh_discovery_metadata_job,
+        "interval",
+        minutes=5,
+        id="discovery-metadata",
+        replace_existing=True,
+    )
     from app.policy import reconcile_asset_handling_job
 
     scheduler.add_job(

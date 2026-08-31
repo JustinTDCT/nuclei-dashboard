@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from ipaddress import ip_address
 from urllib.parse import urlparse
@@ -9,6 +10,9 @@ from app.scan_ingest import ScanIngestContext
 from app.classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
 from app.models import Alert, Device, Finding
 from app.schemas import DEVICE_CLASSES, DeviceReport, FindingReport
+
+# One keyset page per call. Scheduler catch-up uses this bound; API startup must not.
+DISCOVERY_METADATA_BATCH_SIZE = 250
 
 
 def _now() -> datetime:
@@ -359,25 +363,69 @@ def store_findings(
     return ingest_findings(db, tenant_id, job_id, scope, reports)
 
 
-def refresh_discovery_metadata(db: Session) -> int:
+@dataclass(frozen=True)
+class DiscoveryMetadataPage:
+    scanned: int
+    updated: int
+    last_id: int
+    complete: bool
+
+
+def apply_stored_discovery_metadata(device: Device) -> bool:
+    """Re-derive classification, auto_label, and tech from stored Device fields.
+
+    Same rules as the former whole-table startup refresh. Live ingest already
+    applies current heuristics from the DeviceReport; this path is only the
+    catch-up for rows that have not been re-observed since a heuristic change.
+    """
+    changed = False
+    if device.classification in ("", "Unknown"):
+        guessed = infer_class(device.hostname or "", device.ports, device.title or "", device.tech or "")
+        if guessed not in ("", "Unknown", "Other"):
+            device.classification = guessed
+            changed = True
+    label = infer_label(device.hostname or "", device.ports, device.title or "", device.tech or "")
+    if label != (device.auto_label or ""):
+        device.auto_label = label
+        changed = True
+    cleaned = clean_tech(device.tech or "")
+    if cleaned != (device.tech or ""):
+        device.tech = cleaned
+        changed = True
+    return changed
+
+
+def refresh_discovery_metadata(
+    db: Session,
+    *,
+    batch_size: int = DISCOVERY_METADATA_BATCH_SIZE,
+    after_id: int = 0,
+) -> DiscoveryMetadataPage:
+    """Apply current classifier/label/tech-cleaning to one Device keyset page.
+
+    Do not call this from API process startup. One page per invocation; the
+    in-process scheduler owns incremental catch-up. Never loads the whole
+    Device table.
+    """
+    limit = max(1, int(batch_size))
+    rows = (
+        db.query(Device)
+        .filter(Device.id > after_id)
+        .order_by(Device.id.asc())
+        .limit(limit)
+        .all()
+    )
     updated = 0
-    for device in db.query(Device).all():
-        changed = False
-        if device.classification in ("", "Unknown"):
-            guessed = infer_class(device.hostname or "", device.ports, device.title or "", device.tech or "")
-            if guessed not in ("", "Unknown", "Other"):
-                device.classification = guessed
-                changed = True
-        label = infer_label(device.hostname or "", device.ports, device.title or "", device.tech or "")
-        if label != (device.auto_label or ""):
-            device.auto_label = label
-            changed = True
-        cleaned = clean_tech(device.tech or "")
-        if cleaned != (device.tech or ""):
-            device.tech = cleaned
-            changed = True
-        if changed:
+    last_id = after_id
+    for device in rows:
+        last_id = device.id
+        if apply_stored_discovery_metadata(device):
             updated += 1
     if updated:
         db.commit()
-    return updated
+    return DiscoveryMetadataPage(
+        scanned=len(rows),
+        updated=updated,
+        last_id=last_id,
+        complete=len(rows) < limit,
+    )
