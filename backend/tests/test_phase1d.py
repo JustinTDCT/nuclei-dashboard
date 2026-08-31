@@ -826,9 +826,10 @@ def test_command_builders_honor_stages_and_do_not_invent_flags():
 
     host_disc = build_naabu_host_discovery_command("naabu", ["10.0.0.0/24"], intensity={"naabu_rate": 200})
     assert host_disc is not None
-    assert "-sn" in host_disc
+    assert "-sn" not in host_disc
     assert "-top-ports" not in host_disc
-    assert "-p" not in host_disc
+    assert "-p" in host_disc
+    assert "22,80" in host_disc[host_disc.index("-p") + 1]
     common = build_naabu_command("naabu", ["10.0.0.0/24"], port_mode="common", intensity={"naabu_rate": 200})
     assert "-top-ports" in common and "100" in common
     assert "-rate" in common

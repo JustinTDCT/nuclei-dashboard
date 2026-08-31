@@ -1053,7 +1053,7 @@ Choose:
 
 Discovers reachable systems.
 
-When port discovery is set to `none`, discovery may use Naabu host-discovery behavior where required.
+When port discovery is set to `none`, or when port scan targets are limited to detected hosts, discovery uses a short TCP probe. Naabu `-sn` is not used because it requires root and the Agent does not run as root.
 
 ### Port discovery
 

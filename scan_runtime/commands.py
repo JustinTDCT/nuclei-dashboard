@@ -20,6 +20,9 @@ PORT_SCOPE_DETECTED = "detected"
 PORT_SCOPE_ALL = "all"
 COMMON_TOP_PORTS = "100"
 DEEP_TOP_PORTS = "1000"
+# Naabu -sn requires root. The Agent is uid 1000 with NET_RAW, so discovery
+# is a short TCP SYN probe of ports that usually answer on a LAN.
+HOST_DISCOVERY_PORTS = "22,80,135,139,443,445,548,631,3389,5357,5900,8080,8443,9100"
 
 
 def build_naabu_command(
@@ -66,10 +69,10 @@ def build_naabu_host_discovery_command(
     intensity: dict[str, Any] | None = None,
     exclude_hosts: list[str] | None = None,
 ) -> list[str] | None:
-    """Host discovery only. Uses documented Naabu -sn / -host-discovery, not a port scan."""
+    """Find live hosts without Naabu -sn, which exits unless the process is root."""
     if not targets:
         return None
-    cmd = [binary, "-host", ",".join(targets), "-json", "-silent", "-sn"]
+    cmd = [binary, "-host", ",".join(targets), "-json", "-silent", "-p", HOST_DISCOVERY_PORTS]
     intensity = intensity or {}
     if intensity.get("naabu_rate") is not None:
         cmd.extend(["-rate", str(int(intensity["naabu_rate"]))])

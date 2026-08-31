@@ -798,7 +798,7 @@ def run_host_discovery(
             exclude_hosts=exclude_hosts,
         )
         if cmd:
-            _log("Running Naabu host discovery (-sn) before any port scan", log)
+            _log("Running Naabu TCP host discovery before any full port scan", log)
             if staging_dir is None:
                 rows = _parse_jsonl(_run(cmd, log))
                 if row_consumer is not None:
