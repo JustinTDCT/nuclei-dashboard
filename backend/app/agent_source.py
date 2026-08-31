@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-PINNED_AGENT_GIT_COMMIT = "b1ba805d4af99a4afbd4fcc821c4686c7906e247"
+PINNED_AGENT_GIT_COMMIT = "799443436ef2d69ca85dde1f52e78600ae50ca98"
 DEFAULT_AGENT_GIT_CONTEXT = (
     f"https://github.com/JustinTDCT/nuclei-dashboard.git#{PINNED_AGENT_GIT_COMMIT}:scan_runtime"
 )
