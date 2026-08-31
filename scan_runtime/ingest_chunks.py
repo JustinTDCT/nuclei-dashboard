@@ -3,8 +3,9 @@
 Keep these ceilings in lockstep with backend ``app.ingest_chunks`` defaults
 and the ``INGEST_MAX_ROWS`` / ``INGEST_MAX_BYTES`` settings. The server
 enforces the same limits; this module only prevents a whole-list POST from
-exceeding them. A single record larger than the byte limit is raised, never
-sent as an unbounded one-record chunk.
+exceeding them. A single record that cannot fit inside a JSON list
+(``2 + encoded size > max_bytes``) is raised; it is never sent as an
+unbounded one-record chunk.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def iter_ingest_chunks(
     item_sizes: list[int] = []
     for row in rows:
         size = encoded_bytes(row)
-        if size > max_bytes:
+        if 2 + size > max_bytes:
             raise IngestLimitError(f"single {kind} record exceeds {max_bytes}-byte limit")
         next_count = len(chunk) + 1
         next_bytes = 2 + sum(item_sizes) + size + len(chunk)

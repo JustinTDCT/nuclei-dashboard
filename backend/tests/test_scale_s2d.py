@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.ingest_chunks import (
     DEFAULT_INGEST_MAX_ROWS,
     IngestLimitError,
     encoded_list_bytes,
+    encoded_record_bytes,
     iter_ingest_chunks,
     validate_ingest_batch,
 )
@@ -46,12 +48,81 @@ def test_s2d_has_no_schema_revision():
     assert not any(name.startswith("0018_") for name in names)
 
 
+def _record_of_encoded_size(size: int) -> dict:
+    overhead = len('{"p":""}')
+    if size < overhead:
+        raise AssertionError(f"encoded size {size} is smaller than dict overhead {overhead}")
+    return {"p": "x" * (size - overhead)}
+
+
+def _runtime_ingest_chunks():
+    spec = importlib.util.spec_from_file_location(
+        "runtime_ingest_chunks",
+        RUNTIME_ROOT / "ingest_chunks.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_chunker_rejects_single_record_over_byte_limit():
     rows = [{"raw": "x" * 2000}]
     with pytest.raises(IngestLimitError, match="single device record exceeds"):
         list(iter_ingest_chunks(rows, max_rows=100, max_bytes=500, kind="device"))
     with pytest.raises(IngestLimitError, match="single finding record exceeds"):
         validate_ingest_batch(rows, kind="finding", max_rows=100, max_bytes=500)
+
+
+def test_chunker_rejects_record_that_cannot_fit_as_a_json_list():
+    max_bytes = 64
+    too_tight = _record_of_encoded_size(max_bytes - 1)
+    assert encoded_record_bytes(too_tight) == max_bytes - 1
+    assert encoded_record_bytes(too_tight) < max_bytes
+    assert 2 + encoded_record_bytes(too_tight) > max_bytes
+    with pytest.raises(IngestLimitError, match="single device record exceeds"):
+        list(iter_ingest_chunks([too_tight], max_rows=10, max_bytes=max_bytes, kind="device"))
+    with pytest.raises(IngestLimitError, match="single finding record exceeds"):
+        validate_ingest_batch([too_tight], kind="finding", max_rows=10, max_bytes=max_bytes)
+
+    exact = _record_of_encoded_size(max_bytes - 2)
+    chunks = list(iter_ingest_chunks([exact], max_rows=10, max_bytes=max_bytes, kind="device"))
+    assert len(chunks) == 1
+    assert encoded_list_bytes(chunks[0]) == max_bytes
+    validate_ingest_batch(chunks[0], kind="device", max_rows=10, max_bytes=max_bytes)
+
+    runtime = _runtime_ingest_chunks()
+    with pytest.raises(runtime.IngestLimitError, match="single device record exceeds"):
+        list(runtime.iter_ingest_chunks([too_tight], max_rows=10, max_bytes=max_bytes, kind="device"))
+    runtime_chunks = list(
+        runtime.iter_ingest_chunks([exact], max_rows=10, max_bytes=max_bytes, kind="device")
+    )
+    assert len(runtime_chunks) == 1
+    assert runtime.encoded_bytes(runtime_chunks[0]) == max_bytes
+
+
+def test_every_emitted_chunk_fits_encoded_list_ceiling():
+    max_bytes = 80
+    rows = [
+        _record_of_encoded_size(10),
+        _record_of_encoded_size(max_bytes - 2),
+        _record_of_encoded_size(25),
+        _record_of_encoded_size(25),
+        _record_of_encoded_size(40),
+    ]
+    chunks = list(iter_ingest_chunks(rows, max_rows=100, max_bytes=max_bytes, kind="device"))
+    assert any(len(chunk) == 1 for chunk in chunks)
+    for chunk in chunks:
+        assert encoded_list_bytes(chunk) <= max_bytes
+        validate_ingest_batch(chunk, kind="device", max_rows=100, max_bytes=max_bytes)
+
+    runtime = _runtime_ingest_chunks()
+    runtime_chunks = list(
+        runtime.iter_ingest_chunks(rows, max_rows=100, max_bytes=max_bytes, kind="device")
+    )
+    assert any(len(chunk) == 1 for chunk in runtime_chunks)
+    for chunk in runtime_chunks:
+        assert runtime.encoded_bytes(chunk) <= max_bytes
 
 
 def test_chunker_splits_on_rows_and_encoded_bytes():

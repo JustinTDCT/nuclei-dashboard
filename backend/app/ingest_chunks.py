@@ -2,8 +2,9 @@
 
 One ingest semantic: the existing list POST bodies. This module only
 enforces row-count and encoded-byte ceilings and slices a list so each
-slice stays inside those ceilings. A single record larger than the byte
-limit is rejected; it is never emitted as an unbounded one-record chunk.
+slice stays inside those ceilings. A single record that cannot fit inside a JSON list
+(``2 + encoded_record_bytes(row) > max_bytes``) is rejected; it is never
+emitted as an unbounded one-record chunk.
 No schema change.
 """
 
@@ -53,7 +54,7 @@ def validate_ingest_batch(rows: list[Any], *, kind: str, max_rows: int, max_byte
         raise IngestLimitError(f"{kind} batch exceeds {max_rows}-row limit")
     for row in rows:
         size = encoded_record_bytes(row)
-        if size > max_bytes:
+        if 2 + size > max_bytes:
             raise IngestLimitError(f"single {kind} record exceeds {max_bytes}-byte limit")
     if encoded_list_bytes(rows) > max_bytes:
         raise IngestLimitError(f"{kind} batch exceeds {max_bytes}-byte limit")
@@ -70,7 +71,7 @@ def iter_ingest_chunks(
     item_sizes: list[int] = []
     for row in rows:
         size = encoded_record_bytes(row)
-        if size > max_bytes:
+        if 2 + size > max_bytes:
             raise IngestLimitError(f"single {kind} record exceeds {max_bytes}-byte limit")
         next_count = len(chunk) + 1
         next_bytes = 2 + sum(item_sizes) + size + len(chunk)
