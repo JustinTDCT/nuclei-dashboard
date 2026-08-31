@@ -290,6 +290,34 @@ def stop_scheduler(*, wait: bool = False) -> None:
         scheduler.shutdown(wait=wait)
 
 
+def scheduler_backend_pid(conn: Connection) -> int:
+    pid = conn.execute(text("SELECT pg_backend_pid()")).scalar()
+    if conn.in_transaction():
+        conn.commit()
+    return int(pid)
+
+
+def leader_session_is_current(conn: Connection, expected_pid: int) -> bool:
+    """True only while this connection is still the same PostgreSQL backend.
+
+    A dropped TCP session, a restarted database, or a transparent SQLAlchemy
+    reconnect all fail this check. Session-level advisory locks die with the
+    backend; APScheduler must stop when this returns False.
+    """
+    try:
+        return scheduler_backend_pid(conn) == int(expected_pid)
+    except Exception:
+        return False
+
+
+def reset_scheduler() -> None:
+    """Build a new process-global scheduler after shutdown. Production exits instead."""
+    global scheduler
+    if scheduler.running:
+        scheduler.shutdown(wait=True)
+    scheduler = BackgroundScheduler()
+
+
 def try_acquire_scheduler_leader_lock(conn: Connection) -> bool:
     acquired = bool(
         conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": SCHEDULER_LEADER_LOCK_KEY}).scalar()

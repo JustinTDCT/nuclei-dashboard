@@ -116,6 +116,7 @@ def test_second_leader_attempt_does_not_start_apscheduler(reset_db):
     from app.database import engine
     from app.scheduler import (
         release_scheduler_leader_lock,
+        reset_scheduler,
         scheduler,
         start_scheduler_if_leader,
         stop_scheduler,
@@ -131,6 +132,124 @@ def test_second_leader_attempt_does_not_start_apscheduler(reset_db):
     finally:
         stop_scheduler(wait=True)
         release_scheduler_leader_lock(first)
+        reset_scheduler()
         first.close()
         second.close()
-    assert scheduler.running is False
+    from app.scheduler import scheduler as sched_after
+
+    assert sched_after.running is False
+
+
+@requires_postgres
+def test_lost_leader_session_stops_apscheduler_before_new_leader(reset_db):
+    import threading
+    import time
+
+    from sqlalchemy import text
+
+    from app.database import engine
+    from app.scheduler import (
+        reset_scheduler,
+        scheduler,
+        scheduler_backend_pid,
+        try_acquire_scheduler_leader_lock,
+    )
+    from app.scheduler_process import hold_leadership
+
+    first = engine.connect()
+    killer = engine.connect()
+    second = engine.connect()
+    outcome: list[str] = []
+
+    def run_leader() -> None:
+        outcome.append(hold_leadership(first, probe_seconds=0.15))
+
+    try:
+        assert try_acquire_scheduler_leader_lock(first) is True
+        pid = scheduler_backend_pid(first)
+        leader = threading.Thread(target=run_leader, daemon=True)
+        leader.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and not scheduler.running:
+            time.sleep(0.05)
+        assert scheduler.running is True
+        killer.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        if killer.in_transaction():
+            killer.commit()
+        leader.join(timeout=15)
+        assert not leader.is_alive()
+        assert outcome == ["lost"]
+        assert scheduler.running is False
+        assert try_acquire_scheduler_leader_lock(second) is True
+    finally:
+        reset_scheduler()
+        for conn in (first, killer, second):
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+@requires_postgres
+def test_graceful_shutdown_holds_lock_until_running_job_finishes(reset_db):
+    import threading
+    import time
+    from datetime import datetime, timedelta
+
+    from app.database import engine
+    from app.scheduler import (
+        reset_scheduler,
+        scheduler,
+        try_acquire_scheduler_leader_lock,
+    )
+    from app.scheduler_process import hold_leadership
+
+    first = engine.connect()
+    second = engine.connect()
+    job_started = threading.Event()
+    release_job = threading.Event()
+    stop_leader = threading.Event()
+    outcome: list[str] = []
+
+    def blocked_job() -> None:
+        job_started.set()
+        if not release_job.wait(timeout=20):
+            raise AssertionError("blocked scheduler job was not released")
+
+    def run_leader() -> None:
+        outcome.append(hold_leadership(first, probe_seconds=0.1, should_stop=stop_leader.is_set))
+
+    try:
+        assert try_acquire_scheduler_leader_lock(first) is True
+        leader = threading.Thread(target=run_leader, daemon=True)
+        leader.start()
+        deadline = time.time() + 10
+        while time.time() < deadline and not scheduler.running:
+            time.sleep(0.05)
+        assert scheduler.running is True
+        scheduler.add_job(
+            blocked_job,
+            "date",
+            run_date=datetime.now() + timedelta(milliseconds=50),
+            id="s3b-shutdown-block",
+            replace_existing=True,
+            misfire_grace_time=30,
+        )
+        assert job_started.wait(timeout=5)
+        stop_leader.set()
+        time.sleep(0.4)
+        assert leader.is_alive()
+        assert try_acquire_scheduler_leader_lock(second) is False
+        release_job.set()
+        leader.join(timeout=15)
+        assert not leader.is_alive()
+        assert outcome == ["stopped"]
+        assert scheduler.running is False
+        assert try_acquire_scheduler_leader_lock(second) is True
+    finally:
+        release_job.set()
+        stop_leader.set()
+        reset_scheduler()
+        first.close()
+        second.close()
+
