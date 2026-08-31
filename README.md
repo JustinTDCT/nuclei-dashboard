@@ -675,21 +675,21 @@ Do not start the optional `nuclei-agent` profile on this host. That is not how y
 docker compose ps
 ```
 
-Every service above should be running (or healthy). Then:
+Every service above should be running (or healthy). Then check two things separately.
 
-**Publicly trusted certificate**
+**Reachability** (no certificate verification). Use `-k` whenever you are only asking “is the port open?” A self-signed cert makes a plain `curl https://...` fail with `curl: (60) SSL certificate problem: self-signed certificate`. That is not a down server.
 
 ```bash
-curl https://YOUR_SERVER:8118/api/health
+curl -k https://YOUR_SERVER:8118/api/health
 ```
 
-**Self-signed certificate** (use the public cert you just created)
+**Certificate verification** (required before Agents use this URL). On the server:
 
 ```bash
 curl --cacert certs/cert.pem https://YOUR_SERVER:8118/api/health
 ```
 
-**Internal CA**
+Publicly trusted certificates can omit `--cacert` and `-k`. Internal CA:
 
 ```bash
 curl --cacert /path/to/internal-ca.pem https://YOUR_SERVER:8118/api/health
@@ -700,6 +700,8 @@ You want:
 ```json
 {"ok":true}
 ```
+
+The host or IP in the URL must be the same one on the certificate (the SAN you printed in step 5) and the same one in `PUBLIC_URL`. If the cert was issued for `10.150.10.155` and you curl `10.150.125.70`, `--cacert` fails even though `curl -k` succeeds.
 
 If that fails:
 
@@ -713,10 +715,9 @@ Typical problems:
 - `.env` still has empty or placeholder secrets
 - `certs/cert.pem` or `certs/key.pem` missing
 - `PUBLIC_URL` / `SITE_ADDRESS` still set to the example lab IP
+- curl used a different IP or DNS name than the certificate SAN
 - port 8118 blocked
 - first build still running (`docker compose logs -f scanner`)
-
-Do not use `curl -k` as your normal check. It hides certificate mistakes that will break Agents later.
 
 ---
 
@@ -775,7 +776,8 @@ Optional: open the **WAN targets** tab and add a public IP, public CIDR, or FQDN
 
 ```text
 [ ] docker compose ps shows postgres, api, web, scanner, and caddy running
-[ ] curl https://YOUR_SERVER:8118/api/health returns {"ok":true}
+[ ] curl -k https://YOUR_SERVER:8118/api/health returns {"ok":true}
+[ ] curl --cacert certs/cert.pem (or a public CA) also returns {"ok":true} for that same URL
 [ ] the dashboard opens in a browser
 [ ] you can sign in as the administrator
 [ ] Admin → Settings has the reachable central host and port 8118
@@ -812,27 +814,28 @@ You do **not** copy the whole Nuclei Dashboard repo onto the Agent host.
 
 ## 1. Prove the Agent host can reach the dashboard
 
-On the **Agent** machine:
+Use the **same** hostname or IP that is on the server certificate and in `PUBLIC_URL`. If the cert SAN is `scanner.thedubes.net`, curl and `CENTRAL_URL` must use that name, not a different interface IP.
 
-**Public certificate**
+**Reachability only.** A self-signed cert makes a plain `curl https://...` fail with `curl: (60)`. Skip verification for this first check:
 
 ```bash
+curl -k https://YOUR_SERVER:8118/api/health
+```
+
+You want `{"ok":true}`. `-k` only proves the host, port, and API respond. It is not how the Agent will connect.
+
+**Then verify the certificate** (after you copy the trust file in step 4, or immediately if the cert is publicly trusted):
+
+```bash
+# public certificate
 curl https://YOUR_SERVER:8118/api/health
-```
 
-**Self-signed** (copy `certs/cert.pem` from the server first; see step 4)
-
-```bash
+# self-signed or internal CA
+cd ~/nuclei-agent
 curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
 ```
 
-**Internal CA**
-
-```bash
-curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
-```
-
-You want `{"ok":true}`. If you do not have `agent-certs/ca.pem` yet, use the public-certificate curl or finish step 4 first. If this fails, fix DNS, routing, firewall, or TLS before creating a container.
+If `-k` works and `--cacert` does not, the URL does not match the certificate name/IP, or `ca.pem` is not the server’s public cert (or its issuing CA). Fix that before starting the Agent container.
 
 ---
 
@@ -891,7 +894,7 @@ CENTRAL_URL=https://YOUR_SERVER:8118
 TLS_VERIFY=1
 ```
 
-`CENTRAL_URL` must match the working `curl` URL from step 1.
+`CENTRAL_URL` must be the same URL that passed `curl --cacert` (or plain `curl` if the cert is public).
 
 ---
 
@@ -921,11 +924,19 @@ TLS_CA_FILE=/certs/ca.pem
 
 `/certs/ca.pem` is the path **inside** the container. The Compose file mounts `./agent-certs` there.
 
-Test again:
+Reachability without verification:
+
+```bash
+curl -k https://YOUR_SERVER:8118/api/health
+```
+
+Then verify with the **same** host or IP that is on the certificate:
 
 ```bash
 curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
 ```
+
+A bare `curl https://...` (no `-k`, no `--cacert`) still fails on a self-signed cert (`curl: (60)`). That is expected. If `--cacert` fails with a name mismatch, regenerate the server certificate for the address Agents actually use, or change `CENTRAL_URL` / `PUBLIC_URL` to that address — do not invent a second IP.
 
 ### Internal CA
 
@@ -1023,7 +1034,8 @@ docker compose down -v
 ## Remote Agent checklist
 
 ```text
-[ ] curl from the Agent host to https://YOUR_SERVER:8118/api/health succeeds
+[ ] curl -k from the Agent host returns {"ok":true}
+[ ] curl --cacert ./agent-certs/ca.pem (or a public CA) also succeeds for that same URL
 [ ] Agent created on the correct Tenant and Site
 [ ] docker-compose.yml and agent.env are on the Agent host
 [ ] certificate trust matches the server (public, CA file, or self-signed)
@@ -1432,18 +1444,22 @@ Check:
 5. Internal CA configuration if applicable.
 6. Whether TLS verification errors appear in Agent logs.
 
-Example test from the Agent host:
+Reachability (no cert verification):
 
 ```bash
-curl https://YOUR_SERVER:8118/api/health
+curl -k https://YOUR_SERVER:8118/api/health
 ```
 
-With an internal CA or self-signed public cert:
+A bare `curl https://...` without `-k` or `--cacert` fails with `curl: (60) SSL certificate problem: self-signed certificate`. That is expected on a self-signed install.
+
+Then verify with the same host or IP as the certificate SAN:
 
 ```bash
 curl --cacert ./agent-certs/ca.pem \
   https://YOUR_SERVER:8118/api/health
 ```
+
+If `-k` works and `--cacert` does not, the Agent URL does not match the cert, or the CA file is wrong.
 
 ---
 
@@ -1659,8 +1675,22 @@ docker compose logs --tail=100 api caddy scanner
 
 ## API health
 
+Reachability (no cert verification):
+
+```bash
+curl -k https://YOUR_SERVER:8118/api/health
+```
+
+Public certificate:
+
 ```bash
 curl https://YOUR_SERVER:8118/api/health
+```
+
+Self-signed or internal CA (verification):
+
+```bash
+curl --cacert certs/cert.pem https://YOUR_SERVER:8118/api/health
 ```
 
 ## Start Agent with renamed files
