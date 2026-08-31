@@ -62,7 +62,7 @@ def test_generated_agent_compose_is_immutably_pinned(monkeypatch):
     )
     compose = compose_gen.agent_compose(agent, "https://dashboard.example.com:8118")
     assert "refs/heads/main" not in compose
-    assert "a4e8f63375052d7eac0e13c62a860a60f2c5ead5" in compose
+    assert "6cb398a6574befdecbf6930ba1f99a40bfc43003" in compose
     assert "no-new-privileges:true" in compose
     assert "network_mode: host" in compose
     assert 'user: "1000:1000"' in compose
@@ -74,8 +74,8 @@ def test_generated_agent_compose_is_immutably_pinned(monkeypatch):
     agent_file = (REPO_ROOT / "agent" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "refs/heads/main" not in root
     assert "refs/heads/main" not in agent_file
-    assert "a4e8f63375052d7eac0e13c62a860a60f2c5ead5" in root
-    assert "a4e8f63375052d7eac0e13c62a860a60f2c5ead5" in agent_file
+    assert "6cb398a6574befdecbf6930ba1f99a40bfc43003" in root
+    assert "6cb398a6574befdecbf6930ba1f99a40bfc43003" in agent_file
     dockerfile = (RUNTIME_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "USER 1000:1000" in dockerfile
     assert "user: \"1000:1000\"" in root
