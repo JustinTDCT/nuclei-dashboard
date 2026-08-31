@@ -279,7 +279,8 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
     if not targets:
         raise RuntimeError("No targets configured for this scan")
 
-    staging_dir = Path(tempfile.mkdtemp(prefix="nd-raw-"))
+    spool = _job_spool(job)
+    staging_dir = spool.raw_staging_dir()
     artifacts: list[dict[str, Any]] = []
     index = DeviceIndex(scope)
     http_urls: list[dict[str, str]] = []
@@ -287,7 +288,6 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
     coverage: list[dict[str, Any]] = []
     nuclei_targets: list[Any] = []
     devices: list[dict[str, Any]] = []
-    spool = _job_spool(job)
     keep_lists = job.get("job_id") is None
     devices_spooled = False
 
@@ -361,7 +361,8 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             if artifact:
                 artifacts.append(artifact)
             _consume_returned_rows(rows, on_host)
-        if discovery_enabled:
+        lan_identity = discovery_enabled and str(scope).lower() == "lan"
+        if lan_identity:
             note_stage("discovery", "Identity sweep (ICMP/ARP/MAC, no credentials)")
             for row in discover_liveness(targets, log=log):
                 index.add_identity(row)
@@ -371,6 +372,7 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             for ip, mac in read_neighbor_table().items():
                 if ip in live:
                     index.add_identity({"ip": ip, "mac": mac, "tech": "arp"})
+        lock_detected = port_scope == PORT_SCOPE_DETECTED and discovery_enabled
         if port_mode != PORT_MODE_NONE:
             port_targets = _port_scan_targets(
                 index, targets, port_scope=port_scope, discovery_ran=run_discovery
@@ -398,7 +400,7 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
                     artifacts.append(artifact)
                 _consume_returned_rows(rows, on_host)
         if stages.get("fingerprint", True):
-            probe_hosts = index.probe_hosts(targets)
+            probe_hosts = index.probe_hosts(targets, restrict_to_discovered=lock_detected)
             rows, artifact = _unpack_stage(
                 run_httpx(
                     probe_hosts,
@@ -419,10 +421,9 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
         enrich_identities(devices, log=log)
         index.replace_devices(devices)
         if stages.get("vulnerability"):
-            nuclei_targets = http_urls or index.nuclei_host_targets() or [
-                {"value": row["value"], "source_fqdn": str(row.get("source_fqdn") or "")}
-                for row in targets
-            ]
+            nuclei_targets = _nuclei_scan_targets(
+                index, targets, http_urls, lock_detected=lock_detected
+            )
             rows, artifact = _unpack_stage(
                 run_nuclei(
                     nuclei_targets,
@@ -1247,6 +1248,40 @@ def _port_scan_targets(
     return seen
 
 
+def _explicit_host_rows(targets: list[dict[str, str]]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in targets:
+        if row.get("type") not in {"ip", "fqdn"}:
+            continue
+        value = str(row.get("value") or "").strip()
+        if not value:
+            continue
+        rows.append({"value": value, "source_fqdn": str(row.get("source_fqdn") or "")})
+    return rows
+
+
+def _nuclei_scan_targets(
+    index: "DeviceIndex",
+    targets: list[dict[str, str]],
+    http_urls: list[dict[str, str]],
+    *,
+    lock_detected: bool,
+) -> list[dict[str, str]]:
+    """Nuclei inputs. Detected mode never silently re-expands CIDRs."""
+    if http_urls:
+        return list(http_urls)
+    host_targets = index.nuclei_host_targets()
+    if host_targets:
+        return host_targets
+    if lock_detected:
+        return _explicit_host_rows(targets)
+    return [
+        {"value": row["value"], "source_fqdn": str(row.get("source_fqdn") or "")}
+        for row in targets
+        if row.get("value")
+    ]
+
+
 class DeviceIndex:
     """IP-keyed device merge. RAM tracks unique hosts, not every scanner row."""
 
@@ -1351,7 +1386,9 @@ class DeviceIndex:
         if fqdn and ip not in self.fqdn_by_ip:
             self.fqdn_by_ip[ip] = fqdn
 
-    def probe_hosts(self, targets: list[dict[str, str]]) -> list[dict[str, Any]]:
+    def probe_hosts(
+        self, targets: list[dict[str, str]], *, restrict_to_discovered: bool = False
+    ) -> list[dict[str, Any]]:
         by_ip = _fqdns_for_ip(targets)
         hosts: list[dict[str, Any]] = []
         if self.ports:
@@ -1372,8 +1409,9 @@ class DeviceIndex:
                             row["source_fqdn"] = fqdn
                         hosts.append(row)
             return hosts
+        allowed_types = {"ip", "fqdn"} if restrict_to_discovered else {"ip", "fqdn", "cidr"}
         for row in targets:
-            if row.get("type") not in {"ip", "fqdn", "cidr"}:
+            if row.get("type") not in allowed_types:
                 continue
             host = {"ip": row["value"]}
             if row.get("source_fqdn"):

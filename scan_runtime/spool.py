@@ -125,6 +125,16 @@ class JobSpool:
         for path in self.dir.glob("*.tmp"):
             path.unlink(missing_ok=True)
 
+    def raw_staging_dir(self) -> Path:
+        """Durable per-job raw evidence. Survives container recreate with /data."""
+        staging = self.dir / "raw"
+        staging.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(staging, 0o700)
+        except OSError:
+            pass
+        return staging
+
     def pipeline_complete(self) -> bool:
         return (self.dir / DONE_NAME).is_file()
 

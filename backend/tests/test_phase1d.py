@@ -943,6 +943,85 @@ def test_pipeline_all_addresses_port_scans_cidrs_without_ping_first():
     assert captured["naabu"] == ["10.1.0.0/24"]
 
 
+def test_pipeline_wan_skips_lan_identity_probes():
+    import runner as runtime_runner
+
+    with (
+        patch.object(runtime_runner, "discover_liveness") as liveness,
+        patch.object(runtime_runner, "discover_udp") as udp,
+        patch.object(runtime_runner, "read_neighbor_table") as neighbors,
+        patch.object(runtime_runner, "run_host_discovery", return_value=([{"ip": "203.0.113.10"}], None)),
+        patch.object(runtime_runner, "run_httpx", return_value=([], None)),
+        patch.object(runtime_runner, "collect_run_provenance", return_value={"runtime_version": "t"}),
+    ):
+        runtime_runner.run_pipeline(
+            {
+                "scope": "wan",
+                "targets": [{"type": "cidr", "value": "203.0.113.0/24"}],
+                "stages": {
+                    "discovery": True,
+                    "port_mode": "none",
+                    "port_scope": "detected",
+                    "fingerprint": False,
+                    "vulnerability": False,
+                },
+                "intensity": {},
+                "exclusions": [],
+            }
+        )
+    liveness.assert_not_called()
+    udp.assert_not_called()
+    neighbors.assert_not_called()
+
+
+def test_detected_empty_discovery_does_not_reexpand_cidrs():
+    import runner as runtime_runner
+
+    captured: dict[str, list] = {}
+
+    def fake_httpx(hosts, **_kwargs):
+        captured["httpx"] = list(hosts)
+        return ([], None)
+
+    def fake_nuclei(targets, **_kwargs):
+        captured["nuclei"] = list(targets)
+        return ([], None)
+
+    with (
+        patch.object(runtime_runner, "discover_liveness", return_value=[]),
+        patch.object(runtime_runner, "read_neighbor_table", return_value={}),
+        patch.object(runtime_runner, "run_host_discovery", return_value=([], None)),
+        patch.object(runtime_runner, "run_naabu") as naabu,
+        patch.object(runtime_runner, "run_httpx", side_effect=fake_httpx),
+        patch.object(runtime_runner, "run_nuclei", side_effect=fake_nuclei),
+        patch.object(runtime_runner, "discover_udp", return_value=[]),
+        patch.object(runtime_runner, "fingerprint_non_http", return_value=[]),
+        patch.object(runtime_runner, "collect_run_provenance", return_value={"runtime_version": "t"}),
+    ):
+        runtime_runner.run_pipeline(
+            {
+                "scope": "lan",
+                "targets": [{"type": "cidr", "value": "10.1.0.0/24"}],
+                "stages": {
+                    "discovery": True,
+                    "port_mode": "common",
+                    "port_scope": "detected",
+                    "fingerprint": True,
+                    "vulnerability": True,
+                    "nuclei_severities": "critical",
+                    "nuclei_tags": "",
+                },
+                "intensity": {},
+                "exclusions": [],
+            }
+        )
+    naabu.assert_not_called()
+    assert captured["httpx"] == []
+    assert captured["nuclei"] == []
+    assert "10.1.0.0/24" not in captured["httpx"]
+    assert "10.1.0.0/24" not in [row.get("value") if isinstance(row, dict) else row for row in captured["nuclei"]]
+
+
 def test_custom_ports_and_fqdn_normalization():
     from app.scan_stages import StageConfigError, parse_custom_ports
     from app.wan_targets import WanTargetInvalidError, normalize_wan_target

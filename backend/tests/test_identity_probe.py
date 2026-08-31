@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+import struct
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -50,6 +52,70 @@ def test_icmp_checksum_is_ones_complement():
     packet = _echo_request(0x1234, 1)
     assert packet[0] == 8
     assert _icmp_checksum(packet) == 0
+
+
+def _echo_reply(ident: int, seq: int, *, with_ip_header: bool = False) -> bytes:
+    from identity_probe import _icmp_checksum
+
+    header = struct.pack("!BBHHH", 0, 0, 0, ident, seq)
+    icmp = struct.pack("!BBHHH", 0, 0, _icmp_checksum(header), ident, seq)
+    if not with_ip_header:
+        return icmp
+    ip = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45,
+        0,
+        28,
+        0,
+        0,
+        64,
+        1,
+        0,
+        socket.inet_aton("8.8.8.8"),
+        socket.inet_aton("10.1.0.2"),
+    )
+    return ip + icmp
+
+
+class _FakeIcmp:
+    def __init__(self, replies: list[tuple[bytes, tuple]]):
+        self.replies = list(replies)
+        self.sent: list[tuple[bytes, tuple]] = []
+
+    def settimeout(self, _timeout: float) -> None:
+        return None
+
+    def sendto(self, packet: bytes, addr: tuple) -> int:
+        self.sent.append((packet, addr))
+        return len(packet)
+
+    def recvfrom(self, _size: int) -> tuple[bytes, tuple]:
+        if not self.replies:
+            raise OSError("no more icmp replies")
+        return self.replies.pop(0)
+
+    def close(self) -> None:
+        return None
+
+
+def test_icmp_sweep_rejects_replies_outside_requested_set():
+    from identity_probe import icmp_sweep
+
+    ident = 0x1234
+    sock = _FakeIcmp(
+        [
+            (_echo_reply(ident, 0, with_ip_header=True), ("8.8.8.8", 0)),
+            (_echo_reply(0x9999, 0, with_ip_header=True), ("10.1.0.9", 0)),
+            (_echo_reply(ident, 0, with_ip_header=True), ("10.1.0.9", 0)),
+        ]
+    )
+    with (
+        patch("identity_probe.os.getpid", return_value=ident),
+        patch("identity_probe._open_icmp_socket", return_value=sock),
+    ):
+        alive = icmp_sweep(["10.1.0.9"])
+    assert alive == {"10.1.0.9"}
+    assert "8.8.8.8" not in alive
 
 
 def test_classify_uses_snmp_sysdescr():

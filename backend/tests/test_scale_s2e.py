@@ -403,6 +403,76 @@ def test_pipeline_without_job_id_still_exposes_lists_for_unit_tests(tmp_path, mo
     assert result["devices"][0]["ip"] == "203.0.113.10"
 
 
+def test_raw_artifacts_survive_tmp_loss_on_resume(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    tmp = tmp_path / "tmp"
+    data.mkdir()
+    tmp.mkdir()
+    monkeypatch.setenv("AGENT_DATA_DIR", str(data))
+    monkeypatch.setenv("TMPDIR", str(tmp))
+    _runtime()
+    import runner as runtime_runner
+    from job_finish import persist_artifacts
+    from spool import recover_owned_spool, resume_pipeline_result
+
+    def fake_discovery(*_args, **kwargs):
+        staging = Path(kwargs["staging_dir"])
+        gz = staging / "discovery.naabu.jsonl.gz"
+        gz.write_bytes(b"\x1f\x8b")
+        return (
+            [{"ip": "10.1.0.9"}],
+            {
+                "artifact_key": "discovery.naabu",
+                "stage": "discovery",
+                "tool": "naabu",
+                "path": str(gz),
+            },
+        )
+
+    monkeypatch.setattr(runtime_runner, "discover_liveness", lambda *args, **kwargs: [])
+    monkeypatch.setattr(runtime_runner, "read_neighbor_table", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runtime_runner, "discover_udp", lambda *args, **kwargs: [])
+    monkeypatch.setattr(runtime_runner, "run_host_discovery", fake_discovery)
+    monkeypatch.setattr(runtime_runner, "run_httpx", lambda *args, **kwargs: ([], None))
+    monkeypatch.setattr(
+        runtime_runner,
+        "collect_run_provenance",
+        lambda **kwargs: {"runtime_version": "t"},
+    )
+    result = runtime_runner.run_pipeline(
+        {
+            "job_id": 77,
+            "scope": "lan",
+            "targets": [{"type": "cidr", "value": "10.1.0.0/24"}],
+            "stages": {
+                "discovery": True,
+                "port_mode": "none",
+                "port_scope": "detected",
+                "fingerprint": False,
+                "vulnerability": False,
+            },
+            "intensity": {},
+            "exclusions": [],
+        }
+    )
+    artifact_path = Path(result["artifacts"][0]["path"])
+    staging = Path(result["staging_dir"])
+    assert staging.is_relative_to(data)
+    assert artifact_path.is_relative_to(data)
+    assert artifact_path.exists()
+    import shutil
+
+    shutil.rmtree(tmp)
+    tmp.mkdir()
+    assert artifact_path.exists()
+    resumed = recover_owned_spool(77)
+    assert resumed is not None
+    replay = resume_pipeline_result(resumed)
+    uploaded: list[dict] = []
+    persist_artifacts(uploaded.append, replay["artifacts"], replay["provenance"], skip_missing=False)
+    assert uploaded and uploaded[0]["artifact_key"] == "discovery.naabu"
+
+
 def _rss_for_streamed_count(count: int, tmp_path: Path) -> int:
     env = os.environ.copy()
     env["AGENT_DATA_DIR"] = str(tmp_path / f"rss-{count}")

@@ -21,6 +21,16 @@ def test_expand_probe_ips_keeps_slash24_and_skips_huge_cidrs():
     assert expand_probe_ips([{"type": "ip", "value": "10.1.0.9"}]) == ["10.1.0.9"]
 
 
+def test_expand_probe_ips_skips_ipv6_and_caps_without_materializing_hosts():
+    from service_probe import expand_probe_ips
+
+    assert expand_probe_ips([{"type": "cidr", "value": "2001:db8::/64"}]) == []
+    assert expand_probe_ips([{"type": "cidr", "value": "2001:db8::/112"}]) == []
+    capped = expand_probe_ips([{"type": "cidr", "value": "10.1.0.0/20"}], limit=16)
+    assert capped == [f"10.1.{i // 256}.{i % 256}" for i in range(1, 17)]
+    assert len(capped) == 16
+
+
 def test_probe_tcp_services_reads_ssh_smb_rdp_banners():
     from service_probe import probe_tcp_services
 

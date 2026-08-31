@@ -8,6 +8,7 @@ Naabu -sn is not used.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
@@ -52,10 +53,17 @@ def expand_probe_ips(targets: list[dict[str, str]], *, limit: int = MAX_UDP_HOST
             network = ipaddress.ip_network(value, strict=False)
         except ValueError:
             continue
-        if network.prefixlen < 20:
+        if network.version != 4 or network.prefixlen < 20:
             continue
-        candidates = [network.network_address] if network.num_addresses == 1 else list(network.hosts())
-        for item in candidates:
+        remaining = limit - len(ips)
+        if remaining <= 0:
+            return ips
+        stream = (
+            [network.network_address]
+            if network.num_addresses == 1
+            else itertools.islice(network.hosts(), remaining)
+        )
+        for item in stream:
             ip = str(item)
             if ip in seen:
                 continue

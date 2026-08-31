@@ -7,6 +7,7 @@ stored secret. WMI, WinRM, SSH login, and SNMPv3 stay out of this path.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import socket
 import struct
@@ -58,15 +59,19 @@ def icmp_sweep(ips: list[str], timeout: float = ICMP_TIMEOUT) -> set[str]:
     if sock is None:
         return set()
     ident = os.getpid() & 0xFFFF
+    allowed = {_canonical_ip(ip) for ip in ips}
+    sent_seqs: set[int] = set()
     alive: set[str] = set()
     try:
         sock.settimeout(0.05)
         for seq, ip in enumerate(ips):
-            packet = _echo_request(ident, seq & 0xFFFF)
+            seq &= 0xFFFF
+            packet = _echo_request(ident, seq)
             try:
                 sock.sendto(packet, (ip, 0))
             except OSError:
                 continue
+            sent_seqs.add(seq)
         deadline = time.monotonic() + timeout + min(0.4, 0.001 * len(ips))
         while time.monotonic() < deadline:
             try:
@@ -75,8 +80,10 @@ def icmp_sweep(ips: list[str], timeout: float = ICMP_TIMEOUT) -> set[str]:
                 continue
             except OSError:
                 break
-            host = addr[0] if addr else ""
-            if host and _is_echo_reply(data):
+            host = _canonical_ip(addr[0]) if addr else ""
+            if host not in allowed:
+                continue
+            if _is_our_echo_reply(data, ident, sent_seqs):
                 alive.add(host)
     finally:
         sock.close()
@@ -150,13 +157,31 @@ def _icmp_checksum(data: bytes) -> int:
     return ~total & 0xFFFF
 
 
-def _is_echo_reply(data: bytes) -> bool:
+def _canonical_ip(host: str) -> str:
+    text = str(host or "").strip()
+    if not text:
+        return ""
+    try:
+        return str(ipaddress.ip_address(text.split("%", 1)[0]))
+    except ValueError:
+        return text
+
+
+def _icmp_header_offset(data: bytes) -> int | None:
     if len(data) < 8:
-        return False
-    # Linux raw sockets prepend the IPv4 header.
-    offset = 0
+        return None
+    # Linux raw sockets prepend the IPv4 header; SOCK_DGRAM does not.
     if len(data) >= 20 and (data[0] >> 4) == 4:
         offset = (data[0] & 0x0F) * 4
-    if offset + 1 >= len(data):
+        if offset + 8 > len(data):
+            return None
+        return offset
+    return 0
+
+
+def _is_our_echo_reply(data: bytes, ident: int, sent_seqs: set[int]) -> bool:
+    offset = _icmp_header_offset(data)
+    if offset is None or data[offset] != 0:
         return False
-    return data[offset] == 0
+    reply_ident, reply_seq = struct.unpack_from("!HH", data, offset + 4)
+    return reply_ident == ident and reply_seq in sent_seqs
