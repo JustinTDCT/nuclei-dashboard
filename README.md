@@ -2007,7 +2007,7 @@ An Agent rebuild retrieves the current `scan_runtime` source used by its Compose
 
 Scale S1 lives in the Agent image (independent heartbeat/control loop, persistent HTTPS client, scan-stage progress logs, and the httpx DIT stub that prevents a runtime Hugging Face download). After this change, rebuild the Agent image. A container restart of an old image is not enough.
 
-Scale S2A froze ingest semantics against commit `312e0d0`. S2B collapses Device/Asset lookups; S2C collapses Finding/coverage current-run resolution the same way. Correlation and Finding-lifecycle meaning are unchanged. Run `cd backend && pytest tests/test_scale_s2a.py tests/test_scale_s2b.py tests/test_scale_s2c.py` for the small correctness/replay gate, or `python scripts/scale_s2a_benchmark.py --size small` for a JSON metrics report. Medium and large sizes are opt-in and are not part of ordinary `pytest`.
+Scale S2A froze ingest semantics against commit `312e0d0`. S2B (`d9afc55`) collapses Device/Asset lookups; S2C (`fa67a89`) collapses Finding/coverage current-run resolution the same way. Both are accepted on security baseline `5aaf4fc`. Schema head is `0017_security_h6_h8`. Correlation and Finding-lifecycle meaning are unchanged. Run `cd backend && pytest tests/test_scale_s2a.py tests/test_scale_s2b.py tests/test_scale_s2c.py` for the small correctness/replay gate, or `python scripts/scale_s2a_benchmark.py --size small` for a JSON metrics report. Medium and large sizes are opt-in and are not part of ordinary `pytest`.
 
 From the Agent directory:
 

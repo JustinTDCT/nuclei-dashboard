@@ -169,9 +169,9 @@ Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or
 
 ### Scale S2A ingest harness
 
-S2A froze ingest semantics against the S1 checkpoint (`312e0d0`). S2B (`d9afc55`) collapsed Device/Asset lookups with `ScanIngestContext`. S2C adds one `FindingRunIndex` per Finding/coverage/finalize batch so current-run observations, Devices, coverage, evidence keys, and detector CVE unions are not reloaded per finding. No 0018 migration.
+S2A froze ingest semantics against the S1 checkpoint (`312e0d0`). S2B (`d9afc55`, ACCEPT) collapsed Device/Asset lookups with `ScanIngestContext`. S2C (`fa67a89`, ACCEPT) adds one `FindingRunIndex` per Finding/coverage/finalize batch so current-run observations, Devices, coverage, evidence keys, mappings, evaluations, and detector CVE unions are not reloaded per finding. Schema head remains `0017_security_h6_h8`; no 0018 migration. The S2C gate still allows one set-based historical `Finding.raw_json` query for the batch's detector keys; the old hotspot is a high repeated Finding SELECT count, not zero raw-JSON access.
 
-S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. Use medium/large sizes when the incoming batch is much smaller than historical tenant population. If preload RSS dominates, switch to batch-keyed prefetch — do not return to per-report queries.
+S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. Use medium/large sizes when the incoming batch is much smaller than historical tenant population. If preload RSS dominates, switch to batch-keyed prefetch — do not return to per-report queries. After S2D chunks a Finding upload, measure whether repeated per-chunk `FindingRunIndex` preload becomes the next dominant cost before redesigning S2C.
 
 ```bash
 cd backend
