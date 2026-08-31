@@ -97,6 +97,13 @@ class IngestMetrics:
     prefetch_identifier_rows: int = 0
     prefetch_address_rows: int = 0
     prefetch_device_rows: int = 0
+    device_chunks: int = 0
+    coverage_chunks: int = 0
+    finding_chunks: int = 0
+    finding_index_preloads: int = 0
+    finding_index_preload_selects: int = 0
+    finding_index_preload_wall_ms: float = 0.0
+    finding_index_preload_peak_rss_bytes: int = 0
 
     @property
     def select_count(self) -> int:
@@ -142,6 +149,13 @@ class IngestMetrics:
             "prefetch_identifier_rows": self.prefetch_identifier_rows,
             "prefetch_address_rows": self.prefetch_address_rows,
             "prefetch_device_rows": self.prefetch_device_rows,
+            "device_chunks": self.device_chunks,
+            "coverage_chunks": self.coverage_chunks,
+            "finding_chunks": self.finding_chunks,
+            "finding_index_preloads": self.finding_index_preloads,
+            "finding_index_preload_selects": self.finding_index_preload_selects,
+            "finding_index_preload_wall_ms": round(self.finding_index_preload_wall_ms, 3),
+            "finding_index_preload_peak_rss_bytes": self.finding_index_preload_peak_rss_bytes,
             "largest_transaction_ms": round(self.largest_transaction_ms, 3),
             "stages": [
                 {

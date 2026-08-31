@@ -8,6 +8,9 @@ No schema change.
 
 from __future__ import annotations
 
+import resource
+import sys
+import time
 from typing import TYPE_CHECKING
 
 from sqlalchemy import tuple_
@@ -52,7 +55,9 @@ class FindingRunIndex:
         self._asset_findings: dict[tuple[int, int], AssetFinding] = {}
         self._evaluations: dict[tuple[int, int], AssetFindingRunEvaluation] = {}
         self._supporting: dict[int, list[Finding]] = {}
-        self._prefetch(detector_pairs or set())
+        started = time.perf_counter()
+        selects = self._prefetch(detector_pairs or set())
+        self._record_preload_metrics(started=started, selects=selects)
 
     @classmethod
     def for_job(
@@ -64,9 +69,29 @@ class FindingRunIndex:
     ) -> FindingRunIndex:
         return cls(db, job, detector_pairs=detector_pairs)
 
-    def _prefetch(self, detector_pairs: set[tuple[str, str]]) -> None:
+    def _record_preload_metrics(self, *, started: float, selects: int) -> None:
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss = int(usage) if sys.platform == "darwin" else int(usage) * 1024
+        info = self.db.info.setdefault(
+            "s2d_finding_index",
+            {
+                "preloads": 0,
+                "preload_selects": 0,
+                "preload_wall_ms": 0.0,
+                "preload_peak_rss_bytes": 0,
+            },
+        )
+        info["preloads"] = int(info.get("preloads") or 0) + 1
+        info["preload_selects"] = int(info.get("preload_selects") or 0) + selects
+        info["preload_wall_ms"] = float(info.get("preload_wall_ms") or 0.0) + (
+            (time.perf_counter() - started) * 1000
+        )
+        info["preload_peak_rss_bytes"] = max(int(info.get("preload_peak_rss_bytes") or 0), rss)
+
+    def _prefetch(self, detector_pairs: set[tuple[str, str]]) -> int:
         from app.finding_lifecycle import _observation_identity_tokens, cve_union
 
+        selects = 0
         self._observations = (
             self.db.query(AssetObservation)
             .filter(
@@ -75,6 +100,7 @@ class FindingRunIndex:
             )
             .all()
         )
+        selects += 1
         for observation in self._observations:
             tokens = _observation_identity_tokens(observation)
             self._observation_tokens[observation.id] = tokens
@@ -84,6 +110,7 @@ class FindingRunIndex:
             .filter(Device.last_scan_job_id == self.job.id, Device.tenant_id == self.job.tenant_id)
             .all()
         )
+        selects += 1
         from app.classify import normalize_hostname
 
         for device in self._devices:
@@ -95,6 +122,7 @@ class FindingRunIndex:
             .filter(ScanRunDetectorCoverage.scan_job_id == self.job.id)
             .all()
         )
+        selects += 1
         for row in coverage_rows:
             self.remember_coverage(row)
         findings = (
@@ -102,6 +130,7 @@ class FindingRunIndex:
             .filter(Finding.scan_job_id == self.job.id, Finding.tenant_id == self.job.tenant_id)
             .all()
         )
+        selects += 1
         for row in findings:
             self.remember_finding(row)
         if detector_pairs:
@@ -110,6 +139,7 @@ class FindingRunIndex:
                 .filter(tuple_(Finding.detector_type, Finding.detector_key).in_(sorted(detector_pairs)))
                 .all()
             )
+            selects += 1
             grouped: dict[tuple[str, str], list[dict]] = {pair: [] for pair in detector_pairs}
             for detector_type, detector_key, raw in historical:
                 grouped.setdefault((detector_type, detector_key), []).append(
@@ -122,6 +152,7 @@ class FindingRunIndex:
                 .filter(tuple_(VulnerabilityDetectorMapping.detector_type, VulnerabilityDetectorMapping.detector_key).in_(sorted(detector_pairs)))
                 .all()
             )
+            selects += 1
             for mapping in mappings:
                 self._mappings[(mapping.detector_type, mapping.detector_key)] = mapping
         evaluations = (
@@ -129,8 +160,10 @@ class FindingRunIndex:
             .filter(AssetFindingRunEvaluation.scan_job_id == self.job.id)
             .all()
         )
+        selects += 1
         for row in evaluations:
             self._evaluations[(row.asset_finding_id, row.scan_job_id)] = row
+        return selects
 
     def remember_coverage(self, row: ScanRunDetectorCoverage) -> None:
         self._coverage[(row.detector_type, row.target)] = row

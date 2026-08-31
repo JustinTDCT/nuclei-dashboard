@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.finding_lifecycle import FindingLifecycleError, complete_scan_run, store_detector_coverage
+from app.ingest_chunks import raise_ingest_limit
 from app.inventory import store_findings, upsert_devices
 from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError
@@ -108,6 +109,7 @@ def post_devices(
     db: Session = Depends(get_db),
 ):
     job = _owned(db, job_id)
+    raise_ingest_limit(body, kind="device")
     created, _ = upsert_devices(db, job.tenant_id, job.id, body)
     job.hosts_found = db.query(Device).filter(Device.last_scan_job_id == job.id).count()
     db.commit()
@@ -122,6 +124,7 @@ def post_detector_coverage(
     db: Session = Depends(get_db),
 ):
     job = _owned(db, job_id)
+    raise_ingest_limit(body.targets, kind="coverage")
     added = store_detector_coverage(db, job, detector_type=body.detector_type, targets=body.targets)
     db.commit()
     return {"ok": True, "added": added}
@@ -135,6 +138,7 @@ def post_findings(
     db: Session = Depends(get_db),
 ):
     job = _owned(db, job_id)
+    raise_ingest_limit(body, kind="finding")
     added = store_findings(db, job.tenant_id, job.id, run_scope(job), body)
     job.findings_count = (job.findings_count or 0) + added
     db.commit()

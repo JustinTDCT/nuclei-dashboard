@@ -6,6 +6,7 @@ from typing import Any
 
 from api_client import ApiError
 from artifact_io import cleanup_staging
+from ingest_chunks import iter_ingest_chunks
 
 UploadFn = Callable[[dict[str, Any]], Any]
 JsonFn = Callable[..., Any]
@@ -32,13 +33,23 @@ def submit_normalized(
     result: dict[str, Any],
 ) -> None:
     if result.get("devices") and devices_fn is not None:
-        devices_fn(result["devices"])
+        for chunk in iter_ingest_chunks(list(result["devices"]), kind="device"):
+            devices_fn(chunk)
     if result.get("findings") and findings_fn is not None:
-        findings_fn(result["findings"])
+        for chunk in iter_ingest_chunks(list(result["findings"]), kind="finding"):
+            findings_fn(chunk)
     for coverage in result.get("detector_coverage") or []:
         if coverage_fn is None:
             raise ApiError("detector coverage could not be persisted")
-        coverage_fn(coverage)
+        targets = list(coverage.get("targets") or [])
+        if not targets:
+            coverage_fn(coverage)
+            continue
+        payload = dict(coverage)
+        for chunk in iter_ingest_chunks(targets, kind="coverage"):
+            next_payload = dict(payload)
+            next_payload["targets"] = chunk
+            coverage_fn(next_payload)
 
 
 def finish_pipeline_run(

@@ -6,6 +6,9 @@ from dataclasses import dataclass
 
 S1_BASELINE_SHA = "312e0d0"
 CURRENT_INGEST_PATH = "s2c_finding_coverage_index"
+CHUNKED_INGEST_PATH = "s2d_chunked_transport"
+S2D_TEST_MAX_ROWS = 10
+S2D_TEST_MAX_BYTES = 16_384
 CORRELATION_ALGORITHM_MUST_REMAIN = "1c.3"
 
 PORT_POOL = (22, 80, 443, 445, 3389, 8080, 8443, 3306, 5432, 6379)

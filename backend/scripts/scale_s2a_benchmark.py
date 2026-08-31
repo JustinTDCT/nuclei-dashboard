@@ -27,8 +27,14 @@ from tests.conftest import POSTGRES_AVAILABLE, POSTGRES_SKIP_REASON  # noqa: E40
 if not POSTGRES_AVAILABLE:
     raise SystemExit(f"S2A benchmark needs PostgreSQL: {POSTGRES_SKIP_REASON}")
 
-from tests.scale_s2.constants import CURRENT_INGEST_PATH, S1_BASELINE_SHA, WORKLOADS  # noqa: E402
-from tests.scale_s2.harness import hotspot_flags, prepare_and_ingest, workload_spec  # noqa: E402
+from app.ingest_chunks import DEFAULT_INGEST_MAX_BYTES, DEFAULT_INGEST_MAX_ROWS  # noqa: E402
+from tests.scale_s2.constants import CHUNKED_INGEST_PATH, CURRENT_INGEST_PATH, S1_BASELINE_SHA, WORKLOADS  # noqa: E402
+from tests.scale_s2.harness import (  # noqa: E402
+    hotspot_flags,
+    prepare_and_ingest,
+    prepare_and_ingest_chunked,
+    workload_spec,
+)
 from tests.scale_s2.snapshot import capture_normalized_state  # noqa: E402
 from tests.scale_s2.world import reset_schema  # noqa: E402
 
@@ -38,6 +44,18 @@ def main() -> int:
     parser.add_argument("--size", choices=sorted(WORKLOADS), default="small")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--replay", action="store_true", help="ingest the same chunk a second time")
+    parser.add_argument(
+        "--chunk-rows",
+        type=int,
+        default=None,
+        help="S2D: slice Device/Finding/coverage lists to this many rows per request",
+    )
+    parser.add_argument(
+        "--chunk-bytes",
+        type=int,
+        default=None,
+        help="S2D: slice lists so each encoded request stays under this many bytes",
+    )
     args = parser.parse_args()
 
     from app.database import SessionLocal
@@ -46,7 +64,19 @@ def main() -> int:
     reset_schema()
     db = SessionLocal()
     try:
-        result = prepare_and_ingest(db, spec, replay=args.replay)
+        chunked = args.chunk_rows is not None or args.chunk_bytes is not None
+        if chunked:
+            result = prepare_and_ingest_chunked(
+                db,
+                spec,
+                replay=args.replay,
+                max_rows=args.chunk_rows or DEFAULT_INGEST_MAX_ROWS,
+                max_bytes=args.chunk_bytes or DEFAULT_INGEST_MAX_BYTES,
+            )
+            ingest_path = CHUNKED_INGEST_PATH
+        else:
+            result = prepare_and_ingest(db, spec, replay=args.replay)
+            ingest_path = CURRENT_INGEST_PATH
         if args.replay:
             from tests.scale_s2.snapshot import assert_equivalent
 
@@ -55,7 +85,7 @@ def main() -> int:
         report = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "s1_baseline_sha": S1_BASELINE_SHA,
-            "ingest_path": CURRENT_INGEST_PATH,
+            "ingest_path": ingest_path,
             "workload": spec.name,
             "replay": args.replay,
             "counts": {name: len(rows) for name, rows in result["state"].items()},

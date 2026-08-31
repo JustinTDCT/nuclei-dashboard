@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     nvd_api_key: str = ""
     raw_artifact_dir: str = "/var/lib/nuclei-dashboard/raw-artifacts"
     raw_artifact_max_bytes: int = 268435456
+    ingest_max_rows: int = 500
+    ingest_max_bytes: int = 1048576
     settings_encryption_key: str = ""
     login_failure_limit: int = 5
     login_failure_window_seconds: int = 900

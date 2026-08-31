@@ -169,14 +169,15 @@ Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or
 
 ### Scale S2A ingest harness
 
-S2A froze ingest semantics against the S1 checkpoint (`312e0d0`). S2B (`d9afc55`, ACCEPT) collapsed Device/Asset lookups with `ScanIngestContext`. S2C (`fa67a89`, ACCEPT) adds one `FindingRunIndex` per Finding/coverage/finalize batch so current-run observations, Devices, coverage, evidence keys, mappings, evaluations, and detector CVE unions are not reloaded per finding. Schema head remains `0017_security_h6_h8`; no 0018 migration. The S2C gate still allows one set-based historical `Finding.raw_json` query for the batch's detector keys; the old hotspot is a high repeated Finding SELECT count, not zero raw-JSON access.
+S2A froze ingest semantics against the S1 checkpoint (`312e0d0`). S2B (`d9afc55`, ACCEPT) collapsed Device/Asset lookups with `ScanIngestContext`. S2C (`fa67a89`, ACCEPT) adds one `FindingRunIndex` per Finding/coverage/finalize batch so current-run observations, Devices, coverage, evidence keys, mappings, evaluations, and detector CVE unions are not reloaded per finding. S2D (`bc0a3ba` docs checkpoint) bounds Device/Finding/coverage HTTP requests by row count and encoded bytes (`INGEST_MAX_ROWS` / `INGEST_MAX_BYTES`, defaults 500 / 1 MiB). Whole-list clients still use the same endpoints if they fit; oversized batches and oversized single records return 413. Schema head remains `0017_security_h6_h8`; no 0018 migration. The S2C gate still allows one set-based historical `Finding.raw_json` query for the batch's detector keys; the old hotspot is a high repeated Finding SELECT count, not zero raw-JSON access.
 
-S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. Use medium/large sizes when the incoming batch is much smaller than historical tenant population. If preload RSS dominates, switch to batch-keyed prefetch — do not return to per-report queries. After S2D chunks a Finding upload, measure whether repeated per-chunk `FindingRunIndex` preload becomes the next dominant cost before redesigning S2C.
+S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. S2D records `finding_index_preloads`, `finding_index_preload_selects`, `finding_index_preload_wall_ms`, and `finding_index_preload_peak_rss_bytes` when Finding/coverage/finalize each build a `FindingRunIndex`. Use medium/large sizes with `--chunk-rows` / `--chunk-bytes` when measuring per-chunk preload cost. If preload RSS dominates, that is evidence for a later request/run-scoped optimization — do not automatically redesign S2C, and do not return to per-report queries.
 
 ```bash
 cd backend
-pytest tests/test_scale_s2a.py tests/test_scale_s2b.py tests/test_scale_s2c.py
+pytest tests/test_scale_s2a.py tests/test_scale_s2b.py tests/test_scale_s2c.py tests/test_scale_s2d.py
 python scripts/scale_s2a_benchmark.py --size small --out /tmp/s2a-small.json
+python scripts/scale_s2a_benchmark.py --size small --chunk-rows 10 --chunk-bytes 16384 --out /tmp/s2d-small.json
 ```
 
 `--size medium` and `--size large` are for volume measurement only. Do not treat those as required CI. The harness compares normalized Assets, identifiers, addresses, services, observations, correlation decisions, Devices, Vulnerabilities, mappings, Findings, AssetFindings, evaluations, history, DomainEvents, Alerts, and ScanJob counters. Replaying an identical Device/Finding chunk must equal a single ingest.
