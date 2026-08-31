@@ -6,6 +6,7 @@ from app.access import apply_tenant_scope, require_object_tenant, require_visibl
 from app.audit import record_audit, utcnow
 from app.auth import require_any, require_user
 from app.database import get_db
+from app.job_progress import progress_view
 from app.jobs import create_job, has_active_job
 from app.locality import LanScanInvalidError, get_tenant
 from app.models import TRIGGER_MANUAL, Scan, ScanJob, User
@@ -62,6 +63,7 @@ def job_out(job: ScanJob, *, include_snapshot: bool = False) -> ScanJobOut:
         out.scope = snapshot.get("scope")
     else:
         out.scope = job.scan.scope if job.scan else None
+    out.progress = progress_view(job)
     if not include_snapshot:
         out.execution_snapshot = None
     return out

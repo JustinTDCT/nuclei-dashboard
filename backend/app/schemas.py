@@ -196,6 +196,15 @@ class AgentHeartbeatIn(BaseModel):
     runtime_inventory: dict[str, Any] | None = None
     job_id: int | None = None
     activity: str | None = None
+    progress: dict[str, Any] | None = None
+
+
+class WorkerProgressIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    stage: str | None = None
+    message: str | None = None
+    activity: str | None = None
+    completed_stages: list[str] | None = None
 
 
 class ScanIn(BaseModel):
@@ -269,6 +278,7 @@ class ScanJobOut(BaseModel):
     wait_expires_at: datetime | None = None
     execution_snapshot: dict[str, Any] | None = None
     runtime_provenance: dict[str, Any] | None = None
+    progress: dict[str, Any] | None = None
 
     model_config = {"from_attributes": True}
 

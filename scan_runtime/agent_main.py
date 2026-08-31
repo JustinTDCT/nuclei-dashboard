@@ -11,7 +11,8 @@ from job_finish import finish_pipeline_run
 from keys import load_or_create_keypair, sign
 from runner import PipelineError, run_pipeline
 from artifact_io import JobControl, cleanup_staging, use_job_control
-from spool import recover_owned_spool, resume_pipeline_result
+from scan_progress import bind_job, clear_job, snapshot as progress_snapshot
+from spool import abandon_job_spool, discover_completed_job_ids, recover_owned_spool, resume_pipeline_result
 from tool_versions import collect_runtime_inventory
 
 INVENTORY_REFRESH_SECONDS = 3600
@@ -75,18 +76,31 @@ def jittered_interval(base: float = CONTROL_INTERVAL_SECONDS, jitter: float = CO
 
 def run_job(client: CentralClient, token: str, job: dict, refresh_token, cancel_event=None) -> None:
     job_id = job["job_id"]
-    print(f"Starting job {job_id}", flush=True)
-    started = client.start(token, job_id)
+    resume = bool(job.get("_resume"))
     result: dict = {"artifacts": [], "staging_dir": None}
-    control = JobControl.from_job(started, cancel_event=cancel_event)
+    bind_job(job_id)
     try:
-        resumed = recover_owned_spool(job_id)
-        if resumed is not None:
-            print(f"Resuming spool upload for job {job_id}", flush=True)
+        if resume:
+            print(f"Resuming job {job_id}", flush=True)
+            started = job
+            JobControl.from_job(started, cancel_event=cancel_event)
+            resumed = recover_owned_spool(job_id)
+            if resumed is None:
+                token = refresh_token() or token
+                client.complete(token, job_id, ok=False, error="owned running job has no recoverable spool")
+                return
             result = resume_pipeline_result(resumed)
         else:
-            with use_job_control(control):
-                result = run_pipeline(started, log=lambda message: print(message, flush=True), control=control)
+            print(f"Starting job {job_id}", flush=True)
+            started = client.start(token, job_id)
+            control = JobControl.from_job(started, cancel_event=cancel_event)
+            resumed = recover_owned_spool(job_id)
+            if resumed is not None:
+                print(f"Resuming spool upload for job {job_id}", flush=True)
+                result = resume_pipeline_result(resumed)
+            else:
+                with use_job_control(control):
+                    result = run_pipeline(started, log=lambda message: print(message, flush=True), control=control)
         token = refresh_token() or token
         finish_pipeline_run(
             result=result,
@@ -131,6 +145,8 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token, cancel_
             client.complete(token, job_id, ok=False, error=str(exc))
         except ApiError:
             pass
+    finally:
+        clear_job()
 
 
 class AgentRuntime:
@@ -211,7 +227,16 @@ class AgentRuntime:
             return
         job_id, activity = self.current_job()
         inventory = self._inventory(force=force_inventory)
-        result = self.client.heartbeat(token, runtime_inventory=inventory, job_id=job_id, activity=activity)
+        progress = progress_snapshot()
+        if progress is not None and progress.get("job_id") != job_id:
+            progress = None
+        result = self.client.heartbeat(
+            token,
+            runtime_inventory=inventory,
+            job_id=job_id,
+            activity=activity,
+            progress=progress,
+        )
         if result.get("cancel_requested"):
             self._cancel.set()
 
@@ -265,11 +290,31 @@ class AgentRuntime:
         token = self.refresh_token()
         return token
 
+    def _offer_resume(self, token: str) -> bool:
+        """Resume a local pipeline.done job that this Agent still owns.
+
+        Must run before queued poll: while the job is running, GET /jobs
+        returns [] and POST /start rejects the already-claimed run.
+        """
+        for job_id in discover_completed_job_ids():
+            try:
+                payload = self.client.owned_running_job(token, job_id)
+            except ApiError:
+                abandon_job_spool(job_id)
+                continue
+            payload = dict(payload)
+            payload["_resume"] = True
+            self._set_work(payload, "scanning")
+            return True
+        return False
+
     def _poll_once(self) -> None:
         if not self._idle.is_set():
             return
         token = self._get_token()
         if not token:
+            return
+        if self._offer_resume(token):
             return
         jobs = self.client.jobs(token)
         if not jobs or not self._idle.is_set():

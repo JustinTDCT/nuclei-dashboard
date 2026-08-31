@@ -66,6 +66,42 @@ def reclaim_foreign_jobs(root: Path, current_job_id: int) -> None:
             shutil.rmtree(child, ignore_errors=True)
 
 
+def _spool_search_roots() -> list[Path]:
+    explicit = os.environ.get("AGENT_DATA_DIR")
+    if explicit:
+        return [Path(explicit) / "spool"]
+    return [Path("/data/spool"), Path(tempfile_root()) / "spool"]
+
+
+def discover_completed_job_ids(root: Path | None = None) -> list[int]:
+    """List job IDs that have ``pipeline.done`` without reclaiming siblings.
+
+    Used on worker startup before polling queued work. Do not call
+    ``JobSpool.for_job`` here — that deletes other job directories.
+    """
+    bases = [Path(root)] if root is not None else _spool_search_roots()
+    found: set[int] = set()
+    for base in bases:
+        jobs = base / "jobs"
+        if not jobs.is_dir():
+            continue
+        for child in jobs.iterdir():
+            if not child.is_dir() or not (child / DONE_NAME).is_file():
+                continue
+            try:
+                found.add(int(child.name))
+            except ValueError:
+                continue
+    return sorted(found)
+
+
+def abandon_job_spool(job_id: int, *, root: Path | None = None) -> None:
+    """Delete one job directory without touching siblings."""
+    bases = [Path(root)] if root is not None else _spool_search_roots()
+    for base in bases:
+        shutil.rmtree(base / "jobs" / str(int(job_id)), ignore_errors=True)
+
+
 class JobSpool:
     def __init__(self, root: Path, job_id: int, *, max_bytes: int | None = None):
         self.job_id = int(job_id)
@@ -190,12 +226,35 @@ class JobSpool:
         tmp = dest.with_name(dest.name + ".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
-            os.write(fd, data)
+            write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
         os.replace(tmp, dest)
         os.chmod(dest, 0o600)
+        fsync_directory(dest.parent)
+
+
+def write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("short write while sealing spool file")
+        view = view[written:]
+
+
+def fsync_directory(path: Path) -> None:
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        return
+    finally:
+        os.close(dir_fd)
 
 
 def recover_owned_spool(job_id: int, *, root: Path | None = None) -> JobSpool | None:
@@ -234,9 +293,13 @@ __all__ = [
     "JobSpool",
     "SpoolCapExceeded",
     "SpoolError",
+    "abandon_job_spool",
+    "discover_completed_job_ids",
+    "fsync_directory",
     "reclaim_foreign_jobs",
     "recover_owned_spool",
     "resume_pipeline_result",
     "spool_max_bytes",
     "spool_root",
+    "write_all",
 ]

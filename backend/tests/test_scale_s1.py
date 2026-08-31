@@ -111,7 +111,7 @@ def test_control_loop_heartbeats_while_one_job_runs():
     job_polls = []
 
     class FakeClient:
-        def heartbeat(self, token, runtime_inventory=None, job_id=None, activity=None):
+        def heartbeat(self, token, runtime_inventory=None, job_id=None, activity=None, progress=None):
             heartbeats.append({"job_id": job_id, "activity": activity, "inventory": runtime_inventory})
             return {"ok": True}
 
@@ -120,6 +120,9 @@ def test_control_loop_heartbeats_while_one_job_runs():
             if len(job_polls) == 1:
                 return [{"job_id": 7}]
             return []
+
+        def owned_running_job(self, token, job_id):
+            raise agent_main.ApiError("no owned running job")
 
     def fake_run_job(client, token, job, refresh_token, cancel_event=None):
         time.sleep(0.7)

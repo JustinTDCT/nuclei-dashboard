@@ -8,9 +8,10 @@ from app.database import get_db
 from app.finding_lifecycle import FindingLifecycleError, complete_scan_run, store_detector_coverage
 from app.ingest_chunks import raise_ingest_limit
 from app.inventory import store_findings, upsert_devices
+from app.job_progress import apply_worker_progress
 from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError
-from app.models import JOB_QUEUED, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
+from app.models import JOB_QUEUED, JOB_RUNNING, LEGACY_PRE_1D_REQUEUE_ERROR, Device, ScanJob
 from app.scan_dispatch import CENTRAL_WORKER, atomic_claim_central_job
 from app.job_control import job_control_payload
 from app.scan_execution import require_owned_run_for_persist, run_scope, snapshot_scope_clause
@@ -25,7 +26,14 @@ from app.raw_artifacts import (
 )
 from app.scan_snapshot import merge_provenance
 from app.scanner_versions import VersionProvenanceError, apply_version_provenance_requirement, merge_run_provenance
-from app.schemas import DetectorCoverageIn, DeviceReport, FindingReport, RawEvidenceDeclaration, ScanArtifactOut
+from app.schemas import (
+    DetectorCoverageIn,
+    DeviceReport,
+    FindingReport,
+    RawEvidenceDeclaration,
+    ScanArtifactOut,
+    WorkerProgressIn,
+)
 
 router = APIRouter(prefix="/internal/scanner", tags=["scanner"])
 
@@ -222,7 +230,22 @@ def job_status(job_id: int, _: None = Depends(require_scanner), db: Session = De
     job = db.query(ScanJob).filter(ScanJob.id == job_id, ScanJob.claimed_by == "central").first()
     if job is None:
         raise HTTPException(status_code=404, detail="Job not available")
-    return job_control_payload(job)
+    payload = job_control_payload(job)
+    payload["owned_running"] = job.status == JOB_RUNNING
+    return payload
+
+
+@router.post("/jobs/{job_id}/progress")
+def post_progress(
+    job_id: int,
+    body: WorkerProgressIn,
+    _: None = Depends(require_scanner),
+    db: Session = Depends(get_db),
+):
+    job = _owned(db, job_id)
+    apply_worker_progress(job, body.model_dump(), activity=body.activity or "scanning")
+    db.commit()
+    return {"ok": True}
 
 
 def _owned(db: Session, job_id: int, *, completing_ok: bool | None = None) -> ScanJob:

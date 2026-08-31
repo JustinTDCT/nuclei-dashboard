@@ -44,6 +44,7 @@ from tool_versions import (
 )
 from enrich import enrich_identities, usable_hostname
 from ingest_chunks import iter_ingest_chunks
+from scan_progress import bind_job, note_message, note_stage
 from spool import JobSpool, SpoolCapExceeded, spool_root
 
 LogFn = Callable[[str], None]
@@ -101,6 +102,7 @@ class PipelineError(RuntimeError):
 
 
 def _log(message: str, log: LogFn | None) -> None:
+    note_message(message)
     if log:
         log(message)
     else:
@@ -139,6 +141,7 @@ def _execute_stage(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_path = staging_dir / f"{artifact_key}.jsonl"
     gz_path = staging_dir / f"{artifact_key}.jsonl.gz"
+    note_stage(stage, f"Starting {stage} ({tool})")
     _log(f"Starting {stage} ({tool})", log)
     command_error: RuntimeError | None = None
     try:
@@ -179,6 +182,7 @@ def _execute_stage(
     if parse_error is not None:
         raise StageExecutionError(str(parse_error), rows=[], artifact=artifact)
     count = streamed if row_consumer is not None else len(rows)
+    note_stage(stage, f"Finished {stage}: {count} records", complete=True)
     _log(f"Finished {stage}: {count} records", log)
     return rows, artifact or artifact_meta(artifact_key=artifact_key, stage=stage, tool=tool, gz_path=gz_path)
 
@@ -257,6 +261,7 @@ def run_pipeline(job: dict[str, Any], log: LogFn | None = None, control: JobCont
 
 
 def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, Any]:
+    bind_job(job.get("job_id"), reset=False)
     stages = job_stages(job)
     intensity = job_intensity(job)
     targets = resolve_execution_targets(job, log=log)

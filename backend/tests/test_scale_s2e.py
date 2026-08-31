@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,18 @@ import pytest
 
 from tests.conftest import requires_postgres
 from tests.scale_s2.constants import SPOOLED_INGEST_PATH
+from tests.test_phase1d import (
+    _agent_headers,
+    _client,
+    _headers,
+    _heartbeat,
+    _lan_scan,
+    _login,
+    _scanner_headers,
+    _wan_scan,
+    _world,
+)
+from tests.test_phase2a import _start_lan
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ROOT = REPO_ROOT / "scan_runtime"
@@ -538,3 +551,271 @@ def _coverage_target_chunks(targets: list[str]) -> list[list[str]]:
     from ingest_chunks import iter_ingest_chunks
 
     return list(iter_ingest_chunks(list(targets), kind="coverage"))
+
+
+def _compose_service(text: str, name: str) -> str:
+    match = re.search(rf"^  {re.escape(name)}:\n", text, re.M)
+    assert match, f"service {name} missing"
+    nxt = re.search(r"^  [a-zA-Z0-9_-]+:\n", text[match.end() :], re.M)
+    end = match.end() + nxt.start() if nxt else len(text)
+    return text[match.start() : end]
+
+
+def test_atomic_write_retries_short_writes_and_fsyncs_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    _runtime()
+    from spool import JobSpool
+
+    real_write = os.write
+    write_sizes: list[int] = []
+
+    def short_write(fd, data):
+        raw = data.tobytes() if isinstance(data, memoryview) else bytes(data)
+        chunk = raw[: max(1, len(raw) // 2)]
+        write_sizes.append(len(chunk))
+        return real_write(fd, chunk)
+
+    fsync_calls = []
+    real_fsync = os.fsync
+
+    def spy_fsync(fd):
+        fsync_calls.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "write", short_write)
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    spool = JobSpool.for_job(12)
+    payload = {"ok": True, "note": "n" * 80}
+    spool.mark_pipeline_complete(payload)
+    assert spool.pipeline_meta()["note"] == payload["note"]
+    assert len(write_sizes) >= 2
+    assert len(fsync_calls) >= 2
+
+
+def test_discover_completed_jobs_does_not_reclaim_siblings(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    _runtime()
+    from spool import JobSpool, abandon_job_spool, discover_completed_job_ids, spool_root
+
+    root = spool_root()
+    first = JobSpool(root, 201)
+    first.mark_pipeline_complete({"ok": True})
+    second = JobSpool(root, 202)
+    second.mark_pipeline_complete({"ok": True})
+    assert discover_completed_job_ids() == [201, 202]
+    abandon_job_spool(201)
+    assert discover_completed_job_ids() == [202]
+    assert not first.dir.exists()
+    assert second.dir.exists()
+
+
+def test_central_scanner_persists_own_data_volume():
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    scanner = _compose_service(compose, "scanner")
+    agent = _compose_service(compose, "nuclei-agent")
+    assert "AGENT_DATA_DIR: /data" in scanner
+    assert "scanner-data:/data" in scanner
+    assert "agent-keys" not in scanner
+    assert "agent-keys:/data" in agent
+    assert "scanner-data:/data" not in agent
+    assert re.search(r"^  scanner-data:$", compose, re.M)
+
+
+class _LiveWorker:
+    def __init__(self, http, headers: dict, prefix: str):
+        self.http = http
+        self.headers = headers
+        self.prefix = prefix
+        self.start_calls: list[int] = []
+
+    def _json(self, response, method: str, path: str):
+        from api_client import ApiError
+
+        if response.status_code >= 400:
+            raise ApiError(f"{method} {path} -> {response.status_code} {response.text}")
+        return response.json() if response.content else {}
+
+    def jobs(self, token=None):
+        return self._json(self.http.get(self.prefix, headers=self.headers), "GET", self.prefix)
+
+    def owned_running_job(self, token, job_id: int):
+        path = f"{self.prefix}/{job_id}"
+        return self._json(self.http.get(path, headers=self.headers), "GET", path)
+
+    def job_status(self, job_id: int):
+        path = f"{self.prefix}/{job_id}"
+        return self._json(self.http.get(path, headers=self.headers), "GET", path)
+
+    def start(self, *args):
+        job_id = args[-1]
+        self.start_calls.append(int(job_id))
+        path = f"{self.prefix}/{job_id}/start"
+        return self._json(self.http.post(path, headers=self.headers), "POST", path)
+
+    def devices(self, *args):
+        job_id, devices = args[-2], args[-1]
+        path = f"{self.prefix}/{job_id}/devices"
+        return self._json(self.http.post(path, headers=self.headers, json=devices), "POST", path)
+
+    def findings(self, *args):
+        job_id, findings = args[-2], args[-1]
+        path = f"{self.prefix}/{job_id}/findings"
+        return self._json(self.http.post(path, headers=self.headers, json=findings), "POST", path)
+
+    def detector_coverage(self, *args):
+        job_id, payload = args[-2], args[-1]
+        path = f"{self.prefix}/{job_id}/detector-coverage"
+        return self._json(self.http.post(path, headers=self.headers, json=payload), "POST", path)
+
+    def provenance(self, *args):
+        job_id, payload = args[-2], args[-1]
+        path = f"{self.prefix}/{job_id}/provenance"
+        return self._json(self.http.post(path, headers=self.headers, json=payload), "POST", path)
+
+    def complete(self, *args, ok=True, error=None, raw_evidence=None, **kwargs):
+        if args and isinstance(args[0], int):
+            job_id = args[0]
+        elif len(args) >= 2:
+            job_id = args[1]
+        else:
+            job_id = kwargs.get("job_id")
+        path = f"{self.prefix}/{job_id}/complete"
+        params = {"ok": str(ok).lower()}
+        if error:
+            params["error"] = error
+        extra = {"headers": self.headers, "params": params}
+        if raw_evidence is not None:
+            extra["json"] = raw_evidence
+        return self._json(self.http.post(path, **extra), "POST", path)
+
+    def upload_artifact(self, *args, **kwargs):
+        raise AssertionError("resume test should skip missing artifacts")
+
+
+def _seed_done_spool(job_id: int, *, scope: str, ip: str, host: str):
+    from spool import JobSpool
+
+    spool = JobSpool.for_job(job_id)
+    spool.append("devices", {"ip": ip, "scope": scope, "hostname": "resume-host"})
+    spool.append("findings", _finding(1))
+    spool.append("coverage", {"detector_type": "nuclei", "targets": [host]})
+    spool.mark_pipeline_complete({"ok": True, "artifacts": [], "provenance": {}, "dry_run": True})
+    return spool
+
+
+@requires_postgres
+def test_lan_restart_resumes_owned_running_job_without_start(reset_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    _runtime()
+    import agent_main
+    from app.models import ScanJob
+    from app.database import SessionLocal
+    from spool import JobSpool, discover_completed_job_ids
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan = _lan_scan(client, token, world, intensity_config={"preset": "normal", "dry_run": True})
+        job_id = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token)).json()["id"]
+        _start_lan(client, world, job_id)
+        queued = _lan_scan(client, token, world, name="Queued LAN", intensity_config={"preset": "normal", "dry_run": True})
+        queued_id = client.post(f"/api/scans/{queued['id']}/run", headers=_headers(token)).json()["id"]
+        _seed_done_spool(job_id, scope="lan", ip="10.1.0.10", host="https://10.1.0.10")
+        headers = _agent_headers(world["agent1"])
+        agent_token = headers["Authorization"].split(" ", 1)[1]
+
+        polled = client.get("/api/agent/jobs", headers=headers)
+        assert polled.status_code == 200
+        assert polled.json() == []
+        assert client.post(f"/api/agent/jobs/{job_id}/start", headers=headers).status_code == 404
+        owned = client.get(f"/api/agent/jobs/{job_id}", headers=headers)
+        assert owned.status_code == 200, owned.text
+        assert owned.json()["job_id"] == job_id
+        _heartbeat(world["agent2"]["id"])
+        assert client.get(f"/api/agent/jobs/{job_id}", headers=_agent_headers(world["agent2"])).status_code == 404
+        assert client.get(f"/api/agent/jobs/{queued_id}", headers=headers).status_code == 404
+        assert discover_completed_job_ids() == [job_id]
+
+        live = _LiveWorker(client, headers, "/api/agent/jobs")
+
+        def refuse_start(*args, **kwargs):
+            raise AssertionError("LAN resume must not call /start")
+
+        live.start = refuse_start
+        runtime = agent_main.AgentRuntime(
+            live,
+            world["agent1"]["uuid"],
+            "secret",
+            "pub",
+            object(),
+            authenticate_fn=lambda *args, **kwargs: agent_token,
+        )
+        runtime._set_token(agent_token)
+        assert runtime.current_job() == (None, "idle")
+        runtime._poll_once()
+        assert runtime.current_job() == (job_id, "scanning")
+        work = runtime._work
+        assert work["_resume"] is True
+        agent_main.run_job(live, agent_token, work, refresh_token=lambda: agent_token)
+
+        db = SessionLocal()
+        try:
+            job = db.get(ScanJob, job_id)
+            assert job is not None
+            assert job.status == "done"
+            assert job.findings_count >= 1
+        finally:
+            db.close()
+        leftover = JobSpool.for_job(job_id)
+        assert not leftover.has_pending()
+
+
+@requires_postgres
+def test_wan_restart_resumes_owned_running_job_without_start(reset_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_DATA_DIR", str(tmp_path))
+    _runtime()
+    import scanner_main
+    from app.database import SessionLocal
+    from app.models import ScanJob
+    from spool import JobSpool, discover_completed_job_ids
+
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        scan = _wan_scan(client, token, world, intensity_config={"preset": "normal", "dry_run": True})
+        job_id = client.post(f"/api/scans/{scan['id']}/run", headers=_headers(token)).json()["id"]
+        started = client.post(f"/api/internal/scanner/jobs/{job_id}/start", headers=_scanner_headers())
+        assert started.status_code == 200, started.text
+        _seed_done_spool(job_id, scope="wan", ip="203.0.113.10", host="https://203.0.113.10")
+        stale = JobSpool(JobSpool.for_job(job_id).root, 999001)
+        stale.mark_pipeline_complete({"ok": True})
+        headers = _scanner_headers()
+
+        assert client.get("/api/internal/scanner/jobs", headers=headers).json() == []
+        assert client.post(f"/api/internal/scanner/jobs/{job_id}/start", headers=headers).status_code == 404
+        status = client.get(f"/api/internal/scanner/jobs/{job_id}", headers=headers)
+        assert status.status_code == 200, status.text
+        assert status.json()["status"] == "running"
+        assert status.json()["owned_running"] is True
+        assert discover_completed_job_ids() == [job_id, 999001]
+
+        live = _LiveWorker(client, headers, "/api/internal/scanner/jobs")
+
+        def refuse_start(*args, **kwargs):
+            raise AssertionError("WAN resume must not call /start")
+
+        live.start = refuse_start
+        assert scanner_main.try_resume_completed_jobs(live) is True
+
+        db = SessionLocal()
+        try:
+            job = db.get(ScanJob, job_id)
+            assert job is not None
+            assert job.status == "done"
+            assert job.findings_count >= 1
+        finally:
+            db.close()
+        leftover = JobSpool.for_job(job_id)
+        assert not leftover.has_pending()
+        assert not stale.dir.exists()
+

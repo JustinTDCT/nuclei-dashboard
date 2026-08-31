@@ -14,10 +14,12 @@ from app.database import get_db
 from app.finding_lifecycle import FindingLifecycleError, complete_scan_run, store_detector_coverage
 from app.ingest_chunks import raise_ingest_limit
 from app.inventory import store_findings, upsert_devices
+from app.job_progress import apply_worker_progress
 from app.jobs import fail_job, job_payload
 from app.locality import LanScanInvalidError, is_authorized
 from app.models import (
     JOB_QUEUED,
+    JOB_RUNNING,
     JOB_WAITING_FOR_AGENT,
     LEGACY_PRE_1D_REQUEUE_ERROR,
     Agent,
@@ -60,6 +62,7 @@ from app.schemas import (
     FindingReport,
     RawEvidenceDeclaration,
     ScanArtifactOut,
+    WorkerProgressIn,
 )
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -247,6 +250,8 @@ def heartbeat(
             control = job_control_payload(job)
             payload["cancel_requested"] = control["cancel_requested"]
             payload["deadline_at"] = control.get("deadline_at")
+            if job.status == JOB_RUNNING:
+                apply_worker_progress(job, body.progress, activity=body.activity)
     db.commit()
     return payload
 
@@ -279,6 +284,32 @@ def poll_jobs(agent: Agent = Depends(current_agent), db: Session = Depends(get_d
             break
         fail_job(db, job, LEGACY_PRE_1D_REQUEUE_ERROR)
     return payloads
+
+
+@router.get("/jobs/{job_id}")
+def owned_running_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = Depends(get_db)):
+    """Resume probe: only an owned, still-running LAN job is visible.
+
+    After a crash the Agent still owns the claimed run. Poll returns no
+    queued work while that is true, and /start rejects already-running
+    jobs. This endpoint lets the restarted Agent confirm ownership and
+    resume spool upload without reclaiming or re-queueing the job.
+    """
+    job = db.query(ScanJob).filter(ScanJob.id == job_id).first()
+    try:
+        if not job or run_scope(job) != "lan":
+            raise HTTPException(status_code=404, detail="Job not available")
+    except ExecutionBlocked:
+        raise HTTPException(status_code=404, detail="Job not available") from None
+    if job.status != JOB_RUNNING:
+        raise HTTPException(status_code=404, detail="Job not available")
+    if job.claimed_by != agent.uuid or job.claimed_agent_id != agent.id:
+        raise HTTPException(status_code=404, detail="Job not available")
+    try:
+        revalidate_lan_claim(db, job, agent)
+        return job_payload(db, job)
+    except (ExecutionBlocked, LanScanInvalidError):
+        raise HTTPException(status_code=404, detail="Job not available") from None
 
 
 @router.post("/jobs/{job_id}/start")
@@ -331,6 +362,19 @@ def start_job(job_id: int, agent: Agent = Depends(current_agent), db: Session = 
     )
     db.commit()
     return job_payload(db, claimed)
+
+
+@router.post("/jobs/{job_id}/progress")
+def post_progress(
+    job_id: int,
+    body: WorkerProgressIn,
+    agent: Agent = Depends(current_agent),
+    db: Session = Depends(get_db),
+):
+    job = _owned_job(db, job_id, agent.uuid)
+    apply_worker_progress(job, body.model_dump(), activity=body.activity or "scanning")
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/jobs/{job_id}/devices")

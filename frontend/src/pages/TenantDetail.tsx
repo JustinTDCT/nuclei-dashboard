@@ -1,9 +1,10 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, download } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import { ControlMapping } from "../components/ControlMapping";
+import { ScanProgressBar, ScanProgressDetail } from "../components/ScanProgress";
 import { Alerts } from "./Alerts";
 import { formatUtc, useTimezone } from "../timezone";
 import { recordedVersion, versionStatusLabel } from "../versionStatus";
@@ -31,8 +32,18 @@ type Tab = "overview" | "sites" | "wan" | "agents" | "scans" | "assets" | "findi
 export function TenantDetail() {
   const { id } = useParams();
   const tenantId = Number(id);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [params, setParams] = useSearchParams();
+  const requestedTab = params.get("tab");
+  const tab: Tab = tabsFrom(requestedTab);
+  const focusJobId = Number(params.get("job") || "") || null;
   const [tenant, setTenant] = useState<Tenant | null>(null);
+
+  function setTab(next: Tab) {
+    const nextParams = new URLSearchParams(params);
+    nextParams.set("tab", next);
+    if (next !== "scans") nextParams.delete("job");
+    setParams(nextParams, { replace: true });
+  }
 
   useEffect(() => {
     api<Tenant>(`/api/tenants/${tenantId}`).then(setTenant);
@@ -66,7 +77,7 @@ export function TenantDetail() {
       {tab === "sites" && <SitesPanel tenantId={tenantId} />}
       {tab === "wan" && <WanTargets tenantId={tenantId} />}
       {tab === "agents" && <Agents tenantId={tenantId} />}
-      {tab === "scans" && <Scans tenantId={tenantId} />}
+      {tab === "scans" && <Scans tenantId={tenantId} focusJobId={focusJobId} />}
       {tab === "assets" && <AssetsPanel tenantId={tenantId} />}
       {tab === "findings" && <Findings tenantId={tenantId} />}
       {tab === "alerts" && <Alerts tenantId={tenantId} />}
@@ -311,7 +322,12 @@ function Agents({ tenantId }: { tenantId: number }) {
   );
 }
 
-function Scans({ tenantId }: { tenantId: number }) {
+function tabsFrom(value: string | null): Tab {
+  const tabs: Tab[] = ["overview", "sites", "wan", "agents", "scans", "assets", "findings", "alerts"];
+  return tabs.includes(value as Tab) ? (value as Tab) : "overview";
+}
+
+function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number | null }) {
   const { user } = useAuth();
   const write = canWrite(user?.role);
   const [scans, setScans] = useState<Scan[]>([]);
@@ -320,6 +336,7 @@ function Scans({ tenantId }: { tenantId: number }) {
   const [sites, setSites] = useState<Site[]>([]);
   const [wanTargets, setWanTargets] = useState<AuthorizedWanTarget[]>([]);
   const [exclusions, setExclusions] = useState<ScanExclusion[]>([]);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [selectedJob, setSelectedJob] = useState<ScanJob | null>(null);
   const [jobArtifacts, setJobArtifacts] = useState<ScanArtifact[]>([]);
   const [step, setStep] = useState(1);
@@ -371,11 +388,24 @@ function Scans({ tenantId }: { tenantId: number }) {
     api<AuthorizedWanTarget[]>(`/api/tenants/${tenantId}/wan-targets`).then(setWanTargets);
     api<ScanExclusion[]>(`/api/tenants/${tenantId}/scan-exclusions`).then(setExclusions);
   }
+  function openJob(jobId: number) {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", "scans");
+    next.set("job", String(jobId));
+    setSearchParams(next, { replace: true });
+    api<ScanJob>(`/api/jobs/${jobId}`).then(setSelectedJob);
+  }
+
   useEffect(() => {
     load();
     const id = setInterval(load, 8000);
     return () => clearInterval(id);
   }, [tenantId]);
+  useEffect(() => {
+    if (focusJobId) {
+      api<ScanJob>(`/api/jobs/${focusJobId}`).then(setSelectedJob).catch(() => undefined);
+    }
+  }, [focusJobId]);
   useEffect(() => {
     if (!selectedJob) {
       setJobArtifacts([]);
@@ -384,7 +414,16 @@ function Scans({ tenantId }: { tenantId: number }) {
     api<ScanArtifact[]>(`/api/jobs/${selectedJob.id}/artifacts`)
       .then(setJobArtifacts)
       .catch(() => setJobArtifacts([]));
-  }, [selectedJob]);
+  }, [selectedJob?.id]);
+  useEffect(() => {
+    if (!selectedJob || !["running", "queued", "waiting_for_agent"].includes(selectedJob.status)) {
+      return;
+    }
+    const id = setInterval(() => {
+      api<ScanJob>(`/api/jobs/${selectedJob.id}`).then(setSelectedJob).catch(() => undefined);
+    }, 8000);
+    return () => clearInterval(id);
+  }, [selectedJob?.id, selectedJob?.status]);
 
   const siteNetworks = useMemo(
     () => networks.filter((n) => !n.is_archived && String(n.site_id) === form.site_id),
@@ -816,14 +855,15 @@ function Scans({ tenantId }: { tenantId: number }) {
       <div>
         <h3 className="font-medium mb-2">Run history</h3>
         <Table
-          headers={["Run", "Definition", "Trigger", "Status", "Worker", "Scheduled", "Created", "Started", "Finished", "Hosts", "Findings"]}
+          headers={["Run", "Definition", "Trigger", "Status", "Progress", "Worker", "Scheduled", "Created", "Started", "Finished", "Hosts", "Findings"]}
           rows={jobs.map((j) => [
-            <button className="text-cyan-400" onClick={() => api<ScanJob>(`/api/jobs/${j.id}`).then(setSelectedJob)}>
+            <button className="text-cyan-400" onClick={() => openJob(j.id)}>
               #{j.id}
             </button>,
             j.scan_name || j.scan_id,
             j.trigger_type || "—",
             <Badge value={j.status} />,
+            <ScanProgressBar progress={j.progress} compact />,
             j.claimed_by || "—",
             formatUtc(j.scheduled_for, defaultTimezone),
             formatUtc(j.created_at, defaultTimezone),
@@ -838,11 +878,20 @@ function Scans({ tenantId }: { tenantId: number }) {
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 text-sm space-y-2">
           <div className="flex justify-between">
             <h3 className="font-medium">Run #{selectedJob.id}</h3>
-            <button className="text-slate-400" onClick={() => setSelectedJob(null)}>
+            <button
+              className="text-slate-400"
+              onClick={() => {
+                setSelectedJob(null);
+                const next = new URLSearchParams(searchParams);
+                next.delete("job");
+                setSearchParams(next, { replace: true });
+              }}
+            >
               Close
             </button>
           </div>
           <div>Revision {selectedJob.definition_revision} · snapshot {selectedJob.snapshot_version || "legacy"}</div>
+          <ScanProgressDetail job={selectedJob} />
           <div className="grid md:grid-cols-2 gap-1 text-slate-300">
             <div>Runtime: {recordedVersion(selectedJob.runtime_provenance, "runtime_version")}</div>
             <div>Nuclei: {recordedVersion(selectedJob.runtime_provenance, "nuclei_version")}</div>

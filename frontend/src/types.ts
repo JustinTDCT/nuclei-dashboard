@@ -166,6 +166,25 @@ export interface ScanJob {
   wait_expires_at?: string | null;
   execution_snapshot?: Record<string, unknown> | null;
   runtime_provenance?: Record<string, unknown> | null;
+  progress?: ScanJobProgress | null;
+}
+
+export interface ScanJobProgressStage {
+  id: string;
+  label: string;
+  state: "pending" | "active" | "done";
+}
+
+export interface ScanJobProgress {
+  percent: number | null;
+  approximate?: boolean;
+  label: string;
+  stage?: string | null;
+  message?: string | null;
+  activity?: string | null;
+  updated_at?: string | null;
+  elapsed_seconds?: number | null;
+  stages?: ScanJobProgressStage[];
 }
 
 export interface ScanArtifact {

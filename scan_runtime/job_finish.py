@@ -8,6 +8,7 @@ from typing import Any
 from api_client import ApiError
 from artifact_io import cleanup_staging
 from ingest_chunks import iter_ingest_chunks
+from scan_progress import note_stage
 from spool import JobSpool
 
 UploadFn = Callable[[dict[str, Any]], Any]
@@ -110,6 +111,7 @@ def finish_pipeline_run(
     pipeline_error: str | None = None,
 ) -> None:
     artifacts = list(result.get("artifacts") or [])
+    note_stage("upload", "Uploading results")
     try:
         persist_artifacts(
             upload,
@@ -155,6 +157,7 @@ def finish_pipeline_run(
     if isinstance(spool, JobSpool) and spool.has_pending():
         complete(False, "normalized spool still has pending chunks")
         return
+    note_stage("upload", "Upload complete", complete=True)
     complete(True, None, raw_evidence=raw_evidence_declaration(result))
 
 

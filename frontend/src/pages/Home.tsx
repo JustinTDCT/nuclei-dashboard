@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import { Badge } from "../components/Badge";
+import { ScanProgressBar } from "../components/ScanProgress";
 import type { Dashboard } from "../types";
 
 function Card({ label, value, to }: { label: string; value: number | string; to?: string }) {
@@ -89,15 +90,20 @@ export function Home() {
           <div className="space-y-2">
             {data.recent_jobs.length === 0 && <div className="text-sm text-slate-500">No scan jobs yet.</div>}
             {data.recent_jobs.map((j) => (
-              <div key={j.id} className="flex items-center justify-between text-sm">
+              <Link
+                key={j.id}
+                to={`/tenants/${j.tenant_id}?tab=scans&job=${j.id}`}
+                className="flex items-center justify-between gap-3 text-sm hover:bg-slate-950/80 rounded-lg px-1 py-1"
+              >
                 <div>
                   Job #{j.id} · tenant {j.tenant_id}
                   <div className="text-xs text-slate-500">
                     {j.hosts_found} hosts · {j.findings_count} findings
                   </div>
+                  <ScanProgressBar progress={j.progress} compact />
                 </div>
                 <Badge value={j.status} />
-              </div>
+              </Link>
             ))}
           </div>
         </section>

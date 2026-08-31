@@ -814,9 +814,9 @@ You do **not** copy the whole Nuclei Dashboard repo onto the Agent host.
 
 ## 1. Prove the Agent host can reach the dashboard
 
-Use the **same** hostname or IP that is on the server certificate and in `PUBLIC_URL`. If the cert SAN is `scanner.thedubes.net`, curl and `CENTRAL_URL` must use that name, not a different interface IP.
+You have not created `~/nuclei-agent` yet. This step only checks that the Agent machine can talk to the dashboard. Certificate files come later, in step 4.
 
-**Reachability only.** A self-signed cert makes a plain `curl https://...` fail with `curl: (60)`. Skip verification for this first check:
+A self-signed cert makes a plain `curl https://...` fail with `curl: (60)`. Skip verification here:
 
 ```bash
 curl -k https://YOUR_SERVER:8118/api/health
@@ -824,18 +824,9 @@ curl -k https://YOUR_SERVER:8118/api/health
 
 You want `{"ok":true}`. `-k` only proves the host, port, and API respond. It is not how the Agent will connect.
 
-**Then verify the certificate** (after you copy the trust file in step 4, or immediately if the cert is publicly trusted):
+If the certificate is already publicly trusted, you can also run the same URL without `-k`. For a self-signed or internal CA, wait until step 4 — `~/nuclei-agent/agent-certs/ca.pem` does not exist yet.
 
-```bash
-# public certificate
-curl https://YOUR_SERVER:8118/api/health
-
-# self-signed or internal CA
-cd ~/nuclei-agent
-curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
-```
-
-If `-k` works and `--cacert` does not, the URL does not match the certificate name/IP, or `ca.pem` is not the server’s public cert (or its issuing CA). Fix that before starting the Agent container.
+Use the same hostname or IP that is on the server certificate and in `PUBLIC_URL`. That same value becomes `CENTRAL_URL` in step 3.
 
 ---
 
@@ -894,7 +885,7 @@ CENTRAL_URL=https://YOUR_SERVER:8118
 TLS_VERIFY=1
 ```
 
-`CENTRAL_URL` must be the same URL that passed `curl --cacert` (or plain `curl` if the cert is public).
+`CENTRAL_URL` must be the same URL that passed `curl -k` in step 1 (same scheme, host or IP, and port as `PUBLIC_URL` and the certificate SAN). You verify the cert in the next step.
 
 ---
 
@@ -924,19 +915,14 @@ TLS_CA_FILE=/certs/ca.pem
 
 `/certs/ca.pem` is the path **inside** the container. The Compose file mounts `./agent-certs` there.
 
-Reachability without verification:
+Now that the file exists, verify TLS with the **same** host or IP that passed `curl -k` in step 1:
 
 ```bash
-curl -k https://YOUR_SERVER:8118/api/health
-```
-
-Then verify with the **same** host or IP that is on the certificate:
-
-```bash
+cd ~/nuclei-agent
 curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
 ```
 
-A bare `curl https://...` (no `-k`, no `--cacert`) still fails on a self-signed cert (`curl: (60)`). That is expected. If `--cacert` fails with a name mismatch, regenerate the server certificate for the address Agents actually use, or change `CENTRAL_URL` / `PUBLIC_URL` to that address — do not invent a second IP.
+You want `{"ok":true}`. A bare `curl https://...` (no `-k`, no `--cacert`) still fails on a self-signed cert (`curl: (60)`). That is expected. If `-k` worked and `--cacert` does not, the URL does not match the certificate name/IP, or `ca.pem` is not the server’s public cert (or its issuing CA). Regenerate the server certificate for the address Agents actually use, or change `CENTRAL_URL` / `PUBLIC_URL` to that address — do not invent a second IP.
 
 ### Internal CA
 

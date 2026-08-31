@@ -85,6 +85,7 @@ class CentralClient(_PooledClient):
         runtime_inventory: dict[str, Any] | None = None,
         job_id: int | None = None,
         activity: str | None = None,
+        progress: dict[str, Any] | None = None,
     ) -> dict:
         body: dict[str, Any] = {}
         if runtime_inventory is not None:
@@ -93,6 +94,8 @@ class CentralClient(_PooledClient):
             body["job_id"] = job_id
         if activity is not None:
             body["activity"] = activity
+        if progress is not None:
+            body["progress"] = progress
         kwargs: dict[str, Any] = {"headers": _auth(token)}
         if body:
             kwargs["json"] = body
@@ -101,8 +104,16 @@ class CentralClient(_PooledClient):
     def jobs(self, token: str) -> list[dict[str, Any]]:
         return self._request("GET", "/api/agent/jobs", headers=_auth(token)).json()
 
+    def owned_running_job(self, token: str, job_id: int) -> dict:
+        return self._request("GET", f"/api/agent/jobs/{job_id}", headers=_auth(token)).json()
+
     def start(self, token: str, job_id: int) -> dict:
         return self._request("POST", f"/api/agent/jobs/{job_id}/start", headers=_auth(token)).json()
+
+    def progress(self, token: str, job_id: int, payload: dict[str, Any]) -> dict:
+        return self._request(
+            "POST", f"/api/agent/jobs/{job_id}/progress", headers=_auth(token), json=payload
+        ).json()
 
     def devices(self, token: str, job_id: int, devices: list[dict]) -> dict:
         return self._request(
@@ -170,6 +181,9 @@ class ScannerClient(_PooledClient):
 
     def job_status(self, job_id: int) -> dict:
         return self._request("GET", f"/api/internal/scanner/jobs/{job_id}").json()
+
+    def progress(self, job_id: int, payload: dict[str, Any]) -> dict:
+        return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/progress", json=payload).json()
 
     def devices(self, job_id: int, devices: list[dict]) -> dict:
         return self._request("POST", f"/api/internal/scanner/jobs/{job_id}/devices", json=devices).json()

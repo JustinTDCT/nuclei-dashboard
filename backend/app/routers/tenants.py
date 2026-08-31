@@ -9,6 +9,7 @@ from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
+from app.job_progress import progress_view
 from app.intel.priority import open_finding_priority_counts
 from app.models import Agent, Alert, Asset, Device, ScanJob, Tenant, User
 from app.schemas import TenantIn, TenantOut
@@ -155,6 +156,7 @@ def tenant_summary(tenant_id: int, user: User = Depends(require_any), db: Sessio
                 "findings_count": j.findings_count,
                 "created_at": j.created_at,
                 "finished_at": j.finished_at,
+                "progress": progress_view(j),
             }
             for j in db.query(ScanJob)
             .filter(ScanJob.tenant_id == tenant_id)

@@ -14,6 +14,7 @@ from app.audit import record_audit
 from app.auth import require_admin, require_any
 from app.database import get_db
 from app.finding_lifecycle import open_finding_severity_counts
+from app.job_progress import progress_view
 from app.intel.priority import open_finding_priority_counts
 from app.intel.sync import intelligence_status, refresh_intelligence
 from app.models import AGENT_HEALTH_SECONDS, Agent, Alert, AlertDelivery, AssetFinding, Device, ScanJob, Tenant, User
@@ -200,6 +201,7 @@ def dashboard(user: User = Depends(require_any), db: Session = Depends(get_db)):
                 "hosts_found": j.hosts_found,
                 "findings_count": j.findings_count,
                 "created_at": j.created_at,
+                "progress": progress_view(j),
             }
             for j in apply_tenant_scope(db.query(ScanJob), user, ScanJob.tenant_id)
             .order_by(ScanJob.created_at.desc())
