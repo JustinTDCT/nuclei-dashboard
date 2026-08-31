@@ -7,6 +7,9 @@ startup-refresh rules. Catch-up is one keyset page per scheduler tick.
 from __future__ import annotations
 
 import inspect
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -122,6 +125,8 @@ def test_refresh_source_is_keyset_bounded():
     assert "Device.id >" in src
     assert ".limit(" in src
     assert "order_by(Device.id" in src
+    assert "with_for_update" in src
+    assert "skip_locked" in src
 
 
 def test_scheduler_source_registers_bounded_discovery_job():
@@ -329,3 +334,207 @@ def test_ingest_still_writes_classification_label_tech(reset_db):
         assert device.auto_label == "iDRAC · HTTPS"
     finally:
         db.close()
+
+
+def _newer_proxmox_report():
+    from app.schemas import DeviceReport
+
+    return DeviceReport(
+        ip="203.0.113.10",
+        scope="wan",
+        hostname="lab-host",
+        ports=[8006],
+        title="Proxmox VE",
+        tech="Proxmox, jQuery",
+    )
+
+
+def _dirty_idrac_device(db):
+    """One Device whose stored fields catch-up would rewrite to iDRAC, ingest to Proxmox."""
+    from app.inventory import upsert_devices
+    from app.models import Device, Scan, ScanJob, Tenant
+    from app.schemas import DeviceReport
+
+    tenant = Tenant(name="s3a-race", notes="")
+    db.add(tenant)
+    db.flush()
+    scan = Scan(tenant_id=tenant.id, name="wan", scope="wan", profile="discovery")
+    db.add(scan)
+    db.flush()
+    job = ScanJob(scan_id=scan.id, tenant_id=tenant.id, status="running")
+    db.add(job)
+    db.flush()
+    _, devices = upsert_devices(
+        db,
+        tenant.id,
+        job.id,
+        [
+            DeviceReport(
+                ip="203.0.113.10",
+                scope="wan",
+                hostname="lab-host",
+                ports=[443],
+                tech="jQuery, iDRAC/9, bootstrap",
+            )
+        ],
+    )
+    device = devices[0]
+    device.classification = "Unknown"
+    device.auto_label = ""
+    device.title = ""
+    device.tech = "jQuery, iDRAC/9, bootstrap"
+    device.ports = [443]
+    db.commit()
+    return tenant.id, scan.id, device.id
+
+
+def _assert_ingest_won(db, device_id: int) -> None:
+    from app.models import Device
+
+    db.expire_all()
+    row = db.get(Device, device_id)
+    assert row is not None
+    assert row.classification == "Virtual Host"
+    assert row.tech == "proxmox"
+    assert row.auto_label == "Proxmox"
+    assert row.classification != "Server Management"
+    assert row.tech != "idrac"
+    assert row.auto_label != "iDRAC · HTTPS"
+
+
+def _wait_for_backend_lock_wait(*, timeout: float = 15.0) -> None:
+    from sqlalchemy import text
+
+    from app.database import engine
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with engine.connect() as conn:
+            waiting = conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type = 'Lock' AND state = 'active'"
+                )
+            ).scalar()
+        if waiting:
+            return
+        time.sleep(0.05)
+    raise AssertionError("ingest session did not block on the catch-up Device lock")
+
+
+@requires_postgres
+def test_catchup_skips_ingest_locked_device_and_ingest_wins(reset_db):
+    from app.database import SessionLocal
+    from app.inventory import refresh_discovery_metadata, upsert_devices
+    from app.migrate import apply_schema
+    from app.models import Device, ScanJob
+
+    apply_schema()
+    setup = SessionLocal()
+    try:
+        tenant_id, scan_id, device_id = _dirty_idrac_device(setup)
+    finally:
+        setup.close()
+
+    ingest_db = SessionLocal()
+    catchup_db = SessionLocal()
+    try:
+        locked = ingest_db.query(Device).filter(Device.id == device_id).with_for_update().one()
+        assert locked.tech == "jQuery, iDRAC/9, bootstrap"
+        page = refresh_discovery_metadata(catchup_db, batch_size=10, after_id=0)
+        assert page.scanned == 0
+        assert page.updated == 0
+        job = ScanJob(scan_id=scan_id, tenant_id=tenant_id, status="running")
+        ingest_db.add(job)
+        ingest_db.flush()
+        upsert_devices(ingest_db, tenant_id, job.id, [_newer_proxmox_report()])
+        ingest_db.commit()
+    finally:
+        catchup_db.close()
+        ingest_db.close()
+
+    verify = SessionLocal()
+    try:
+        _assert_ingest_won(verify, device_id)
+    finally:
+        verify.close()
+
+
+@requires_postgres
+def test_catchup_lock_first_then_newer_ingest_wins(reset_db):
+    from app import inventory as inventory_mod
+    from app.database import SessionLocal
+    from app.inventory import apply_stored_discovery_metadata, refresh_discovery_metadata, upsert_devices
+    from app.migrate import apply_schema
+    from app.models import ScanJob
+
+    apply_schema()
+    setup = SessionLocal()
+    try:
+        tenant_id, scan_id, device_id = _dirty_idrac_device(setup)
+    finally:
+        setup.close()
+
+    lock_held = threading.Event()
+    ingest_waiting = threading.Event()
+    errors: list[BaseException] = []
+
+    def catchup() -> None:
+        db = SessionLocal()
+        try:
+
+            def wrapped(device):
+                lock_held.set()
+                if not ingest_waiting.wait(timeout=15):
+                    raise AssertionError("ingest did not block on the catch-up Device lock")
+                return apply_stored_discovery_metadata(device)
+
+            inventory_mod.apply_stored_discovery_metadata = wrapped
+            try:
+                refresh_discovery_metadata(db, batch_size=10, after_id=0)
+            finally:
+                inventory_mod.apply_stored_discovery_metadata = apply_stored_discovery_metadata
+        except BaseException as exc:  # noqa: BLE001 — surface thread failures after join
+            errors.append(exc)
+            lock_held.set()
+            raise
+        finally:
+            db.close()
+
+    def ingest() -> None:
+        if not lock_held.wait(timeout=15):
+            raise AssertionError("catch-up never locked the Device row")
+        db = SessionLocal()
+        try:
+            job = ScanJob(scan_id=scan_id, tenant_id=tenant_id, status="running")
+            db.add(job)
+            db.flush()
+            upsert_devices(db, tenant_id, job.id, [_newer_proxmox_report()])
+            db.commit()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+            raise
+        finally:
+            db.close()
+
+    def watch() -> None:
+        if not lock_held.wait(timeout=15):
+            return
+        _wait_for_backend_lock_wait()
+        ingest_waiting.set()
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        catchup_f = pool.submit(catchup)
+        assert lock_held.wait(timeout=15)
+        watch_f = pool.submit(watch)
+        ingest_f = pool.submit(ingest)
+        catchup_f.result(timeout=20)
+        ingest_f.result(timeout=20)
+        watch_f.result(timeout=20)
+
+    assert not errors
+    verify = SessionLocal()
+    try:
+        _assert_ingest_won(verify, device_id)
+    finally:
+        verify.close()

@@ -406,6 +406,10 @@ def refresh_discovery_metadata(
     Do not call this from API process startup. One page per invocation; the
     in-process scheduler owns incremental catch-up. Never loads the whole
     Device table.
+
+    Rows are taken with FOR UPDATE SKIP LOCKED so a concurrent ingest UPDATE
+    cannot be overwritten by a stale catch-up snapshot. Locked rows are
+    skipped this sweep and can be visited after the cursor rewinds.
     """
     limit = max(1, int(batch_size))
     rows = (
@@ -413,6 +417,7 @@ def refresh_discovery_metadata(
         .filter(Device.id > after_id)
         .order_by(Device.id.asc())
         .limit(limit)
+        .with_for_update(skip_locked=True)
         .all()
     )
     updated = 0
@@ -421,8 +426,7 @@ def refresh_discovery_metadata(
         last_id = device.id
         if apply_stored_discovery_metadata(device):
             updated += 1
-    if updated:
-        db.commit()
+    db.commit()
     return DiscoveryMetadataPage(
         scanned=len(rows),
         updated=updated,
