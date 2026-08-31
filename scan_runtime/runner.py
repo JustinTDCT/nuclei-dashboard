@@ -28,6 +28,8 @@ from artifact_io import (
 from classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
 from commands import (
     PORT_MODE_NONE,
+    PORT_SCOPE_ALL,
+    PORT_SCOPE_DETECTED,
     build_httpx_command,
     build_naabu_command,
     build_naabu_host_discovery_command,
@@ -335,27 +337,18 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
 
     try:
         port_mode = stages.get("port_mode") or PORT_MODE_NONE
-        if port_mode != PORT_MODE_NONE:
-            rows, artifact = _unpack_stage(
-                run_naabu(
-                    [row["value"] for row in targets],
-                    port_mode=port_mode,
-                    custom_ports=stages.get("custom_ports") or [],
-                    intensity=intensity,
-                    exclude_hosts=_exclusion_hosts(job),
-                    log=log,
-                    staging_dir=staging_dir,
-                    row_consumer=on_host,
-                )
-            )
-            if artifact:
-                artifacts.append(artifact)
-            _consume_returned_rows(rows, on_host)
-        elif stages.get("discovery"):
+        port_scope = str(stages.get("port_scope") or PORT_SCOPE_DETECTED)
+        if port_scope not in {PORT_SCOPE_DETECTED, PORT_SCOPE_ALL}:
+            port_scope = PORT_SCOPE_DETECTED
+        discovery_enabled = bool(stages.get("discovery"))
+        run_discovery = discovery_enabled and (
+            port_mode == PORT_MODE_NONE or port_scope == PORT_SCOPE_DETECTED
+        )
+        if run_discovery:
             rows, artifact = _unpack_stage(
                 run_host_discovery(
                     targets,
-                    intensity=intensity,
+                    intensity=_discovery_intensity(intensity),
                     exclude_hosts=_exclusion_hosts(job),
                     log=log,
                     staging_dir=staging_dir,
@@ -365,6 +358,32 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             if artifact:
                 artifacts.append(artifact)
             _consume_returned_rows(rows, on_host)
+        if port_mode != PORT_MODE_NONE:
+            port_targets = _port_scan_targets(
+                index, targets, port_scope=port_scope, discovery_ran=run_discovery
+            )
+            if port_scope == PORT_SCOPE_DETECTED and not port_targets:
+                _log("Host discovery found no live hosts; skipping port scan of empty CIDRs", log)
+            elif port_targets:
+                if port_scope == PORT_SCOPE_DETECTED:
+                    _log(f"Port scan limited to {len(port_targets)} live or explicit host(s)", log)
+                else:
+                    _log("Port scan of every selected address (this can take a while)", log)
+                rows, artifact = _unpack_stage(
+                    run_naabu(
+                        port_targets,
+                        port_mode=port_mode,
+                        custom_ports=stages.get("custom_ports") or [],
+                        intensity=intensity,
+                        exclude_hosts=_exclusion_hosts(job),
+                        log=log,
+                        staging_dir=staging_dir,
+                        row_consumer=on_host,
+                    )
+                )
+                if artifact:
+                    artifacts.append(artifact)
+                _consume_returned_rows(rows, on_host)
         if stages.get("fingerprint", True):
             probe_hosts = index.probe_hosts(targets)
             rows, artifact = _unpack_stage(
@@ -779,7 +798,7 @@ def run_host_discovery(
             exclude_hosts=exclude_hosts,
         )
         if cmd:
-            _log("Discovery enabled with port mode none; running Naabu host discovery (-sn)", log)
+            _log("Running Naabu host discovery (-sn) before any port scan", log)
             if staging_dir is None:
                 rows = _parse_jsonl(_run(cmd, log))
                 if row_consumer is not None:
@@ -1173,6 +1192,45 @@ def merge_devices(hosts: list[dict[str, Any]], http_info: list[dict[str, Any]], 
     return devices
 
 
+def _discovery_intensity(intensity: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep host discovery to a ping-sweep, not a retry-heavy linger."""
+    resolved = dict(intensity or {})
+    retries = resolved.get("naabu_retries")
+    if retries is not None:
+        resolved["naabu_retries"] = min(int(retries), 1)
+    timeout = resolved.get("naabu_timeout_ms")
+    if timeout is not None:
+        resolved["naabu_timeout_ms"] = min(int(timeout), 500)
+    return resolved
+
+
+def _port_scan_targets(
+    index: "DeviceIndex",
+    targets: list[dict[str, str]],
+    *,
+    port_scope: str,
+    discovery_ran: bool,
+) -> list[str]:
+    """Choose port-scan inputs from the scan option.
+
+    ``detected`` never re-expands CIDRs. Explicit IP/FQDN targets stay in
+    scope even when ping misses them. ``all`` scans the original addresses.
+    """
+    if port_scope == PORT_SCOPE_ALL or not discovery_ran:
+        return [row["value"] for row in targets if row.get("value")]
+    seen: list[str] = []
+    for ip in sorted(index.discovered_ips()):
+        if ip not in seen:
+            seen.append(ip)
+    for row in targets:
+        if row.get("type") not in {"ip", "fqdn"}:
+            continue
+        value = str(row.get("value") or "").strip()
+        if value and value not in seen:
+            seen.append(value)
+    return seen
+
+
 class DeviceIndex:
     """IP-keyed device merge. RAM tracks unique hosts, not every scanner row."""
 
@@ -1183,11 +1241,16 @@ class DeviceIndex:
         self.fqdn_by_ip: dict[str, str] = {}
         self._devices: dict[str, dict[str, Any]] = {}
 
+    def discovered_ips(self) -> list[str]:
+        return list(self.ports)
+
     def add_host(self, row: dict[str, Any]) -> None:
-        ip = row.get("ip")
+        ip = row.get("ip") or row.get("host")
         if not ip:
             return
-        ip = str(ip)
+        ip = str(ip).strip()
+        if not ip:
+            return
         if row.get("port"):
             try:
                 self.ports[ip].add(int(row["port"]))

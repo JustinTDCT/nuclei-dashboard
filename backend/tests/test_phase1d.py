@@ -846,6 +846,96 @@ def test_command_builders_honor_stages_and_do_not_invent_flags():
     assert "-tl" not in nuclei
 
 
+def test_port_scope_defaults_and_requires_discovery_for_detected():
+    from app.scan_intensity import PRESETS
+    from app.scan_stages import StageConfigError, normalize_stage_config
+
+    detected = normalize_stage_config({"discovery": True, "port_mode": "common"})
+    assert detected["port_scope"] == "detected"
+    with pytest.raises(StageConfigError, match="detected hosts"):
+        normalize_stage_config({"discovery": False, "port_mode": "common", "port_scope": "detected"})
+    everything = normalize_stage_config(
+        {"discovery": False, "port_mode": "common", "port_scope": "all", "fingerprint": False, "vulnerability": False}
+    )
+    assert everything["port_scope"] == "all"
+    assert PRESETS["normal"]["naabu_retries"] == 1
+    assert PRESETS["normal"]["naabu_timeout_ms"] <= 400
+    assert PRESETS["high"]["naabu_retries"] == 0
+
+
+def test_pipeline_detected_hosts_do_not_port_scan_cidrs():
+    import runner as runtime_runner
+
+    captured: dict[str, list] = {}
+
+    def fake_discovery(*_args, **_kwargs):
+        return ([{"ip": "10.1.0.9"}], None)
+
+    def fake_naabu(targets, **_kwargs):
+        captured["naabu"] = list(targets)
+        return ([{"ip": "10.1.0.9", "port": 80}], None)
+
+    with (
+        patch.object(runtime_runner, "run_host_discovery", side_effect=fake_discovery) as discovery,
+        patch.object(runtime_runner, "run_naabu", side_effect=fake_naabu),
+        patch.object(runtime_runner, "run_httpx", return_value=([], None)),
+        patch.object(runtime_runner, "collect_run_provenance", return_value={"runtime_version": "t"}),
+    ):
+        runtime_runner.run_pipeline(
+            {
+                "scope": "lan",
+                "targets": [{"type": "cidr", "value": "10.1.0.0/24"}],
+                "stages": {
+                    "discovery": True,
+                    "port_mode": "common",
+                    "port_scope": "detected",
+                    "fingerprint": False,
+                    "vulnerability": False,
+                },
+                "intensity": {"naabu_rate": 2500, "naabu_retries": 3, "naabu_timeout_ms": 1000},
+                "exclusions": [],
+            }
+        )
+    discovery.assert_called_once()
+    assert discovery.call_args.kwargs["intensity"]["naabu_retries"] == 1
+    assert discovery.call_args.kwargs["intensity"]["naabu_timeout_ms"] == 500
+    assert captured["naabu"] == ["10.1.0.9"]
+
+
+def test_pipeline_all_addresses_port_scans_cidrs_without_ping_first():
+    import runner as runtime_runner
+
+    captured: dict[str, list] = {}
+
+    def fake_naabu(targets, **_kwargs):
+        captured["naabu"] = list(targets)
+        return ([{"ip": "10.1.0.9", "port": 80}], None)
+
+    with (
+        patch.object(runtime_runner, "run_host_discovery") as discovery,
+        patch.object(runtime_runner, "run_naabu", side_effect=fake_naabu),
+        patch.object(runtime_runner, "run_httpx", return_value=([], None)),
+        patch.object(runtime_runner, "collect_run_provenance", return_value={"runtime_version": "t"}),
+    ):
+        runtime_runner.run_pipeline(
+            {
+                "scope": "lan",
+                "targets": [{"type": "cidr", "value": "10.1.0.0/24"}],
+                "stages": {
+                    "discovery": True,
+                    "port_mode": "common",
+                    "port_scope": "all",
+                    "fingerprint": False,
+                    "vulnerability": False,
+                },
+                "intensity": {},
+                "exclusions": [],
+            }
+        )
+    discovery.assert_not_called()
+    assert captured["naabu"] == ["10.1.0.0/24"]
+
+
 def test_custom_ports_and_fqdn_normalization():
     from app.scan_stages import StageConfigError, parse_custom_ports
     from app.wan_targets import WanTargetInvalidError, normalize_wan_target

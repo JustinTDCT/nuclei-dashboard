@@ -10,6 +10,8 @@ from app.models import (
     PORT_MODE_DEEP,
     PORT_MODE_NONE,
     PORT_MODES,
+    PORT_SCOPE_DETECTED,
+    PORT_SCOPES,
 )
 
 COMMON_TOP_PORTS = 100
@@ -89,13 +91,18 @@ def normalize_stage_config(raw: dict[str, Any] | None, *, legacy_profile: str | 
     port_mode = str(data.get("port_mode") or PORT_MODE_COMMON)
     if port_mode not in PORT_MODES:
         raise StageConfigError("Port mode must be none, common, deep, or custom")
+    port_scope = str(data.get("port_scope") or PORT_SCOPE_DETECTED)
+    if port_scope not in PORT_SCOPES:
+        raise StageConfigError("Port scope must be detected or all")
+    if port_mode == PORT_MODE_NONE:
+        port_scope = PORT_SCOPE_DETECTED
     custom_ports = parse_custom_ports(data.get("custom_ports"))
     fingerprint = bool(data.get("fingerprint", True))
     vulnerability = bool(data.get("vulnerability", False))
     severities = str(data.get("nuclei_severities") or "critical,high,medium").strip()
     tags = str(data.get("nuclei_tags") or "").strip()
-    if not discovery and port_mode != PORT_MODE_NONE:
-        raise StageConfigError("Port discovery requires the discovery stage")
+    if port_mode != PORT_MODE_NONE and port_scope == PORT_SCOPE_DETECTED and not discovery:
+        raise StageConfigError("Scan only detected hosts requires the discovery stage")
     if port_mode == PORT_MODE_CUSTOM and not custom_ports:
         raise StageConfigError("Custom port mode requires at least one valid port or range")
     if port_mode != PORT_MODE_CUSTOM and custom_ports:
@@ -107,6 +114,7 @@ def normalize_stage_config(raw: dict[str, Any] | None, *, legacy_profile: str | 
     return {
         "discovery": discovery,
         "port_mode": port_mode,
+        "port_scope": port_scope,
         "custom_ports": custom_ports,
         "fingerprint": fingerprint,
         "vulnerability": vulnerability,

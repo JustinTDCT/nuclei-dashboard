@@ -16,6 +16,8 @@ PORT_MODE_NONE = "none"
 PORT_MODE_COMMON = "common"
 PORT_MODE_DEEP = "deep"
 PORT_MODE_CUSTOM = "custom"
+PORT_SCOPE_DETECTED = "detected"
+PORT_SCOPE_ALL = "all"
 COMMON_TOP_PORTS = "100"
 DEEP_TOP_PORTS = "1000"
 
@@ -152,6 +154,7 @@ def job_stages(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "discovery": True,
         "port_mode": PORT_MODE_COMMON,
+        "port_scope": PORT_SCOPE_DETECTED,
         "custom_ports": [],
         "fingerprint": True,
         "vulnerability": profile == "discovery_nuclei",

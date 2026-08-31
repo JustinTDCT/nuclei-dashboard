@@ -351,16 +351,17 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
     wan_target_ids: [] as number[],
     discovery: true,
     port_mode: "common",
+    port_scope: "detected",
     custom_ports: "",
     fingerprint: true,
     vulnerability: false,
     nuclei_severities: "critical,high,medium",
     nuclei_tags: "",
     intensity: "normal",
-    naabu_rate: "1000",
-    naabu_concurrency: "25",
-    naabu_timeout_ms: "1000",
-    naabu_retries: "3",
+    naabu_rate: "2500",
+    naabu_concurrency: "50",
+    naabu_timeout_ms: "400",
+    naabu_retries: "1",
     httpx_rate: "150",
     httpx_threads: "50",
     httpx_timeout: "10",
@@ -478,16 +479,17 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
       wan_target_ids: scan.wan_target_ids || [],
       discovery: Boolean(stages.discovery ?? true),
       port_mode: String(stages.port_mode || "common"),
+      port_scope: String(stages.port_scope || "detected"),
       custom_ports: Array.isArray(stages.custom_ports) ? (stages.custom_ports as string[]).join(",") : String(stages.custom_ports || ""),
       fingerprint: Boolean(stages.fingerprint ?? true),
       vulnerability: Boolean(stages.vulnerability),
       nuclei_severities: String(stages.nuclei_severities || scan.nuclei_severities),
       nuclei_tags: String(stages.nuclei_tags || scan.nuclei_tags || ""),
       intensity: String(intensity.preset || "normal"),
-      naabu_rate: String(intensity.naabu_rate ?? 1000),
-      naabu_concurrency: String(intensity.naabu_concurrency ?? 25),
-      naabu_timeout_ms: String(intensity.naabu_timeout_ms ?? 1000),
-      naabu_retries: String(intensity.naabu_retries ?? 3),
+      naabu_rate: String(intensity.naabu_rate ?? 2500),
+      naabu_concurrency: String(intensity.naabu_concurrency ?? 50),
+      naabu_timeout_ms: String(intensity.naabu_timeout_ms ?? 400),
+      naabu_retries: String(intensity.naabu_retries ?? 1),
       httpx_rate: String(intensity.httpx_rate ?? 150),
       httpx_threads: String(intensity.httpx_threads ?? 50),
       httpx_timeout: String(intensity.httpx_timeout ?? 10),
@@ -527,6 +529,7 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
       stage_config: {
         discovery: form.discovery,
         port_mode: form.port_mode,
+        port_scope: form.port_scope,
         custom_ports: form.custom_ports,
         fingerprint: form.fingerprint,
         vulnerability: form.vulnerability,
@@ -683,7 +686,17 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
           {step === 2 && (
             <div className="grid md:grid-cols-2 gap-3">
               <label className="flex items-center gap-2 text-sm text-slate-300">
-                <input type="checkbox" checked={form.discovery} onChange={(e) => setForm({ ...form, discovery: e.target.checked })} />
+                <input
+                  type="checkbox"
+                  checked={form.discovery}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      discovery: e.target.checked,
+                      port_scope: e.target.checked ? form.port_scope : "all",
+                    })
+                  }
+                />
                 Discovery
               </label>
               <div>
@@ -695,6 +708,35 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
                   <option value="custom">Custom</option>
                 </select>
               </div>
+              {form.port_mode !== "none" && (
+                <div className="md:col-span-2 space-y-2">
+                  <label>Port scan targets</label>
+                  <label className="flex items-start gap-2 text-sm text-slate-300 normal-case tracking-normal">
+                    <input
+                      type="radio"
+                      name="port_scope"
+                      checked={form.port_scope === "detected"}
+                      onChange={() => setForm({ ...form, port_scope: "detected", discovery: true })}
+                    />
+                    <span>
+                      Only hosts that respond
+                      <span className="block text-slate-400">Fast. Discover live hosts, then scan their ports. A few networks should finish in seconds.</span>
+                    </span>
+                  </label>
+                  <label className="flex items-start gap-2 text-sm text-slate-300 normal-case tracking-normal">
+                    <input
+                      type="radio"
+                      name="port_scope"
+                      checked={form.port_scope === "all"}
+                      onChange={() => setForm({ ...form, port_scope: "all" })}
+                    />
+                    <span>
+                      Every address in the selected networks
+                      <span className="block text-slate-400">Thorough, but a /24 with common ports can take a long time.</span>
+                    </span>
+                  </label>
+                </div>
+              )}
               {form.port_mode === "custom" && (
                 <Field label="Custom ports" value={form.custom_ports} onChange={(v) => setForm({ ...form, custom_ports: v })} placeholder="22,80,443,8000-8010" />
               )}
@@ -809,7 +851,11 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
                 </div>
               )}
               <div>Dispatch: {dispatchLabel}</div>
-              <div>Stages: discovery {form.discovery ? "on" : "off"}, ports {form.port_mode}, fingerprint {form.fingerprint ? "on" : "off"}, vuln {form.vulnerability ? "on" : "off"}</div>
+              <div>
+                Stages: discovery {form.discovery ? "on" : "off"}, ports {form.port_mode}
+                {form.port_mode !== "none" ? ` (${form.port_scope === "all" ? "every address" : "detected hosts"})` : ""},
+                fingerprint {form.fingerprint ? "on" : "off"}, vuln {form.vulnerability ? "on" : "off"}
+              </div>
               <div>Intensity: {form.intensity}</div>
               <div>Schedule: {form.schedule_type}</div>
               <button className="bg-cyan-600 text-slate-950 font-medium rounded-md py-2 px-4 mt-2">

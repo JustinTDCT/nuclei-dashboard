@@ -734,7 +734,7 @@ def test_pipeline_captures_native_output_and_cleans_temp(tmp_path, monkeypatch):
     }
     result = runtime_runner.run_pipeline(job)
     keys = {row["artifact_key"] for row in result["artifacts"]}
-    assert keys == {"port_discovery.naabu", "fingerprint.httpx", "vulnerability.nuclei"}
+    assert keys == {"discovery.naabu", "port_discovery.naabu", "fingerprint.httpx", "vulnerability.nuclei"}
     assert result["devices"]
     assert result["findings"][0]["raw"]["template-id"] == "t1"
     for artifact in result["artifacts"]:

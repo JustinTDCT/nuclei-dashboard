@@ -29,9 +29,9 @@ INTENSITY_KEYS = (
 
 PRESETS: dict[str, dict[str, int]] = {
     INTENSITY_LOW: {
-        "naabu_rate": 200,
-        "naabu_concurrency": 10,
-        "naabu_timeout_ms": 1500,
+        "naabu_rate": 400,
+        "naabu_concurrency": 20,
+        "naabu_timeout_ms": 800,
         "naabu_retries": 1,
         "httpx_rate": 50,
         "httpx_threads": 20,
@@ -43,10 +43,10 @@ PRESETS: dict[str, dict[str, int]] = {
         "nuclei_retries": 1,
     },
     INTENSITY_NORMAL: {
-        "naabu_rate": 1000,
-        "naabu_concurrency": 25,
-        "naabu_timeout_ms": 1000,
-        "naabu_retries": 3,
+        "naabu_rate": 2500,
+        "naabu_concurrency": 50,
+        "naabu_timeout_ms": 400,
+        "naabu_retries": 1,
         "httpx_rate": 150,
         "httpx_threads": 50,
         "httpx_timeout": 10,
@@ -57,10 +57,10 @@ PRESETS: dict[str, dict[str, int]] = {
         "nuclei_retries": 1,
     },
     INTENSITY_HIGH: {
-        "naabu_rate": 3000,
-        "naabu_concurrency": 50,
-        "naabu_timeout_ms": 800,
-        "naabu_retries": 2,
+        "naabu_rate": 4000,
+        "naabu_concurrency": 75,
+        "naabu_timeout_ms": 250,
+        "naabu_retries": 0,
         "httpx_rate": 300,
         "httpx_threads": 80,
         "httpx_timeout": 8,

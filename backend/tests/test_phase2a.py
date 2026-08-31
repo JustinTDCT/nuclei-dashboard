@@ -875,6 +875,11 @@ def test_httpx_urls_become_nuclei_coverage_targets():
 
     captured = {}
     with (
+        patch.object(
+            runtime_runner,
+            "run_host_discovery",
+            return_value=([{"ip": "10.1.0.10"}, {"ip": "10.1.0.11"}], None),
+        ),
         patch.object(runtime_runner, "run_naabu", return_value=[{"ip": "10.1.0.10", "port": 22}, {"ip": "10.1.0.11", "port": 80}]),
         patch.object(runtime_runner, "run_httpx", side_effect=_httpx),
         patch.object(runtime_runner, "run_nuclei", side_effect=_nuclei),
