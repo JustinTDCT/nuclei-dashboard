@@ -26,7 +26,7 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       PUBLIC_URL: ${PUBLIC_URL:-https://10.150.10.155:8118}
       AGENT_IMAGE: ${AGENT_IMAGE:-nuclei-dashboard-agent:latest}
-      AGENT_GIT_CONTEXT: ${AGENT_GIT_CONTEXT:-https://github.com/JustinTDCT/nuclei-dashboard.git#6cb398a6574befdecbf6930ba1f99a40bfc43003:scan_runtime}
+      AGENT_GIT_CONTEXT: ${AGENT_GIT_CONTEXT:-https://github.com/JustinTDCT/nuclei-dashboard.git#3cdb52c42a87552db98e609e9ec7c1c01e86b23b:scan_runtime}
       SETTINGS_ENCRYPTION_KEY: ${SETTINGS_ENCRYPTION_KEY:-}
       AGENT_TLS_VERIFY: ${AGENT_TLS_VERIFY:-1}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,https://localhost:8118,https://10.150.10.155:8118}

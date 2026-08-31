@@ -8,7 +8,7 @@ services:
     image: nuclei-dashboard-agent:latest
     pull_policy: build
     build:
-      context: https://github.com/JustinTDCT/nuclei-dashboard.git#6cb398a6574befdecbf6930ba1f99a40bfc43003:scan_runtime
+      context: https://github.com/JustinTDCT/nuclei-dashboard.git#3cdb52c42a87552db98e609e9ec7c1c01e86b23b:scan_runtime
     command: ["python", "agent_main.py"]
     restart: unless-stopped
     network_mode: host
