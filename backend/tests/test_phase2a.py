@@ -883,6 +883,10 @@ def test_httpx_urls_become_nuclei_coverage_targets():
         patch.object(runtime_runner, "run_naabu", return_value=[{"ip": "10.1.0.10", "port": 22}, {"ip": "10.1.0.11", "port": 80}]),
         patch.object(runtime_runner, "run_httpx", side_effect=_httpx),
         patch.object(runtime_runner, "run_nuclei", side_effect=_nuclei),
+        patch.object(runtime_runner, "discover_liveness", return_value=[]),
+        patch.object(runtime_runner, "read_neighbor_table", return_value={}),
+        patch.object(runtime_runner, "discover_udp", return_value=[]),
+        patch.object(runtime_runner, "fingerprint_non_http", return_value=[]),
     ):
         result = runtime_runner.run_pipeline(
             {

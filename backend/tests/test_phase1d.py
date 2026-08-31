@@ -877,9 +877,12 @@ def test_pipeline_detected_hosts_do_not_port_scan_cidrs():
         return ([{"ip": "10.1.0.9", "port": 80}], None)
 
     with (
+        patch.object(runtime_runner, "discover_liveness", return_value=[]),
+        patch.object(runtime_runner, "read_neighbor_table", return_value={}),
         patch.object(runtime_runner, "run_host_discovery", side_effect=fake_discovery) as discovery,
         patch.object(runtime_runner, "run_naabu", side_effect=fake_naabu),
         patch.object(runtime_runner, "run_httpx", return_value=([], None)),
+        patch.object(runtime_runner, "discover_udp", return_value=[]),
         patch.object(runtime_runner, "collect_run_provenance", return_value={"runtime_version": "t"}),
     ):
         runtime_runner.run_pipeline(
@@ -913,9 +916,12 @@ def test_pipeline_all_addresses_port_scans_cidrs_without_ping_first():
         return ([{"ip": "10.1.0.9", "port": 80}], None)
 
     with (
+        patch.object(runtime_runner, "discover_liveness", return_value=[]),
+        patch.object(runtime_runner, "read_neighbor_table", return_value={}),
         patch.object(runtime_runner, "run_host_discovery") as discovery,
         patch.object(runtime_runner, "run_naabu", side_effect=fake_naabu),
         patch.object(runtime_runner, "run_httpx", return_value=([], None)),
+        patch.object(runtime_runner, "discover_udp", return_value=[]),
         patch.object(runtime_runner, "collect_run_provenance", return_value={"runtime_version": "t"}),
     ):
         runtime_runner.run_pipeline(
@@ -1065,9 +1071,12 @@ def test_fingerprint_and_vulnerability_off_skip_commands():
     with patch.dict(os.environ, env, clear=True):
         with (
             patch.object(runtime_runner, "run_naabu") as naabu,
+            patch.object(runtime_runner, "discover_liveness", return_value=[]),
+            patch.object(runtime_runner, "read_neighbor_table", return_value={}),
             patch.object(runtime_runner, "run_host_discovery", return_value=[{"ip": "203.0.113.10"}]) as discovery,
             patch.object(runtime_runner, "run_httpx") as httpx,
             patch.object(runtime_runner, "run_nuclei") as nuclei,
+            patch.object(runtime_runner, "discover_udp", return_value=[]),
         ):
             result = runtime_runner.run_pipeline(job)
     naabu.assert_not_called()

@@ -25,7 +25,7 @@ from app.scan_snapshot import merge_provenance
 STAGE_LABELS = {
     "queued": "Queued",
     "waiting_for_agent": "Waiting for Agent",
-    "discovery": "Host discovery",
+    "discovery": "Host identity",
     "port_discovery": "Port scan",
     "fingerprint": "Fingerprint",
     "vulnerability": "Vulnerability scan",

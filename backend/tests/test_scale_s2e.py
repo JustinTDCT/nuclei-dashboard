@@ -371,6 +371,9 @@ def test_pipeline_without_job_id_still_exposes_lists_for_unit_tests(tmp_path, mo
     _runtime()
     import runner as runtime_runner
 
+    monkeypatch.setattr(runtime_runner, "discover_liveness", lambda *args, **kwargs: [])
+    monkeypatch.setattr(runtime_runner, "read_neighbor_table", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runtime_runner, "discover_udp", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         runtime_runner,
         "run_host_discovery",

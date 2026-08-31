@@ -47,6 +47,9 @@ from tool_versions import (
 from enrich import enrich_identities, usable_hostname
 from ingest_chunks import iter_ingest_chunks
 from scan_progress import bind_job, note_message, note_stage
+from identity_probe import discover_liveness, read_neighbor_table
+from oui import normalize_mac, vendor_for_mac
+from service_probe import discover_udp, fingerprint_non_http
 from spool import JobSpool, SpoolCapExceeded, spool_root
 
 LogFn = Callable[[str], None]
@@ -358,6 +361,16 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             if artifact:
                 artifacts.append(artifact)
             _consume_returned_rows(rows, on_host)
+        if discovery_enabled:
+            note_stage("discovery", "Identity sweep (ICMP/ARP/MAC, no credentials)")
+            for row in discover_liveness(targets, log=log):
+                index.add_identity(row)
+            for row in discover_udp(targets, log=log):
+                index.add_service(row)
+            live = set(index.discovered_ips())
+            for ip, mac in read_neighbor_table().items():
+                if ip in live:
+                    index.add_identity({"ip": ip, "mac": mac, "tech": "arp"})
         if port_mode != PORT_MODE_NONE:
             port_targets = _port_scan_targets(
                 index, targets, port_scope=port_scope, discovery_ran=run_discovery
@@ -398,6 +411,9 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             if artifact:
                 artifacts.append(artifact)
             _consume_returned_rows(rows, on_httpx)
+            note_stage("fingerprint", "Fingerprinting SSH/SMB/RDP")
+            for row in fingerprint_non_http(list(index.ports.items()), log=log):
+                index.add_service(row)
         devices = index.snapshot()
         attach_hostnames(devices, log=log)
         enrich_identities(devices, log=log)
@@ -1262,6 +1278,38 @@ class DeviceIndex:
         if fqdn and ip not in self.fqdn_by_ip:
             self.fqdn_by_ip[ip] = fqdn
 
+    def add_identity(self, row: dict[str, Any]) -> None:
+        self.add_service(row)
+
+    def add_service(self, row: dict[str, Any]) -> None:
+        self.add_host(row)
+        ip = str(row.get("ip") or "").strip()
+        if not ip:
+            return
+        prev = self.meta.get(ip) or {"title": "", "tech": "", "hostname": "", "mac": "", "vendor": ""}
+        tech_parts = []
+        vendor = str(row.get("vendor") or prev.get("vendor") or "").strip()
+        if vendor and vendor.lower() not in {part.lower() for part in tech_parts}:
+            tech_parts.append(vendor)
+        for part in f"{row.get('tech') or ''},{prev.get('tech') or ''}".split(","):
+            part = part.strip()
+            if part and part.lower() not in {item.lower() for item in tech_parts}:
+                tech_parts.append(part)
+        title = str(row.get("title") or "").strip() or prev.get("title") or ""
+        hostname = str(row.get("hostname") or "").strip() or prev.get("hostname") or ""
+        mac = normalize_mac(str(row.get("mac") or "")) or prev.get("mac") or ""
+        if mac and not vendor:
+            vendor = vendor_for_mac(mac)
+            if vendor and vendor.lower() not in {item.lower() for item in tech_parts}:
+                tech_parts.insert(0, vendor)
+        self.meta[ip] = {
+            "title": title,
+            "tech": ",".join(tech_parts),
+            "hostname": hostname,
+            "mac": mac,
+            "vendor": vendor,
+        }
+
     def add_httpx(self, row: dict[str, Any]) -> None:
         host = row.get("host") or row.get("input") or ""
         ip = str(host).split("://")[-1].split(":")[0].split("/")[0]
@@ -1280,17 +1328,19 @@ class DeviceIndex:
         if server and server not in tech:
             tech = ",".join(part for part in (tech, server) if part)
         http_name = _http_hostname(row)
-        prev = self.meta.get(ip, {"title": "", "tech": "", "hostname": ""})
+        prev = self.meta.get(ip) or {"title": "", "tech": "", "hostname": "", "mac": "", "vendor": ""}
         title = max([prev.get("title") or "", title], key=len)
         tech_parts = []
         for part in f"{prev.get('tech', '')},{tech}".split(","):
             part = part.strip()
-            if part and part not in tech_parts:
+            if part and part.lower() not in {item.lower() for item in tech_parts}:
                 tech_parts.append(part)
         self.meta[ip] = {
             "title": title,
             "tech": ",".join(tech_parts),
             "hostname": prev.get("hostname") or http_name,
+            "mac": prev.get("mac") or "",
+            "vendor": prev.get("vendor") or "",
         }
         if row.get("port"):
             try:
@@ -1357,6 +1407,7 @@ class DeviceIndex:
                     "hostname": info.get("hostname") or self.fqdn_by_ip.get(ip, ""),
                     "title": info.get("title", ""),
                     "tech": info.get("tech", ""),
+                    "mac": info.get("mac", ""),
                     "auto_label": "",
                 }
             )

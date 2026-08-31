@@ -22,10 +22,10 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
 # Privilege / networking:
 # network_mode: host is required so site RFC1918 subnets are reachable.
 # The process runs as uid 1000. Capabilities are dropped and only NET_RAW is
-# added because Naabu SYN and host-discovery need raw sockets. Do not add
-# privileged: true. The WAN scanner stays on the Docker bridge with the same
-# user/capability set. security_opt no-new-privileges blocks further
-# privilege escalation after start.
+# added because ICMP and Naabu SYN need raw sockets. Do not add
+# privileged: true or store client scan credentials. The WAN scanner
+# stays on the Docker bridge with the same user/capability set.
+# security_opt no-new-privileges blocks further privilege escalation after start.
 #
 # TLS verification is on by default (TLS_VERIFY=1).
 # Publicly trusted certificates: no extra files.

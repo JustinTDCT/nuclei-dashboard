@@ -9,8 +9,9 @@
 # restart is not enough after a control-plane change — rebuild the image.
 #
 # Privilege / networking: host networking reaches the site LAN. The process
-# runs as uid 1000 with only NET_RAW for Naabu SYN/host-discovery. Do not add
-# privileged: true. The central WAN scanner does not use host networking.
+# runs as uid 1000 with only NET_RAW for ICMP and Naabu SYN. Do not add
+# privileged: true or store client scan credentials. The central WAN scanner
+# does not use host networking.
 #
 # TLS verification is on by default. For an internal CA:
 #   mkdir -p agent-certs && cp /path/on/host/ca.pem agent-certs/ca.pem

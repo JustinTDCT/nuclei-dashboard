@@ -91,8 +91,9 @@ services:
     restart: unless-stopped
     network_mode: host
     # Host networking reaches site RFC1918. The process is uid 1000 with
-    # only NET_RAW so Naabu SYN/host-discovery can open raw sockets.
-    # Do not add privileged: true. The WAN scanner stays bridged.
+    # only NET_RAW so ICMP and Naabu SYN can open raw sockets. Do not add
+    # privileged: true or store client scan credentials. The WAN scanner
+    # stays bridged.
     user: "1000:1000"
     cap_drop:
       - ALL

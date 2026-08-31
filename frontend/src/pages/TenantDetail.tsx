@@ -685,9 +685,10 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
           )}
           {step === 2 && (
             <div className="grid md:grid-cols-2 gap-3">
-              <label className="flex items-center gap-2 text-sm text-slate-300">
+              <label className="flex items-start gap-2 text-sm text-slate-300">
                 <input
                   type="checkbox"
+                  className="mt-1"
                   checked={form.discovery}
                   onChange={(e) =>
                     setForm({
@@ -697,7 +698,12 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
                     })
                   }
                 />
-                Discovery
+                <span>
+                  Discovery
+                  <span className="block text-slate-400 normal-case tracking-normal">
+                    ICMP, ARP/MAC, NetBIOS, mDNS, SNMP public. No client credentials stored.
+                  </span>
+                </span>
               </label>
               <div>
                 <label>Port discovery</label>
@@ -720,7 +726,7 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
                     />
                     <span>
                       Only hosts that respond
-                      <span className="block text-slate-400">Fast. Discover live hosts, then scan their ports. A few networks should finish in seconds.</span>
+                      <span className="block text-slate-400">Fast. Identity first (ping/ARP/names), then port-scan only those hosts. A few networks should finish in seconds.</span>
                     </span>
                   </label>
                   <label className="flex items-start gap-2 text-sm text-slate-300 normal-case tracking-normal">

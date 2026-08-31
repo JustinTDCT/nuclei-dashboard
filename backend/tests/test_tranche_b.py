@@ -708,6 +708,9 @@ def test_pipeline_captures_native_output_and_cleans_temp(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_runner, "_which", which)
     monkeypatch.setattr(runtime_runner, "_pd_httpx", lambda: str(bins / "httpx"))
     monkeypatch.setattr(runtime_runner, "_is_pd_httpx", lambda path: True)
+    monkeypatch.setattr(runtime_runner, "discover_liveness", lambda *args, **kwargs: [])
+    monkeypatch.setattr(runtime_runner, "read_neighbor_table", lambda *args, **kwargs: {})
+    monkeypatch.setattr(runtime_runner, "discover_udp", lambda *args, **kwargs: [])
 
     def fake_provenance(*, used_tools=None, dry_run=False, log=None):
         if dry_run:

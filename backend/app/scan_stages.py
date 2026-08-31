@@ -1,4 +1,9 @@
-"""Scan stage configuration and custom port validation."""
+"""Scan stage configuration and custom port validation.
+
+Discovery is unauthenticated only. Do not add stored client credentials
+(WMI, SSH, SNMP community, WinRM). SNMP ``public`` is a probe default,
+not a saved secret.
+"""
 
 from __future__ import annotations
 
