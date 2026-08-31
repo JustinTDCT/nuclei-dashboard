@@ -19,7 +19,7 @@ from tests.scale_s2.world import reset_schema
 
 def test_s1_baseline_sha_is_frozen():
     assert S1_BASELINE_SHA == "312e0d0"
-    assert CURRENT_INGEST_PATH == "s2b_device_asset_cache"
+    assert CURRENT_INGEST_PATH == "s2c_finding_coverage_index"
 
 
 def test_sql_classifier_extracts_hot_tables():
@@ -76,8 +76,7 @@ def test_small_current_path_is_replay_safe_and_deterministic(reset_db):
         assert once_state["scan_jobs"][0]["findings_count"] == 100
         assert metrics.select_count > 0
         assert metrics.insert_count > 0
-        assert hotspots["per_finding_population_reload"] is True
-        assert hotspots["historical_raw_evidence_scan"] is True
+        assert hotspots["device_asset_selects_collapsed"] is True
         assert metrics.device_request_bytes > 0
         assert metrics.finding_request_bytes > 0
     finally:

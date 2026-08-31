@@ -210,6 +210,7 @@ def trusted_run_locality(
     job: ScanJob,
     *,
     asset: Asset | None = None,
+    run_index=None,
 ) -> tuple[int | None, int | None]:
     """Trusted Site/Network from the run snapshot or this run's observation."""
     snapshot = job.execution_snapshot or {}
@@ -225,14 +226,18 @@ def trusted_run_locality(
     network_id = network_ids[0] if len(network_ids) == 1 else None
     if asset is not None and (site_id is None or network_id is None):
         observation = (
-            db.query(AssetObservation)
-            .filter(
-                AssetObservation.scan_job_id == job.id,
-                AssetObservation.asset_id == asset.id,
-                AssetObservation.tenant_id == job.tenant_id,
+            run_index.latest_observation(asset.id)
+            if run_index is not None
+            else (
+                db.query(AssetObservation)
+                .filter(
+                    AssetObservation.scan_job_id == job.id,
+                    AssetObservation.asset_id == asset.id,
+                    AssetObservation.tenant_id == job.tenant_id,
+                )
+                .order_by(AssetObservation.observed_at.desc(), AssetObservation.id.desc())
+                .first()
             )
-            .order_by(AssetObservation.observed_at.desc(), AssetObservation.id.desc())
-            .first()
         )
         if observation is not None:
             if site_id is None:

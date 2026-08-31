@@ -113,6 +113,13 @@ class ScanIngestContext:
         self._devices = (
             self.db.query(Device).filter(Device.tenant_id == self.tenant_id).all()
         )
+        self.db.info["s2b_prefetch"] = {
+            "identifier_rows": len(identifiers),
+            "address_rows": len(addresses),
+            "device_rows": len(self._devices),
+            "observation_rows": len(observations),
+            "decision_rows": len(decisions),
+        }
 
     def observation_context(self, ip: str, report_scope: str) -> dict:
         job = self._job

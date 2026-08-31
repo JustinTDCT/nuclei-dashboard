@@ -44,6 +44,10 @@ def ingest_current_path(
     try:
         with collector.stage("devices", request_bytes=device_bytes):
             upsert_devices(db, world.tenant_id, world.job_id, workload.devices)
+            prefetch = db.info.get("s2b_prefetch") or {}
+            collector.metrics.prefetch_identifier_rows = int(prefetch.get("identifier_rows") or 0)
+            collector.metrics.prefetch_address_rows = int(prefetch.get("address_rows") or 0)
+            collector.metrics.prefetch_device_rows = int(prefetch.get("device_rows") or 0)
             job.hosts_found = (
                 db.query(Device).filter(Device.last_scan_job_id == world.job_id).count()
             )
@@ -118,6 +122,14 @@ def hotspot_flags(metrics) -> dict[str, Any]:
     device_stage_observation_selects = _stage_table_count(
         metrics, "devices", "SELECT", "asset_observations"
     )
+    finding_stage_observation_selects = _stage_table_count(
+        metrics, "findings", "SELECT", "asset_observations"
+    )
+    finding_stage_device_selects = _stage_table_count(metrics, "findings", "SELECT", "devices")
+    coverage_stage_coverage_selects = _stage_table_count(
+        metrics, "coverage", "SELECT", "scan_run_detector_coverage"
+    )
+    finding_stage_finding_selects = _stage_table_count(metrics, "findings", "SELECT", "findings")
     raw_json_scans = sum(
         1
         for sample in metrics.samples
@@ -130,11 +142,21 @@ def hotspot_flags(metrics) -> dict[str, Any]:
         "finding_selects": finding_selects,
         "device_stage_service_selects": device_stage_service_selects,
         "device_stage_observation_selects": device_stage_observation_selects,
+        "finding_stage_observation_selects": finding_stage_observation_selects,
+        "finding_stage_device_selects": finding_stage_device_selects,
+        "finding_stage_finding_selects": finding_stage_finding_selects,
+        "coverage_stage_coverage_selects": coverage_stage_coverage_selects,
         "finding_raw_json_select_samples": raw_json_scans,
+        "prefetch_identifier_rows": getattr(metrics, "prefetch_identifier_rows", 0),
+        "prefetch_device_rows": getattr(metrics, "prefetch_device_rows", 0),
         "per_port_service_selects": device_stage_service_selects >= 500,
         "device_asset_selects_collapsed": device_stage_service_selects < 20,
-        "per_finding_population_reload": observation_selects > 0 and device_selects > 0,
-        "historical_raw_evidence_scan": finding_selects > 0 or raw_json_scans > 0,
+        "per_finding_population_reload": finding_stage_observation_selects >= 50
+        or finding_stage_device_selects >= 50,
+        "historical_raw_evidence_scan": finding_stage_finding_selects >= 80,
+        "finding_coverage_selects_collapsed": finding_stage_observation_selects < 10
+        and finding_stage_device_selects < 10
+        and coverage_stage_coverage_selects < 10,
     }
 
 

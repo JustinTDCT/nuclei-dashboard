@@ -94,6 +94,9 @@ class IngestMetrics:
     coverage_request_bytes: int = 0
     largest_transaction_ms: float = 0.0
     wall_ms: float = 0.0
+    prefetch_identifier_rows: int = 0
+    prefetch_address_rows: int = 0
+    prefetch_device_rows: int = 0
 
     @property
     def select_count(self) -> int:
@@ -136,6 +139,9 @@ class IngestMetrics:
             "device_request_bytes": self.device_request_bytes,
             "finding_request_bytes": self.finding_request_bytes,
             "coverage_request_bytes": self.coverage_request_bytes,
+            "prefetch_identifier_rows": self.prefetch_identifier_rows,
+            "prefetch_address_rows": self.prefetch_address_rows,
+            "prefetch_device_rows": self.prefetch_device_rows,
             "largest_transaction_ms": round(self.largest_transaction_ms, 3),
             "stages": [
                 {

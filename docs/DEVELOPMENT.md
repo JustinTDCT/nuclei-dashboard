@@ -169,11 +169,13 @@ Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or
 
 ### Scale S2A ingest harness
 
-S2A froze ingest semantics and SQL/RSS/timing against the S1 checkpoint (`312e0d0`). S2B changes how Device/Asset ingest executes (`ScanIngestContext` write-through caches) without changing correlation meaning or adding schema. Finding/coverage batching remains S2C.
+S2A froze ingest semantics against the S1 checkpoint (`312e0d0`). S2B (`d9afc55`) collapsed Device/Asset lookups with `ScanIngestContext`. S2C adds one `FindingRunIndex` per Finding/coverage/finalize batch so current-run observations, Devices, coverage, evidence keys, and detector CVE unions are not reloaded per finding. No 0018 migration.
+
+S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. Use medium/large sizes when the incoming batch is much smaller than historical tenant population. If preload RSS dominates, switch to batch-keyed prefetch — do not return to per-report queries.
 
 ```bash
 cd backend
-pytest tests/test_scale_s2a.py tests/test_scale_s2b.py
+pytest tests/test_scale_s2a.py tests/test_scale_s2b.py tests/test_scale_s2c.py
 python scripts/scale_s2a_benchmark.py --size small --out /tmp/s2a-small.json
 ```
 

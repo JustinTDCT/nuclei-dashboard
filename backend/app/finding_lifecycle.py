@@ -57,6 +57,7 @@ from app.models import (
     Vulnerability,
     VulnerabilityDetectorMapping,
 )
+from app.finding_ingest import FindingRunIndex
 from app.scan_execution import execution_context
 from app.scan_security import ExecutionBlocked
 from app.schemas import FindingReport
@@ -227,12 +228,14 @@ def store_detector_coverage(
     *,
     detector_type: str,
     targets: list[str],
+    run_index: FindingRunIndex | None = None,
 ) -> int:
     detector = (detector_type or "").strip().lower()
     if not detector:
         raise FindingLifecycleError("detector_type is required")
     if job.tenant_id is None:
         raise FindingLifecycleError("Run tenant is required")
+    index = run_index or FindingRunIndex.for_job(db, job)
     added = 0
     seen: set[str] = set()
     for raw in targets:
@@ -240,28 +243,19 @@ def store_detector_coverage(
         if not target or target in seen:
             continue
         seen.add(target)
-        existing = (
-            db.query(ScanRunDetectorCoverage.id)
-            .filter(
-                ScanRunDetectorCoverage.scan_job_id == job.id,
-                ScanRunDetectorCoverage.detector_type == detector,
-                ScanRunDetectorCoverage.target == target,
-            )
-            .first()
-        )
-        if existing is not None:
+        if index.coverage_exists(detector, target):
             continue
         host, kind = parse_coverage_target(target)
-        db.add(
-            ScanRunDetectorCoverage(
-                tenant_id=job.tenant_id,
-                scan_job_id=job.id,
-                detector_type=detector,
-                target=target,
-                normalized_host=host,
-                target_kind=kind,
-            )
+        row = ScanRunDetectorCoverage(
+            tenant_id=job.tenant_id,
+            scan_job_id=job.id,
+            detector_type=detector,
+            target=target,
+            normalized_host=host,
+            target_kind=kind,
         )
+        db.add(row)
+        index.remember_coverage(row)
         added += 1
     db.flush()
     return added
@@ -310,7 +304,15 @@ def _identity_tokens(identity: DetectorIdentity) -> set[str]:
     return {token for token in tokens if token}
 
 
-def resolve_current_run_asset(db: Session, job: ScanJob, identity: DetectorIdentity) -> Asset | None:
+def resolve_current_run_asset(
+    db: Session,
+    job: ScanJob,
+    identity: DetectorIdentity,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> Asset | None:
+    if run_index is not None:
+        return run_index.resolve_asset(identity)
     observations = current_run_observations(db, job)
     if not observations:
         return None
@@ -336,7 +338,15 @@ def resolve_current_run_asset(db: Session, job: ScanJob, identity: DetectorIdent
     return asset
 
 
-def current_run_device(db: Session, job: ScanJob, identity: DetectorIdentity) -> Device | None:
+def current_run_device(
+    db: Session,
+    job: ScanJob,
+    identity: DetectorIdentity,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> Device | None:
+    if run_index is not None:
+        return run_index.resolve_device(identity)
     tokens = _identity_tokens(identity)
     if not tokens:
         return None
@@ -381,10 +391,17 @@ def resolve_trusted_asset(
     return asset
 
 
-def get_or_create_vulnerability(db: Session, identity: DetectorIdentity) -> Vulnerability | None:
+def get_or_create_vulnerability(
+    db: Session,
+    identity: DetectorIdentity,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> Vulnerability | None:
     if not identity.canonical_key:
         return None
-    existing = db.query(Vulnerability).filter(Vulnerability.canonical_key == identity.canonical_key).first()
+    existing = run_index.vulnerability_for(identity.canonical_key) if run_index is not None else (
+        db.query(Vulnerability).filter(Vulnerability.canonical_key == identity.canonical_key).first()
+    )
     if existing is not None:
         if identity.title and not existing.title:
             existing.title = identity.title
@@ -393,6 +410,8 @@ def get_or_create_vulnerability(db: Session, identity: DetectorIdentity) -> Vuln
         if identity.cve_id and not existing.cve_id:
             existing.cve_id = identity.cve_id
         existing.updated_at = utcnow()
+        if run_index is not None:
+            run_index.remember_vulnerability(existing)
         return existing
     row = Vulnerability(
         canonical_key=identity.canonical_key,
@@ -403,6 +422,8 @@ def get_or_create_vulnerability(db: Session, identity: DetectorIdentity) -> Vuln
     )
     db.add(row)
     db.flush()
+    if run_index is not None:
+        run_index.remember_vulnerability(row)
     return row
 
 
@@ -413,7 +434,15 @@ def cve_union(raws: list[dict[str, Any]]) -> set[str]:
     return cves
 
 
-def _known_cves_for_detector(db: Session, identity: DetectorIdentity) -> set[str]:
+def _known_cves_for_detector(
+    db: Session,
+    identity: DetectorIdentity,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> set[str]:
+    if run_index is not None:
+        run_index.add_identity_cves(identity)
+        return run_index.known_cves(identity.detector_type, identity.detector_key)
     raws = [identity.raw or {}]
     rows = (
         db.query(Finding.raw_json)
@@ -427,8 +456,13 @@ def _known_cves_for_detector(db: Session, identity: DetectorIdentity) -> set[str
     return cve_union(raws)
 
 
-def desired_catalog_identity(db: Session, identity: DetectorIdentity) -> tuple[str, str | None]:
-    cves = _known_cves_for_detector(db, identity)
+def desired_catalog_identity(
+    db: Session,
+    identity: DetectorIdentity,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> tuple[str, str | None]:
+    cves = _known_cves_for_detector(db, identity, run_index=run_index)
     if len(cves) == 1:
         cve_id = next(iter(cves))
         return f"cve:{cve_id}", cve_id
@@ -449,10 +483,12 @@ def get_or_create_mapping(
 def upsert_detector_catalog(
     db: Session,
     identity: DetectorIdentity,
+    *,
+    run_index: FindingRunIndex | None = None,
 ) -> tuple[Vulnerability | None, VulnerabilityDetectorMapping | None]:
     if not identity.detector_type or not identity.detector_key:
         return None, None
-    canonical_key, cve_id = desired_catalog_identity(db, identity)
+    canonical_key, cve_id = desired_catalog_identity(db, identity, run_index=run_index)
     resolved = DetectorIdentity(
         detector_type=identity.detector_type,
         detector_key=identity.detector_key,
@@ -468,16 +504,20 @@ def upsert_detector_catalog(
         ip=identity.ip,
         raw=identity.raw,
     )
-    vulnerability = get_or_create_vulnerability(db, resolved)
+    vulnerability = get_or_create_vulnerability(db, resolved, run_index=run_index)
     if vulnerability is None:
         return None, None
     existing = (
-        db.query(VulnerabilityDetectorMapping)
-        .filter(
-            VulnerabilityDetectorMapping.detector_type == identity.detector_type,
-            VulnerabilityDetectorMapping.detector_key == identity.detector_key,
+        run_index.mapping_for(identity.detector_type, identity.detector_key)
+        if run_index is not None
+        else (
+            db.query(VulnerabilityDetectorMapping)
+            .filter(
+                VulnerabilityDetectorMapping.detector_type == identity.detector_type,
+                VulnerabilityDetectorMapping.detector_key == identity.detector_key,
+            )
+            .first()
         )
-        .first()
     )
     if existing is None:
         existing = VulnerabilityDetectorMapping(
@@ -489,6 +529,8 @@ def upsert_detector_catalog(
         )
         db.add(existing)
         db.flush()
+        if run_index is not None:
+            run_index.remember_mapping(existing)
         return vulnerability, existing
     if existing.vulnerability_id != vulnerability.id:
         retarget_mapping(db, existing, vulnerability)
@@ -497,6 +539,8 @@ def upsert_detector_catalog(
     if identity.tags:
         existing.last_tags = identity.tags
     db.flush()
+    if run_index is not None:
+        run_index.remember_mapping(existing)
     return vulnerability, existing
 
 
@@ -709,6 +753,7 @@ def _emit_lifecycle_event(
     job: ScanJob,
     occurred_at: datetime,
     extra: dict[str, Any] | None = None,
+    run_index: FindingRunIndex | None = None,
 ) -> None:
     details = {
         "asset_finding_id": asset_finding.id,
@@ -720,7 +765,9 @@ def _emit_lifecycle_event(
         "scan_job_id": job.id,
         **(extra or {}),
     }
-    site_id, network_id = trusted_run_locality(db, job, asset=asset_finding.asset)
+    site_id, network_id = trusted_run_locality(
+        db, job, asset=asset_finding.asset, run_index=run_index
+    )
     emit_domain_event(
         db,
         event_type=event_type,
@@ -745,16 +792,21 @@ def apply_detection(
     job: ScanJob,
     identity: DetectorIdentity,
     detected_at: datetime,
+    run_index: FindingRunIndex | None = None,
 ) -> tuple[AssetFinding, bool]:
     if asset.tenant_id != job.tenant_id:
         raise FindingLifecycleError("Cross-tenant asset/finding relationship is not allowed")
     existing = (
-        db.query(AssetFinding)
-        .filter(
-            AssetFinding.asset_id == asset.id,
-            AssetFinding.vulnerability_id == vulnerability.id,
+        run_index.asset_finding_for(asset.id, vulnerability.id)
+        if run_index is not None
+        else (
+            db.query(AssetFinding)
+            .filter(
+                AssetFinding.asset_id == asset.id,
+                AssetFinding.vulnerability_id == vulnerability.id,
+            )
+            .first()
         )
-        .first()
     )
     created = False
     reopened = False
@@ -775,6 +827,8 @@ def apply_detection(
         db.add(existing)
         db.flush()
         created = True
+        if run_index is not None:
+            run_index.remember_asset_finding(existing)
         _append_history(
             db,
             asset_finding=existing,
@@ -793,6 +847,7 @@ def apply_detection(
             vulnerability=vulnerability,
             job=job,
             occurred_at=detected_at,
+            run_index=run_index,
         )
     else:
         if existing.tenant_id != job.tenant_id or existing.asset_id != asset.id:
@@ -825,8 +880,11 @@ def apply_detection(
                 job=job,
                 occurred_at=detected_at,
                 extra={"reopened_count": existing.reopened_count},
+                run_index=run_index,
             )
     db.flush()
+    if run_index is not None:
+        run_index.remember_asset_finding(existing)
     return existing, created or reopened
 
 
@@ -840,6 +898,7 @@ def _insert_evidence(
     asset_finding: AssetFinding | None,
     identity: DetectorIdentity,
     hostname: str,
+    run_index: FindingRunIndex | None = None,
 ) -> tuple[Finding, bool]:
     key = evidence_identity_key(
         scan_job_id=job.id,
@@ -848,7 +907,10 @@ def _insert_evidence(
         host=identity.host,
         matched_at=identity.matched_at,
     )
-    existing = db.query(Finding).filter(Finding.evidence_key == key).first()
+    if run_index is not None:
+        existing = run_index.finding_for_key(key)
+    else:
+        existing = db.query(Finding).filter(Finding.evidence_key == key).first()
     if existing is not None:
         return existing, False
     row = Finding(
@@ -872,6 +934,8 @@ def _insert_evidence(
     )
     db.add(row)
     db.flush()
+    if run_index is not None:
+        run_index.remember_finding(row)
     return row, True
 
 
@@ -885,9 +949,16 @@ def ingest_findings(
     job = db.get(ScanJob, job_id)
     if job is None or job.tenant_id != tenant_id:
         raise FindingLifecycleError("Scan run does not belong to this tenant")
+    identities = [parse_detector_identity(report) for report in reports]
+    pairs = {
+        (identity.detector_type, identity.detector_key)
+        for identity in identities
+        if identity.detector_type and identity.detector_key
+    }
+    run_index = FindingRunIndex.for_job(db, job, detector_pairs=pairs)
     added = 0
-    for report in reports:
-        identity = parse_detector_identity(report)
+    touched: list[AssetFinding] = []
+    for identity in identities:
         key = evidence_identity_key(
             scan_job_id=job.id,
             detector_type=identity.detector_type,
@@ -895,13 +966,13 @@ def ingest_findings(
             host=identity.host,
             matched_at=identity.matched_at,
         )
-        if db.query(Finding.id).filter(Finding.evidence_key == key).first() is not None:
+        if run_index.evidence_exists(key):
             continue
-        vulnerability, _mapping = upsert_detector_catalog(db, identity)
-        device = current_run_device(db, job, identity)
+        vulnerability, _mapping = upsert_detector_catalog(db, identity, run_index=run_index)
+        device = current_run_device(db, job, identity, run_index=run_index)
         if device and device.tenant_id != tenant_id:
             raise FindingLifecycleError("Cross-tenant device/finding relationship is not allowed")
-        asset = resolve_current_run_asset(db, job, identity)
+        asset = resolve_current_run_asset(db, job, identity, run_index=run_index)
         if asset is not None and asset.tenant_id != tenant_id:
             raise FindingLifecycleError("Cross-tenant asset/finding relationship is not allowed")
         hostname = (device.hostname if device else identity.hostname) or identity.hostname
@@ -914,6 +985,7 @@ def ingest_findings(
                 job=job,
                 identity=identity,
                 detected_at=utcnow(),
+                run_index=run_index,
             )
         _evidence, created = _insert_evidence(
             db,
@@ -924,13 +996,22 @@ def ingest_findings(
             asset_finding=asset_finding,
             identity=identity,
             hostname=hostname,
+            run_index=run_index,
         )
         if created:
             added += 1
         if asset_finding is not None:
-            from app.intel.priority import recalculate_asset_finding_priorities
+            touched.append(asset_finding)
+    if touched:
+        from app.intel.priority import recalculate_asset_finding_priorities
 
-            recalculate_asset_finding_priorities(db, [asset_finding])
+        unique: list[AssetFinding] = []
+        seen_ids: set[int] = set()
+        for row in touched:
+            if row.id not in seen_ids:
+                seen_ids.add(row.id)
+                unique.append(row)
+        recalculate_asset_finding_priorities(db, unique)
     db.flush()
     return added
 
@@ -947,7 +1028,19 @@ def nuclei_mapping_for(db: Session, vulnerability_id: int) -> VulnerabilityDetec
     )
 
 
-def supporting_detector_keys(db: Session, asset_finding: AssetFinding) -> list[tuple[str, str]]:
+def supporting_detector_keys(
+    db: Session,
+    asset_finding: AssetFinding,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> list[tuple[str, str]]:
+    if run_index is not None:
+        seen: list[tuple[str, str]] = []
+        for row in run_index.supporting_findings(asset_finding.id):
+            pair = (row.detector_type, row.detector_key)
+            if pair not in seen and row.detector_type and row.detector_key:
+                seen.append(pair)
+        return seen
     rows = (
         db.query(Finding.detector_type, Finding.detector_key)
         .filter(
@@ -961,19 +1054,28 @@ def supporting_detector_keys(db: Session, asset_finding: AssetFinding) -> list[t
     return [(detector_type, detector_key) for detector_type, detector_key in rows]
 
 
-def supporting_mappings(db: Session, asset_finding: AssetFinding) -> list[VulnerabilityDetectorMapping]:
-    keys = supporting_detector_keys(db, asset_finding)
+def supporting_mappings(
+    db: Session,
+    asset_finding: AssetFinding,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> list[VulnerabilityDetectorMapping]:
+    keys = supporting_detector_keys(db, asset_finding, run_index=run_index)
     if not keys:
         return []
     mappings: list[VulnerabilityDetectorMapping] = []
     for detector_type, detector_key in keys:
         mapping = (
-            db.query(VulnerabilityDetectorMapping)
-            .filter(
-                VulnerabilityDetectorMapping.detector_type == detector_type,
-                VulnerabilityDetectorMapping.detector_key == detector_key,
+            run_index.mapping_for(detector_type, detector_key)
+            if run_index is not None
+            else (
+                db.query(VulnerabilityDetectorMapping)
+                .filter(
+                    VulnerabilityDetectorMapping.detector_type == detector_type,
+                    VulnerabilityDetectorMapping.detector_key == detector_key,
+                )
+                .first()
             )
-            .first()
         )
         if mapping is None:
             return []
@@ -986,7 +1088,11 @@ def latest_supporting_evidence(
     asset_finding: AssetFinding,
     detector_type: str,
     detector_key: str,
+    *,
+    run_index: FindingRunIndex | None = None,
 ) -> Finding | None:
+    if run_index is not None:
+        return run_index.latest_supporting(asset_finding.id, detector_type, detector_key)
     return (
         db.query(Finding)
         .filter(
@@ -999,7 +1105,15 @@ def latest_supporting_evidence(
     )
 
 
-def asset_observed_in_run(db: Session, job: ScanJob, asset_id: int) -> bool:
+def asset_observed_in_run(
+    db: Session,
+    job: ScanJob,
+    asset_id: int,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> bool:
+    if run_index is not None:
+        return run_index.asset_observed(asset_id)
     return (
         db.query(AssetObservation.id)
         .filter(
@@ -1012,7 +1126,16 @@ def asset_observed_in_run(db: Session, job: ScanJob, asset_id: int) -> bool:
     )
 
 
-def asset_covered_by_detector(db: Session, job: ScanJob, asset_id: int, detector_type: str) -> bool:
+def asset_covered_by_detector(
+    db: Session,
+    job: ScanJob,
+    asset_id: int,
+    detector_type: str,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> bool:
+    if run_index is not None:
+        return run_index.asset_covered(asset_id, detector_type)
     coverage = (
         db.query(ScanRunDetectorCoverage)
         .filter(
@@ -1067,7 +1190,13 @@ def _mapping_included_in_filters(
     return True
 
 
-def is_finding_applicable_to_run(db: Session, asset_finding: AssetFinding, job: ScanJob) -> bool:
+def is_finding_applicable_to_run(
+    db: Session,
+    asset_finding: AssetFinding,
+    job: ScanJob,
+    *,
+    run_index: FindingRunIndex | None = None,
+) -> bool:
     snapshot = job.execution_snapshot
     if not snapshot or not isinstance(snapshot, dict):
         return False
@@ -1080,17 +1209,19 @@ def is_finding_applicable_to_run(db: Session, asset_finding: AssetFinding, job: 
         return False
     if asset_finding.tenant_id != job.tenant_id:
         return False
-    if not asset_observed_in_run(db, job, asset_finding.asset_id):
+    if not asset_observed_in_run(db, job, asset_finding.asset_id, run_index=run_index):
         return False
-    if not asset_covered_by_detector(db, job, asset_finding.asset_id, DETECTOR_NUCLEI):
+    if not asset_covered_by_detector(db, job, asset_finding.asset_id, DETECTOR_NUCLEI, run_index=run_index):
         return False
-    mappings = supporting_mappings(db, asset_finding)
+    mappings = supporting_mappings(db, asset_finding, run_index=run_index)
     if not mappings:
         return False
     for mapping in mappings:
         if mapping.detector_type != DETECTOR_NUCLEI:
             return False
-        evidence = latest_supporting_evidence(db, asset_finding, mapping.detector_type, mapping.detector_key)
+        evidence = latest_supporting_evidence(
+            db, asset_finding, mapping.detector_type, mapping.detector_key, run_index=run_index
+        )
         severity = (evidence.severity if evidence else mapping.last_severity) or ""
         tags = (evidence.tags if evidence else mapping.last_tags) or ""
         if not _mapping_included_in_filters(stages=stages, severity=severity, tags=tags):
@@ -1117,14 +1248,19 @@ def _record_evaluation(
     outcome: str,
     occurred_at: datetime,
     details: dict[str, Any],
+    run_index: FindingRunIndex | None = None,
 ) -> tuple[AssetFindingRunEvaluation, bool]:
     existing = (
-        db.query(AssetFindingRunEvaluation)
-        .filter(
-            AssetFindingRunEvaluation.asset_finding_id == asset_finding.id,
-            AssetFindingRunEvaluation.scan_job_id == job.id,
+        run_index.evaluation_for(asset_finding.id)
+        if run_index is not None
+        else (
+            db.query(AssetFindingRunEvaluation)
+            .filter(
+                AssetFindingRunEvaluation.asset_finding_id == asset_finding.id,
+                AssetFindingRunEvaluation.scan_job_id == job.id,
+            )
+            .first()
         )
-        .first()
     )
     if existing is not None:
         return existing, False
@@ -1138,6 +1274,8 @@ def _record_evaluation(
     )
     db.add(row)
     db.flush()
+    if run_index is not None:
+        run_index.remember_evaluation(row)
     return row, True
 
 
@@ -1193,6 +1331,7 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
 
     resolver = PolicyResolver(db)
     fallback_threshold = resolution_threshold(db)
+    run_index = FindingRunIndex.for_job(db, job)
     detected_ids = {
         row[0]
         for row in db.query(Finding.asset_finding_id)
@@ -1240,12 +1379,13 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
                 outcome=EVALUATION_DETECTED,
                 occurred_at=occurred_at,
                 details={"reason": "positive_detection"},
+                run_index=run_index,
             )
             if created:
                 asset_finding.consecutive_clean_scans = 0
                 asset_finding.updated_at = occurred_at
             continue
-        if not is_finding_applicable_to_run(db, asset_finding, job):
+        if not is_finding_applicable_to_run(db, asset_finding, job, run_index=run_index):
             continue
         _evaluation, created = _record_evaluation(
             db,
@@ -1254,6 +1394,7 @@ def finalize_run_lifecycle(db: Session, job: ScanJob) -> None:
             outcome=EVALUATION_CLEAN,
             occurred_at=occurred_at,
             details={"reason": "applicable_clean_scan"},
+            run_index=run_index,
         )
         if not created:
             continue

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 S1_BASELINE_SHA = "312e0d0"
-CURRENT_INGEST_PATH = "s2b_device_asset_cache"
+CURRENT_INGEST_PATH = "s2c_finding_coverage_index"
 CORRELATION_ALGORITHM_MUST_REMAIN = "1c.3"
 
 PORT_POOL = (22, 80, 443, 445, 3389, 8080, 8443, 3306, 5432, 6379)

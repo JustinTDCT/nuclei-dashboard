@@ -1,4 +1,4 @@
-"""S2B: Device/Asset ingest query collapse. Semantics stay S2A-frozen."""
+"""S2C: Finding/coverage batch resolver. Lifecycle meaning stays frozen."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from tests.scale_s2.snapshot import assert_equivalent, capture_normalized_state
 from tests.scale_s2.world import reset_schema
 
 
-def test_s2b_path_label():
+def test_s2c_path_label():
     assert CURRENT_INGEST_PATH == "s2c_finding_coverage_index"
 
 
-def test_scan_ingest_context_has_no_schema_revision():
+def test_s2c_has_no_schema_revision():
     from pathlib import Path
 
     versions = Path(__file__).resolve().parents[1] / "alembic" / "versions"
@@ -28,7 +28,7 @@ def test_scan_ingest_context_has_no_schema_revision():
 
 
 @requires_postgres
-def test_s2b_small_path_collapses_device_asset_selects_and_stays_replay_safe(reset_db):
+def test_s2c_small_path_collapses_finding_coverage_selects_and_stays_replay_safe(reset_db):
     from app.database import SessionLocal
 
     reset_schema()
@@ -38,18 +38,25 @@ def test_s2b_small_path_collapses_device_asset_selects_and_stays_replay_safe(res
         once_state = once["state"]
         ingest_current_path(db, once["world"], once["workload"], collect_metrics=False)
         replay_state = capture_normalized_state(db, once["world"].tenant_id)
-        assert_equivalent(once_state, replay_state, label="s2b same-run replay")
+        assert_equivalent(once_state, replay_state, label="s2c same-run replay")
         metrics = once["metrics"]
         hotspots = hotspot_flags(metrics)
         counts = counts_from_state(once_state)
         assert counts["assets"] == 100
         assert counts["devices"] == 100
-        assert counts["asset_services"] == 500
+        assert counts["findings"] == 100
         assert counts["asset_observations"] == 100
-        assert counts["asset_correlation_decisions"] == 100
-        assert hotspots["device_stage_service_selects"] < 20
+        assert counts["scan_run_detector_coverage"] == 200
+        assert hotspots["finding_stage_observation_selects"] < 10
+        assert hotspots["finding_stage_device_selects"] < 10
+        assert hotspots["coverage_stage_coverage_selects"] < 10
+        assert hotspots["finding_coverage_selects_collapsed"] is True
+        assert hotspots["per_finding_population_reload"] is False
+        assert hotspots["finding_stage_finding_selects"] < 70
+        assert hotspots["historical_raw_evidence_scan"] is False
         assert hotspots["device_asset_selects_collapsed"] is True
-        assert hotspots["per_port_service_selects"] is False
+        assert metrics.prefetch_identifier_rows >= 0
+        assert metrics.prefetch_device_rows >= 0
     finally:
         db.close()
 
@@ -57,6 +64,6 @@ def test_s2b_small_path_collapses_device_asset_selects_and_stays_replay_safe(res
     db = SessionLocal()
     try:
         isolated = prepare_and_ingest(db, WORKLOADS["small"], replay=False)
-        assert_equivalent(once_state, isolated["state"], label="s2b isolated ingest")
+        assert_equivalent(once_state, isolated["state"], label="s2c isolated ingest")
     finally:
         db.close()
