@@ -1,16 +1,13 @@
 """Refuse mutable Agent build sources.
 
-Generated site Agents must clone a 40-character commit SHA. Git tags are
-resolved to that commit once at compose generation; the emitted Compose
-never contains a movable ref. Branch refs such as refs/heads/main are
-rejected.
+Generated site Agents must clone a 40-character commit SHA. Tags and
+branch refs are rejected. The API image does not ship git, so tag
+resolution is not offered as a convenience path.
 """
 
 from __future__ import annotations
 
 import re
-import subprocess
-from collections.abc import Callable
 
 PINNED_AGENT_GIT_COMMIT = "71db1c129fd31977c1f8e06fe4144e84596ece4c"
 DEFAULT_AGENT_GIT_CONTEXT = (
@@ -18,13 +15,10 @@ DEFAULT_AGENT_GIT_CONTEXT = (
 )
 
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
-_TAG = re.compile(r"^(?:refs/tags/)?[^/\s]+$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MUTABLE_REF = re.compile(
     r"(?i)(?:^|[#/])(?:refs/heads/|heads/)?(?:main|master|develop|latest|HEAD)(?::|$)"
 )
-
-ResolveFn = Callable[[str, str], str]
 
 
 class AgentSourceError(ValueError):
@@ -56,53 +50,7 @@ def _format_context(repo: str, commit: str, subdir: str) -> str:
     return f"{repo}#{commit}"
 
 
-def resolve_tag_to_commit(repo: str, ref: str) -> str:
-    """Resolve refs/tags/<name> (or a bare tag) to the peeled 40-character commit."""
-    tag = ref if ref.startswith("refs/tags/") else f"refs/tags/{ref}"
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", "--exit-code", "--tags", repo, tag],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AgentSourceError(
-            "AGENT_GIT_CONTEXT tag could not be resolved to a commit; pin a 40-character SHA"
-        ) from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "tag not found").strip()
-        raise AgentSourceError(
-            f"AGENT_GIT_CONTEXT tag {tag} could not be resolved to a commit: {detail}"
-        )
-    peeled = None
-    annotated = None
-    for line in result.stdout.splitlines():
-        if "\t" not in line:
-            continue
-        sha, name = line.split("\t", 1)
-        sha = sha.strip().lower()
-        name = name.strip()
-        if not _COMMIT.fullmatch(sha):
-            continue
-        if name.endswith("^{}"):
-            peeled = sha
-        elif name == tag or name.endswith("/" + tag.split("/", 2)[-1]):
-            annotated = sha
-    commit = peeled or annotated
-    if commit is None:
-        raise AgentSourceError(
-            f"AGENT_GIT_CONTEXT tag {tag} did not resolve to a 40-character commit SHA"
-        )
-    return commit
-
-
-def assert_immutable_agent_git_context(
-    context: str,
-    *,
-    resolve_ref: ResolveFn | None = None,
-) -> str:
+def assert_immutable_agent_git_context(context: str) -> str:
     text = (context or "").strip()
     if not text:
         raise AgentSourceError("AGENT_GIT_CONTEXT is required and must be an immutable 40-character commit")
@@ -111,23 +59,17 @@ def assert_immutable_agent_git_context(
     lowered = text.lower()
     if "refs/heads/" in lowered or "#heads/" in lowered:
         raise AgentSourceError("AGENT_GIT_CONTEXT must not use a mutable branch ref such as refs/heads/main")
+    if "refs/tags/" in lowered:
+        raise AgentSourceError(
+            "AGENT_GIT_CONTEXT must pin a 40-character commit SHA, not a tag. "
+            "Resolve the tag to its commit on the operator host and set that SHA."
+        )
     repo, ref, subdir = _git_parts(text)
     if _COMMIT.fullmatch(ref.lower()):
         return _format_context(repo, ref.lower(), subdir)
     if _MUTABLE_REF.search(f"#{ref}"):
         raise AgentSourceError("AGENT_GIT_CONTEXT must not use a mutable branch name such as main")
-    if ref.startswith("refs/heads/"):
-        raise AgentSourceError("AGENT_GIT_CONTEXT must not use a mutable branch ref such as refs/heads/main")
-    if not _TAG.fullmatch(ref):
-        raise AgentSourceError(
-            "AGENT_GIT_CONTEXT must pin a 40-character commit SHA. "
-            "A tag is accepted only as operator input and is resolved to that commit before Compose is emitted."
-        )
-    resolver = resolve_ref or resolve_tag_to_commit
-    commit = resolver(repo, ref)
-    if not _COMMIT.fullmatch((commit or "").lower()):
-        raise AgentSourceError("Resolved AGENT_GIT_CONTEXT tag was not a 40-character commit SHA")
-    return _format_context(repo, commit.lower(), subdir)
+    raise AgentSourceError("AGENT_GIT_CONTEXT must pin a 40-character commit SHA, not a branch or tag")
 
 
 def assert_immutable_agent_image(image: str) -> str:

@@ -35,12 +35,14 @@ def test_mutable_agent_git_context_is_rejected():
         "https://github.com/JustinTDCT/nuclei-dashboard.git#9211fc9f4100f5fbd3b4a42f0c817e83a0103c21:scan_runtime"
     )
     assert "9211fc9f4100f5fbd3b4a42f0c817e83a0103c21" in pinned
-    resolved = assert_immutable_agent_git_context(
-        "https://github.com/JustinTDCT/nuclei-dashboard.git#refs/tags/v1.0.0:scan_runtime",
-        resolve_ref=lambda _repo, _ref: "e35ed6f1957808a99d859a123f5ca3d91a326e1d",
-    )
-    assert resolved.endswith("#e35ed6f1957808a99d859a123f5ca3d91a326e1d:scan_runtime")
-    assert "refs/tags" not in resolved
+    with pytest.raises(AgentSourceError, match="not a tag"):
+        assert_immutable_agent_git_context(
+            "https://github.com/JustinTDCT/nuclei-dashboard.git#refs/tags/v1.0.0:scan_runtime"
+        )
+    source = (REPO_ROOT / "backend" / "app" / "agent_source.py").read_text(encoding="utf-8")
+    assert "subprocess" not in source
+    assert "ls-remote" not in source
+    assert "resolve_tag_to_commit" not in source
 
 
 def test_generated_agent_compose_is_immutably_pinned(monkeypatch):
