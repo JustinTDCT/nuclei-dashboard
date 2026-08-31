@@ -956,10 +956,18 @@ def contexts_for_assets(
 ) -> dict[int, PolicyEvaluationContext]:
     overrides = observation_overrides or {}
     asset_ids = [asset.id for asset in assets]
-    observations = _latest_observation_map(db, asset_ids)
+    need_observation = any(
+        "site_id" not in overrides.get(asset.id, {}) or "network_id" not in overrides.get(asset.id, {})
+        for asset in assets
+    )
+    need_hostname = any("hostname" not in overrides.get(asset.id, {}) for asset in assets)
+    need_ports = any("observed_ports" not in overrides.get(asset.id, {}) for asset in assets)
+    observations = (
+        _latest_observation_map(db, asset_ids) if need_observation or need_hostname or need_ports else {}
+    )
     tags = _tag_map(db, asset_ids)
-    hostnames = _hostname_map(db, assets, observations)
-    ports = _port_map(db, asset_ids, observations)
+    hostnames = _hostname_map(db, assets, observations) if need_hostname else {}
+    ports = _port_map(db, asset_ids, observations) if need_ports else {}
     contexts: dict[int, PolicyEvaluationContext] = {}
     for asset in assets:
         override = overrides.get(asset.id, {})

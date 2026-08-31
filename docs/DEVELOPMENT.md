@@ -169,11 +169,11 @@ Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or
 
 ### Scale S2A ingest harness
 
-S2A does not change production ingest code. It freezes current (`312e0d0` / S1 checkpoint) semantics and records SQL/RSS/timing so S2B+ can prove equivalence.
+S2A froze ingest semantics and SQL/RSS/timing against the S1 checkpoint (`312e0d0`). S2B changes how Device/Asset ingest executes (`ScanIngestContext` write-through caches) without changing correlation meaning or adding schema. Finding/coverage batching remains S2C.
 
 ```bash
 cd backend
-pytest tests/test_scale_s2a.py
+pytest tests/test_scale_s2a.py tests/test_scale_s2b.py
 python scripts/scale_s2a_benchmark.py --size small --out /tmp/s2a-small.json
 ```
 

@@ -35,6 +35,7 @@ from app.models import (
     AssetIdentifier,
     AssetService,
 )
+from app.scan_ingest import ScanIngestContext
 from app.schemas import DeviceReport
 
 ALGORITHM_VERSION = CORRELATION_ALGORITHM_VERSION
@@ -210,7 +211,15 @@ def signals_from_report(tenant_id: int, report: DeviceReport, context: dict) -> 
     )
 
 
-def canonical_asset_id(db: Session, asset_id: int, *, _seen: set[int] | None = None) -> int:
+def canonical_asset_id(
+    db: Session,
+    asset_id: int,
+    *,
+    _seen: set[int] | None = None,
+    ingest_ctx: ScanIngestContext | None = None,
+) -> int:
+    if ingest_ctx is not None:
+        return ingest_ctx.canonical_asset_id(asset_id)
     seen = _seen if _seen is not None else set()
     current = asset_id
     while current and current not in seen:
@@ -222,8 +231,15 @@ def canonical_asset_id(db: Session, asset_id: int, *, _seen: set[int] | None = N
     return current
 
 
-def generate_candidate_ids(db: Session, signals: CorrelationSignals) -> list[int]:
+def generate_candidate_ids(
+    db: Session,
+    signals: CorrelationSignals,
+    *,
+    ingest_ctx: ScanIngestContext | None = None,
+) -> list[int]:
     """Indexed lookups only. Never scan every Asset in the tenant."""
+    if ingest_ctx is not None:
+        return ingest_ctx.candidate_asset_ids(signals)
     found: list[int] = []
 
     def add(asset_id: int) -> None:
@@ -488,8 +504,13 @@ def decide(scored: list[ScoredCandidate]) -> CorrelationResult:
     )
 
 
-def correlate(db: Session, signals: CorrelationSignals) -> CorrelationResult:
-    candidate_ids = generate_candidate_ids(db, signals)
+def correlate(
+    db: Session,
+    signals: CorrelationSignals,
+    *,
+    ingest_ctx: ScanIngestContext | None = None,
+) -> CorrelationResult:
+    candidate_ids = generate_candidate_ids(db, signals, ingest_ctx=ingest_ctx)
     if not candidate_ids:
         return CorrelationResult(
             decision=DECISION_CREATED_NEW,
@@ -499,16 +520,19 @@ def correlate(db: Session, signals: CorrelationSignals) -> CorrelationResult:
             evidence=[],
             candidates=[],
         )
-    assets = (
-        db.query(Asset)
-        .options(
-            selectinload(Asset.identifiers),
-            selectinload(Asset.addresses),
-            selectinload(Asset.services),
+    if ingest_ctx is not None:
+        assets = ingest_ctx.load_candidates(candidate_ids, signals.tenant_id)
+    else:
+        assets = (
+            db.query(Asset)
+            .options(
+                selectinload(Asset.identifiers),
+                selectinload(Asset.addresses),
+                selectinload(Asset.services),
+            )
+            .filter(Asset.id.in_(candidate_ids), Asset.tenant_id == signals.tenant_id)
+            .all()
         )
-        .filter(Asset.id.in_(candidate_ids), Asset.tenant_id == signals.tenant_id)
-        .all()
-    )
     eligible = [asset for asset in assets if _eligible(asset, signals)]
     hostname = signals.hostname_normalized
     hostname_matches = [
@@ -526,7 +550,10 @@ def find_correlation_decision(
     *,
     scan_job_id: int | None,
     observation_key: str,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> AssetCorrelationDecision | None:
+    if ingest_ctx is not None:
+        return ingest_ctx.find_decision(scan_job_id, observation_key)
     query = db.query(AssetCorrelationDecision).filter(
         AssetCorrelationDecision.observation_key == observation_key
     )
@@ -546,8 +573,11 @@ def persist_correlation_decision(
     observation_key: str,
     source_device_id: int | None,
     result: CorrelationResult,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> AssetCorrelationDecision:
-    existing = find_correlation_decision(db, scan_job_id=scan_job_id, observation_key=observation_key)
+    existing = find_correlation_decision(
+        db, scan_job_id=scan_job_id, observation_key=observation_key, ingest_ctx=ingest_ctx
+    )
     if existing is not None:
         result.retry = True
         return existing
@@ -567,6 +597,8 @@ def persist_correlation_decision(
     )
     db.add(row)
     db.flush()
+    if ingest_ctx is not None:
+        ingest_ctx.remember_decision(row)
     return row
 
 

@@ -101,12 +101,23 @@ def counts_from_state(state: dict[str, Any]) -> dict[str, int]:
     return {name: len(rows) if isinstance(rows, list) else 0 for name, rows in state.items()}
 
 
+def _stage_table_count(metrics, stage_name: str, op: str, table: str) -> int:
+    stage = next((row for row in metrics.stages if row.name == stage_name), None)
+    if stage is None:
+        return 0
+    return int(stage.by_table.get((op, table), 0))
+
+
 def hotspot_flags(metrics) -> dict[str, Any]:
     by_table = {(op, table): count for (op, table), count in metrics.by_table.items()}
     service_selects = by_table.get(("SELECT", "asset_services"), 0)
     observation_selects = by_table.get(("SELECT", "asset_observations"), 0)
     device_selects = by_table.get(("SELECT", "devices"), 0)
     finding_selects = by_table.get(("SELECT", "findings"), 0)
+    device_stage_service_selects = _stage_table_count(metrics, "devices", "SELECT", "asset_services")
+    device_stage_observation_selects = _stage_table_count(
+        metrics, "devices", "SELECT", "asset_observations"
+    )
     raw_json_scans = sum(
         1
         for sample in metrics.samples
@@ -117,8 +128,11 @@ def hotspot_flags(metrics) -> dict[str, Any]:
         "asset_observation_selects": observation_selects,
         "device_selects": device_selects,
         "finding_selects": finding_selects,
+        "device_stage_service_selects": device_stage_service_selects,
+        "device_stage_observation_selects": device_stage_observation_selects,
         "finding_raw_json_select_samples": raw_json_scans,
-        "per_port_service_selects": service_selects > 0,
+        "per_port_service_selects": device_stage_service_selects >= 500,
+        "device_asset_selects_collapsed": device_stage_service_selects < 20,
         "per_finding_population_reload": observation_selects > 0 and device_selects > 0,
         "historical_raw_evidence_scan": finding_selects > 0 or raw_json_scans > 0,
     }

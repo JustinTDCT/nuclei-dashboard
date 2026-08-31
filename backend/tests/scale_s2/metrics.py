@@ -76,6 +76,7 @@ class StageMetrics:
     peak_rss_bytes: int = 0
     transaction_ms: float = 0.0
     request_bytes: int = 0
+    by_table: Counter = field(default_factory=Counter)
 
 
 @dataclass
@@ -156,6 +157,13 @@ class IngestMetrics:
                 {"op": op, "table": table, "count": count}
                 for (op, table), count in self.by_table.most_common(40)
             ],
+            "stage_sql_by_table": {
+                stage.name: [
+                    {"op": op, "table": table, "count": count}
+                    for (op, table), count in stage.by_table.most_common(20)
+                ]
+                for stage in self.stages
+            },
             "hot_samples": self.samples[:20],
         }
 
@@ -251,6 +259,7 @@ class MetricsCollector:
         self.probe.attach()
         self._wall_started = time.perf_counter()
         self.metrics.peak_api_rss_bytes = rss_bytes()
+        self._stage_table_before = Counter()
 
     def finish(self) -> IngestMetrics:
         self.metrics.wall_ms = (time.perf_counter() - self._wall_started) * 1000
@@ -267,6 +276,7 @@ class MetricsCollector:
     @contextmanager
     def stage(self, name: str, *, request_bytes: int = 0) -> Iterator[StageMetrics]:
         before = self.probe.snapshot_stage()
+        tables_before = Counter(self.probe.by_table)
         tx_before = self.probe.transaction_ms
         started = time.perf_counter()
         row = StageMetrics(name=name, request_bytes=request_bytes)
@@ -284,5 +294,6 @@ class MetricsCollector:
             measured_tx = max(0.0, self.probe.transaction_ms - tx_before)
             row.transaction_ms = measured_tx if measured_tx > 1.0 else row.wall_ms
             row.peak_rss_bytes = rss_bytes()
+            row.by_table = self.probe.by_table - tables_before
             self.metrics.peak_api_rss_bytes = max(self.metrics.peak_api_rss_bytes, row.peak_rss_bytes)
             self.metrics.stages.append(row)

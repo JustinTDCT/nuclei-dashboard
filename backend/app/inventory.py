@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from app.assets import ingest_device_report, observation_context
+from app.scan_ingest import ScanIngestContext
 from app.classify import clean_tech, identity_name, infer_class, infer_label, is_ip, is_placeholder_name, normalize_hostname
 from app.models import Alert, Device, Finding
 from app.schemas import DEVICE_CLASSES, DeviceReport, FindingReport
@@ -48,7 +49,12 @@ def _find_by_hostname(
     *,
     site_id: int | None = None,
     asset_id: int | None = None,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> Device | None:
+    if ingest_ctx is not None:
+        return ingest_ctx.find_by_hostname(
+            scope, hostname, site_id=site_id, asset_id=asset_id
+        )
     if not hostname:
         return None
     query = db.query(Device).filter(
@@ -73,7 +79,12 @@ def _find_placeholder_by_ip(
     *,
     site_id: int | None = None,
     asset_id: int | None = None,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> Device | None:
+    if ingest_ctx is not None:
+        return ingest_ctx.find_placeholder_by_ip(
+            scope, ip, site_id=site_id, asset_id=asset_id, is_placeholder=_is_placeholder
+        )
     if not ip:
         return None
     query = db.query(Device).filter(
@@ -103,18 +114,22 @@ def _find_device(
     *,
     site_id: int | None = None,
     asset_id: int | None = None,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> Device | None:
     if asset_id is not None:
-        existing = (
-            db.query(Device)
-            .filter(
-                Device.tenant_id == tenant_id,
-                Device.asset_id == asset_id,
-                Device.scope == scope,
+        if ingest_ctx is not None:
+            existing = ingest_ctx.find_devices_for_asset(asset_id, scope)
+        else:
+            existing = (
+                db.query(Device)
+                .filter(
+                    Device.tenant_id == tenant_id,
+                    Device.asset_id == asset_id,
+                    Device.scope == scope,
+                )
+                .order_by(Device.last_seen.desc())
+                .all()
             )
-            .order_by(Device.last_seen.desc())
-            .all()
-        )
         if site_id is None:
             scoped = [row for row in existing if row.site_id is None]
         else:
@@ -124,11 +139,17 @@ def _find_device(
         if existing:
             return existing[0]
     if hostname and not is_placeholder_name(hostname, ip):
-        found = _find_by_hostname(db, tenant_id, scope, hostname, site_id=site_id, asset_id=asset_id)
+        found = _find_by_hostname(
+            db, tenant_id, scope, hostname, site_id=site_id, asset_id=asset_id, ingest_ctx=ingest_ctx
+        )
         if found and (asset_id is None or found.asset_id in {None, asset_id}):
             return found
-        return _find_placeholder_by_ip(db, tenant_id, scope, ip, site_id=site_id, asset_id=asset_id)
+        return _find_placeholder_by_ip(
+            db, tenant_id, scope, ip, site_id=site_id, asset_id=asset_id, ingest_ctx=ingest_ctx
+        )
     if ip:
+        if ingest_ctx is not None:
+            return ingest_ctx.find_by_ip(scope, ip, site_id=site_id, asset_id=asset_id)
         query = db.query(Device).filter(Device.tenant_id == tenant_id, Device.ip == ip, Device.scope == scope)
         if site_id is None:
             query = query.filter(Device.site_id.is_(None))
@@ -140,7 +161,13 @@ def _find_device(
     return None
 
 
-def _merge_into(db: Session, keeper: Device, donor: Device) -> Device:
+def _merge_into(
+    db: Session,
+    keeper: Device,
+    donor: Device,
+    *,
+    ingest_ctx: ScanIngestContext | None = None,
+) -> Device:
     """Merge compatibility rows only when they already share Asset identity."""
     if donor.id == keeper.id:
         return keeper
@@ -170,6 +197,9 @@ def _merge_into(db: Session, keeper: Device, donor: Device) -> Device:
     db.query(Alert).filter(Alert.device_id == donor.id).update({Alert.device_id: keeper.id}, synchronize_session=False)
     db.delete(donor)
     db.flush()
+    if ingest_ctx is not None:
+        ingest_ctx.forget_device(donor)
+        ingest_ctx.remember_device(keeper)
     return keeper
 
 
@@ -181,16 +211,19 @@ def _promote_hostname(
     scope: str,
     *,
     site_id: int | None = None,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> Device:
     if not hostname or device.hostname == hostname:
         return device
     if not _is_placeholder(device) and not is_ip(device.hostname or ""):
         return device
-    other = _find_by_hostname(db, tenant_id, scope, hostname, site_id=site_id, asset_id=device.asset_id)
+    other = _find_by_hostname(
+        db, tenant_id, scope, hostname, site_id=site_id, asset_id=device.asset_id, ingest_ctx=ingest_ctx
+    )
     if other and other.id != device.id:
         if other.asset_id and device.asset_id and other.asset_id != device.asset_id:
             return device
-        return _merge_into(db, other, device)
+        return _merge_into(db, other, device, ingest_ctx=ingest_ctx)
     device.hostname = hostname
     return device
 
@@ -203,10 +236,11 @@ def _project_device(
     report: DeviceReport,
     asset,
     retry: bool,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> tuple[Device, bool]:
     hostname = identity_name(report.hostname, report.ip)
     ip = (report.ip or "").strip()
-    context = observation_context(db, job_id, ip, report.scope)
+    context = observation_context(db, job_id, ip, report.scope, ingest_ctx=ingest_ctx)
     scope = context.get("scope") or report.scope
     site_id = asset.site_id if scope == "lan" else None
     if scope == "lan" and context.get("site_id"):
@@ -219,6 +253,7 @@ def _project_device(
         ip,
         site_id=site_id,
         asset_id=asset.id,
+        ingest_ctx=ingest_ctx,
     )
     created = False
     if device is None:
@@ -243,11 +278,15 @@ def _project_device(
         _apply_class(device, report)
         db.add(device)
         db.flush()
+        if ingest_ctx is not None:
+            ingest_ctx.remember_device(device)
         created = True
     elif not retry:
         previous_job = device.last_scan_job_id
         if not is_placeholder_name(hostname, ip):
-            device = _promote_hostname(db, device, hostname, tenant_id, scope, site_id=site_id)
+            device = _promote_hostname(
+                db, device, hostname, tenant_id, scope, site_id=site_id, ingest_ctx=ingest_ctx
+            )
         if ip:
             device.ip = ip
         device.site_id = site_id
@@ -277,9 +316,10 @@ def _project_device(
 
 
 def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[DeviceReport]) -> tuple[int, list[Device]]:
+    ingest_ctx = ScanIngestContext.for_job(db, tenant_id, job_id)
     created: list[Device] = []
     for report in reports:
-        asset, retry = ingest_device_report(db, tenant_id, report, job_id)
+        asset, retry = ingest_device_report(db, tenant_id, report, job_id, ingest_ctx=ingest_ctx)
         device, created_device = _project_device(
             db,
             tenant_id=tenant_id,
@@ -287,6 +327,7 @@ def upsert_devices(db: Session, tenant_id: int, job_id: int, reports: list[Devic
             report=report,
             asset=asset,
             retry=retry,
+            ingest_ctx=ingest_ctx,
         )
         if created_device:
             created.append(device)

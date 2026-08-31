@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Run the S2A ingest harness against the current (S1) production path.
+"""Run the S2 ingest harness against the current production path.
 
-This script does not change production behavior. It measures the current
-upsert_devices / store_detector_coverage / store_findings / complete_scan_run
-path and writes a JSON report.
+Measures upsert_devices / store_detector_coverage / store_findings /
+complete_scan_run (S2B Device/Asset caches included) and writes a JSON report.
 
 Examples:
     cd backend

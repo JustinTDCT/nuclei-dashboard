@@ -1,4 +1,4 @@
-"""S2A: benchmark + semantic freeze. No production ingest optimizations."""
+"""S2A: benchmark + semantic freeze. S2B changed how Device/Asset ingest executes."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from tests.scale_s2.world import reset_schema
 
 def test_s1_baseline_sha_is_frozen():
     assert S1_BASELINE_SHA == "312e0d0"
-    assert CURRENT_INGEST_PATH == "s1_checkpoint"
+    assert CURRENT_INGEST_PATH == "s2b_device_asset_cache"
 
 
 def test_sql_classifier_extracts_hot_tables():
@@ -76,8 +76,6 @@ def test_small_current_path_is_replay_safe_and_deterministic(reset_db):
         assert once_state["scan_jobs"][0]["findings_count"] == 100
         assert metrics.select_count > 0
         assert metrics.insert_count > 0
-        assert hotspots["asset_service_selects"] >= 500
-        assert hotspots["per_port_service_selects"] is True
         assert hotspots["per_finding_population_reload"] is True
         assert hotspots["historical_raw_evidence_scan"] is True
         assert metrics.device_request_bytes > 0

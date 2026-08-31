@@ -49,6 +49,7 @@ from app.models import (
     Site,
     Tag,
 )
+from app.scan_ingest import ScanIngestContext
 from app.schemas import DeviceReport
 
 
@@ -215,7 +216,16 @@ def fallback_lan_site(db: Session, tenant_id: int) -> Site:
     return site
 
 
-def observation_context(db: Session, job_id: int, ip: str, report_scope: str) -> dict:
+def observation_context(
+    db: Session,
+    job_id: int,
+    ip: str,
+    report_scope: str,
+    *,
+    ingest_ctx: ScanIngestContext | None = None,
+) -> dict:
+    if ingest_ctx is not None:
+        return ingest_ctx.observation_context(ip, report_scope)
     job = db.get(ScanJob, job_id)
     if job and job.execution_snapshot:
         from app.scan_execution import execution_context, resolve_snapshot_network
@@ -289,6 +299,7 @@ def upsert_identifier(
     *,
     source: str,
     seen_at: datetime | None,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> AssetIdentifier | None:
     raw = (value or "").strip()
     if not raw or identifier_type not in IDENTIFIER_TYPES:
@@ -298,15 +309,19 @@ def upsert_identifier(
     normalized = normalize_identifier(identifier_type, raw)
     if not normalized:
         return None
-    row = (
-        db.query(AssetIdentifier)
-        .filter(
-            AssetIdentifier.asset_id == asset.id,
-            AssetIdentifier.identifier_type == identifier_type,
-            AssetIdentifier.normalized_value == normalized,
+    row = None
+    if ingest_ctx is not None:
+        row = ingest_ctx.find_identifier(asset.id, identifier_type, normalized)
+    else:
+        row = (
+            db.query(AssetIdentifier)
+            .filter(
+                AssetIdentifier.asset_id == asset.id,
+                AssetIdentifier.identifier_type == identifier_type,
+                AssetIdentifier.normalized_value == normalized,
+            )
+            .first()
         )
-        .first()
-    )
     if row is None:
         row = AssetIdentifier(
             asset_id=asset.id,
@@ -321,6 +336,8 @@ def upsert_identifier(
         )
         db.add(row)
         db.flush()
+        if ingest_ctx is not None:
+            ingest_ctx.remember_identifier(row)
         return row
     if row.validity == IDENTIFIER_VALIDITY_INCORRECT:
         return None
@@ -328,6 +345,8 @@ def upsert_identifier(
     row.last_seen = seen_at
     if not row.first_seen:
         row.first_seen = seen_at
+    if ingest_ctx is not None:
+        ingest_ctx.remember_identifier(row)
     return row
 
 
@@ -340,6 +359,7 @@ def upsert_address(
     network_id: int | None,
     source: str,
     seen_at: datetime,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> AssetAddress | None:
     raw = (ip or "").strip()
     if not raw:
@@ -348,11 +368,14 @@ def upsert_address(
         ip_address(raw)
     except ValueError:
         return None
-    row = (
-        db.query(AssetAddress)
-        .filter(AssetAddress.asset_id == asset.id, AssetAddress.ip == raw)
-        .first()
-    )
+    if ingest_ctx is not None:
+        row = ingest_ctx.find_address(asset.id, raw)
+    else:
+        row = (
+            db.query(AssetAddress)
+            .filter(AssetAddress.asset_id == asset.id, AssetAddress.ip == raw)
+            .first()
+        )
     if row is None:
         row = AssetAddress(
             asset_id=asset.id,
@@ -367,6 +390,8 @@ def upsert_address(
         )
         db.add(row)
         db.flush()
+        if ingest_ctx is not None:
+            ingest_ctx.remember_address(row)
         return row
     row.last_seen = seen_at
     if not row.first_seen:
@@ -375,6 +400,8 @@ def upsert_address(
         row.site_id = site_id
     if network_id is not None:
         row.network_id = network_id
+    if ingest_ctx is not None:
+        ingest_ctx.remember_address(row)
     return row
 
 
@@ -415,37 +442,42 @@ def upsert_services(
     tech: str,
     source: str,
     seen_at: datetime,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> None:
     for port, protocol, product, version in _iter_ports(ports):
-        row = (
-            db.query(AssetService)
-            .filter(
-                AssetService.asset_id == asset.id,
-                AssetService.ip == (ip or ""),
-                AssetService.port == port,
-                AssetService.protocol == protocol,
-            )
-            .first()
-        )
-        if row is None or sa_inspect(row).deleted:
-            db.add(
-                AssetService(
-                    asset_id=asset.id,
-                    tenant_id=asset.tenant_id,
-                    address_id=address_id,
-                    ip=ip or "",
-                    port=port,
-                    protocol=protocol,
-                    product=product,
-                    version=version,
-                    tls_metadata={},
-                    web_title=title or "",
-                    tech=tech or "",
-                    source=source,
-                    first_seen=seen_at,
-                    last_seen=seen_at,
+        if ingest_ctx is not None:
+            row = ingest_ctx.find_service(asset.id, ip or "", port, protocol)
+        else:
+            row = (
+                db.query(AssetService)
+                .filter(
+                    AssetService.asset_id == asset.id,
+                    AssetService.ip == (ip or ""),
+                    AssetService.port == port,
+                    AssetService.protocol == protocol,
                 )
+                .first()
             )
+        if row is None or sa_inspect(row).deleted:
+            row = AssetService(
+                asset_id=asset.id,
+                tenant_id=asset.tenant_id,
+                address_id=address_id,
+                ip=ip or "",
+                port=port,
+                protocol=protocol,
+                product=product,
+                version=version,
+                tls_metadata={},
+                web_title=title or "",
+                tech=tech or "",
+                source=source,
+                first_seen=seen_at,
+                last_seen=seen_at,
+            )
+            db.add(row)
+            if ingest_ctx is not None:
+                ingest_ctx.remember_service(row)
             continue
         row.last_seen = seen_at
         if not row.first_seen:
@@ -460,6 +492,8 @@ def upsert_services(
             row.web_title = title
         if tech:
             row.tech = tech
+        if ingest_ctx is not None:
+            ingest_ctx.remember_service(row)
     db.flush()
 
 
@@ -469,7 +503,10 @@ def find_observation(
     *,
     scan_job_id: int | None,
     observation_key: str,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> AssetObservation | None:
+    if ingest_ctx is not None:
+        return ingest_ctx.find_observation(asset.id, scan_job_id, observation_key)
     existing_q = db.query(AssetObservation).filter(
         AssetObservation.asset_id == asset.id,
         AssetObservation.observation_key == observation_key,
@@ -491,12 +528,14 @@ def append_observation(
     snapshot: dict,
     observed_at: datetime,
     observation_key: str,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> AssetObservation:
     existing = find_observation(
         db,
         asset,
         scan_job_id=context.get("scan_job_id"),
         observation_key=observation_key,
+        ingest_ctx=ingest_ctx,
     )
     if existing is not None:
         return existing
@@ -519,6 +558,8 @@ def append_observation(
     )
     db.add(row)
     db.flush()
+    if ingest_ctx is not None:
+        ingest_ctx.remember_observation(row)
     return row
 
 
@@ -532,15 +573,32 @@ def apply_scanner_facts_from_snapshot(
     site_id: int | None = None,
     network_id: int | None = None,
     seen_at: datetime,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> None:
     """Replay one observation snapshot onto scanner-derived current projections."""
     snap = snapshot or {}
     report_ip = (ip or snap.get("ip") or "").strip()
     report_hostname = (hostname or snap.get("hostname") or "").strip()
     if report_hostname and not is_placeholder_hostname(report_hostname, report_ip):
-        upsert_identifier(db, asset, IDENTIFIER_HOSTNAME, report_hostname, source=SOURCE_SCANNER, seen_at=seen_at)
+        upsert_identifier(
+            db,
+            asset,
+            IDENTIFIER_HOSTNAME,
+            report_hostname,
+            source=SOURCE_SCANNER,
+            seen_at=seen_at,
+            ingest_ctx=ingest_ctx,
+        )
         if "." in report_hostname:
-            upsert_identifier(db, asset, IDENTIFIER_FQDN, report_hostname, source=SOURCE_SCANNER, seen_at=seen_at)
+            upsert_identifier(
+                db,
+                asset,
+                IDENTIFIER_FQDN,
+                report_hostname,
+                source=SOURCE_SCANNER,
+                seen_at=seen_at,
+                ingest_ctx=ingest_ctx,
+            )
     for identifier_type, key in (
         (IDENTIFIER_MAC, "mac"),
         (IDENTIFIER_SERIAL, "serial"),
@@ -551,7 +609,15 @@ def apply_scanner_facts_from_snapshot(
     ):
         value = str(snap.get(key) or "").strip()
         if value:
-            upsert_identifier(db, asset, identifier_type, value, source=SOURCE_SCANNER, seen_at=seen_at)
+            upsert_identifier(
+                db,
+                asset,
+                identifier_type,
+                value,
+                source=SOURCE_SCANNER,
+                seen_at=seen_at,
+                ingest_ctx=ingest_ctx,
+            )
     address = upsert_address(
         db,
         asset,
@@ -560,6 +626,7 @@ def apply_scanner_facts_from_snapshot(
         network_id=network_id,
         source=SOURCE_SCANNER,
         seen_at=seen_at,
+        ingest_ctx=ingest_ctx,
     )
     upsert_services(
         db,
@@ -571,6 +638,7 @@ def apply_scanner_facts_from_snapshot(
         tech=str(snap.get("tech") or ""),
         source=SOURCE_SCANNER,
         seen_at=seen_at,
+        ingest_ctx=ingest_ctx,
     )
 
 
@@ -662,6 +730,7 @@ def _write_observation_facts(
     observed_at: datetime,
     observation_key: str,
     snapshot: dict,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> None:
     report_ip = (report.ip or "").strip()
     report_hostname = (report.hostname or "").strip()
@@ -674,6 +743,7 @@ def _write_observation_facts(
         site_id=context.get("site_id"),
         network_id=context.get("network_id"),
         seen_at=observed_at,
+        ingest_ctx=ingest_ctx,
     )
     append_observation(
         db,
@@ -684,6 +754,7 @@ def _write_observation_facts(
         snapshot=snapshot,
         observed_at=observed_at,
         observation_key=observation_key,
+        ingest_ctx=ingest_ctx,
     )
 
 
@@ -728,6 +799,7 @@ def create_discovered_asset(
     observed_at: datetime,
     network_id: int | None = None,
     scan_job_id: int | None = None,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> Asset:
     from app.events import emit_new_asset
 
@@ -752,6 +824,8 @@ def create_discovered_asset(
     )
     db.add(asset)
     db.flush()
+    if ingest_ctx is not None:
+        ingest_ctx.remember_asset(asset)
     emit_new_asset(db, asset, network_id=network_id if site_id else None, scan_job_id=scan_job_id)
     return asset
 
@@ -761,6 +835,8 @@ def ingest_device_report(
     tenant_id: int,
     report: DeviceReport,
     job_id: int,
+    *,
+    ingest_ctx: ScanIngestContext | None = None,
 ) -> tuple[Asset, bool]:
     """Correlate then persist observation facts. Returns (asset, retry)."""
     from app.correlation import (
@@ -774,25 +850,37 @@ def ingest_device_report(
 
     report_ip = (report.ip or "").strip()
     report_scope = (report.scope or "").strip()
-    context = observation_context(db, job_id, report_ip, report_scope)
+    context = observation_context(db, job_id, report_ip, report_scope, ingest_ctx=ingest_ctx)
     scope = context.get("scope") or report_scope
     snapshot = report_snapshot(report, scope)
     observation_key = observation_key_from_snapshot(snapshot)
-    existing_decision = find_correlation_decision(db, scan_job_id=job_id, observation_key=observation_key)
+    existing_decision = find_correlation_decision(
+        db, scan_job_id=job_id, observation_key=observation_key, ingest_ctx=ingest_ctx
+    )
     if existing_decision is not None:
         asset_id = existing_decision.selected_asset_id
         if asset_id is None:
             raise RuntimeError("Stored correlation decision is missing selected_asset_id")
-        asset = db.get(Asset, canonical_asset_id(db, asset_id))
+        resolved = (
+            ingest_ctx.canonical_asset_id(asset_id)
+            if ingest_ctx is not None
+            else canonical_asset_id(db, asset_id)
+        )
+        asset = ingest_ctx.get_asset(resolved) if ingest_ctx is not None else db.get(Asset, resolved)
         if asset is None:
             raise RuntimeError("Stored correlation decision references a missing Asset")
         return asset, True
 
     signals = signals_from_report(tenant_id, report, context)
-    result = correlate(db, signals)
+    result = correlate(db, signals, ingest_ctx=ingest_ctx)
     now = utcnow()
     if result.decision == DECISION_LINKED_EXISTING and result.selected_asset_id:
-        asset = db.get(Asset, canonical_asset_id(db, result.selected_asset_id))
+        resolved = (
+            ingest_ctx.canonical_asset_id(result.selected_asset_id)
+            if ingest_ctx is not None
+            else canonical_asset_id(db, result.selected_asset_id)
+        )
+        asset = ingest_ctx.get_asset(resolved) if ingest_ctx is not None else db.get(Asset, resolved)
         if asset is None:
             asset = create_discovered_asset(
                 db,
@@ -803,6 +891,7 @@ def ingest_device_report(
                 observed_at=now,
                 network_id=context.get("network_id"),
                 scan_job_id=job_id,
+                ingest_ctx=ingest_ctx,
             )
             result.selected_asset_id = asset.id
             result.decision = "created_new"
@@ -828,6 +917,7 @@ def ingest_device_report(
             observed_at=now,
             network_id=context.get("network_id"),
             scan_job_id=job_id,
+            ingest_ctx=ingest_ctx,
         )
         result.selected_asset_id = asset.id
     name = display_name_for(report.hostname, report.ip, asset.display_name)
@@ -841,6 +931,7 @@ def ingest_device_report(
         observed_at=now,
         observation_key=observation_key,
         snapshot=snapshot,
+        ingest_ctx=ingest_ctx,
     )
     persist_correlation_decision(
         db,
@@ -850,6 +941,7 @@ def ingest_device_report(
         observation_key=observation_key,
         source_device_id=None,
         result=result,
+        ingest_ctx=ingest_ctx,
     )
     post_correlation_asset_policy_hook(
         db,
@@ -866,9 +958,18 @@ def ingest_device_report(
     return asset, False
 
 
-def apply_device_report(db: Session, device: Device, report: DeviceReport, job_id: int) -> Asset:
+def apply_device_report(
+    db: Session,
+    device: Device,
+    report: DeviceReport,
+    job_id: int,
+    *,
+    ingest_ctx: ScanIngestContext | None = None,
+) -> Asset:
     """Compatibility wrapper. Correlation is authoritative."""
-    asset, _retry = ingest_device_report(db, device.tenant_id, report, job_id)
+    asset, _retry = ingest_device_report(
+        db, device.tenant_id, report, job_id, ingest_ctx=ingest_ctx
+    )
     device.asset_id = asset.id
     if asset.site_id and device.scope == "lan":
         device.site_id = asset.site_id
