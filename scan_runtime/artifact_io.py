@@ -226,6 +226,25 @@ def parse_jsonl_file(path: Path, *, strict: bool = False) -> list[dict[str, Any]
     return parse_jsonl_text(path.read_text(encoding="utf-8", errors="replace"), strict=strict)
 
 
+def iter_jsonl_file(path: Path, *, strict: bool = False) -> Iterator[dict[str, Any]]:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for number, raw in enumerate(handle, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if strict:
+                    raise JsonlParseError(f"malformed JSONL at line {number}") from exc
+                continue
+            if not isinstance(parsed, dict):
+                if strict:
+                    raise JsonlParseError(f"JSONL line {number} is not an object")
+                continue
+            yield parsed
+
+
 def validate_nuclei_row(raw: dict[str, Any]) -> None:
     template_id = raw.get("template-id") or raw.get("template_id")
     if not isinstance(template_id, str) or not template_id.strip():

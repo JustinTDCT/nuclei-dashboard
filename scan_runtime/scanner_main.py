@@ -8,6 +8,7 @@ from api_client import ApiError, ScannerClient
 from artifact_io import JobControl, cleanup_staging, use_job_control
 from job_finish import finish_pipeline_run
 from runner import PipelineError, run_pipeline
+from spool import recover_owned_spool, resume_pipeline_result
 
 
 def main() -> None:
@@ -43,8 +44,13 @@ def main() -> None:
                 watcher = threading.Thread(target=_watch_cancel, name=f"wan-cancel-{job_id}", daemon=True)
                 watcher.start()
                 try:
-                    with use_job_control(control):
-                        result = run_pipeline(started, control=control)
+                    resumed = recover_owned_spool(job_id)
+                    if resumed is not None:
+                        print(f"Resuming spool upload for WAN job {job_id}", flush=True)
+                        result = resume_pipeline_result(resumed)
+                    else:
+                        with use_job_control(control):
+                            result = run_pipeline(started, control=control)
                     finish_pipeline_run(
                         result=result,
                         upload=lambda artifact, current_id=job_id: client.upload_artifact(current_id, artifact),

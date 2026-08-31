@@ -7,6 +7,7 @@ from dataclasses import dataclass
 S1_BASELINE_SHA = "312e0d0"
 CURRENT_INGEST_PATH = "s2c_finding_coverage_index"
 CHUNKED_INGEST_PATH = "s2d_chunked_transport"
+SPOOLED_INGEST_PATH = "s2e_agent_spool"
 S2D_TEST_MAX_ROWS = 10
 S2D_TEST_MAX_BYTES = 16_384
 CORRELATION_ALGORITHM_MUST_REMAIN = "1c.3"

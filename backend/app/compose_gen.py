@@ -56,6 +56,7 @@ services:
 {secret_line}      TLS_VERIFY: "${{TLS_VERIFY:-1}}"
       TLS_CA_FILE: ${{TLS_CA_FILE:-}}
       SCAN_DRY_RUN: "0"
+      AGENT_DATA_DIR: /data
       HOME: /home/scanner
     volumes:
       - agent-keys:/data

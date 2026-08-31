@@ -11,6 +11,7 @@ from job_finish import finish_pipeline_run
 from keys import load_or_create_keypair, sign
 from runner import PipelineError, run_pipeline
 from artifact_io import JobControl, cleanup_staging, use_job_control
+from spool import recover_owned_spool, resume_pipeline_result
 from tool_versions import collect_runtime_inventory
 
 INVENTORY_REFRESH_SECONDS = 3600
@@ -79,8 +80,13 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token, cancel_
     result: dict = {"artifacts": [], "staging_dir": None}
     control = JobControl.from_job(started, cancel_event=cancel_event)
     try:
-        with use_job_control(control):
-            result = run_pipeline(started, log=lambda message: print(message, flush=True), control=control)
+        resumed = recover_owned_spool(job_id)
+        if resumed is not None:
+            print(f"Resuming spool upload for job {job_id}", flush=True)
+            result = resume_pipeline_result(resumed)
+        else:
+            with use_job_control(control):
+                result = run_pipeline(started, log=lambda message: print(message, flush=True), control=control)
         token = refresh_token() or token
         finish_pipeline_run(
             result=result,

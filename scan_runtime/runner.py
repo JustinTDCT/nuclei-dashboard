@@ -17,6 +17,7 @@ from artifact_io import (
     JobControl,
     ScanCancelled,
     artifact_meta,
+    iter_jsonl_file,
     parse_jsonl_file,
     parse_jsonl_text,
     run_command_to_file,
@@ -42,8 +43,11 @@ from tool_versions import (
     collect_tool_versions,
 )
 from enrich import enrich_identities, usable_hostname
+from ingest_chunks import iter_ingest_chunks
+from spool import JobSpool, SpoolCapExceeded, spool_root
 
 LogFn = Callable[[str], None]
+RowConsumer = Callable[[dict[str, Any]], None]
 
 
 class StageExecutionError(RuntimeError):
@@ -72,6 +76,7 @@ class PipelineError(RuntimeError):
         findings: list[dict[str, Any]] | None = None,
         provenance: dict[str, Any] | None = None,
         detector_coverage: list[dict[str, Any]] | None = None,
+        spool: JobSpool | None = None,
     ):
         super().__init__(message)
         self.artifacts = artifacts or []
@@ -80,6 +85,7 @@ class PipelineError(RuntimeError):
         self.findings = findings or []
         self.provenance = provenance or {}
         self.detector_coverage = detector_coverage or []
+        self.spool = spool
 
     def as_result(self) -> dict[str, Any]:
         return {
@@ -90,6 +96,7 @@ class PipelineError(RuntimeError):
             "artifacts": self.artifacts,
             "staging_dir": self.staging_dir,
             "pipeline_error": str(self),
+            "spool": self.spool,
         }
 
 
@@ -128,6 +135,7 @@ def _execute_stage(
     log: LogFn | None = None,
     strict_jsonl: bool = False,
     retain_on_failure: bool = False,
+    row_consumer: RowConsumer | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     raw_path = staging_dir / f"{artifact_key}.jsonl"
     gz_path = staging_dir / f"{artifact_key}.jsonl.gz"
@@ -141,13 +149,24 @@ def _execute_stage(
         command_error = exc
     parse_error: JsonlParseError | None = None
     rows: list[dict[str, Any]] = []
+    streamed = 0
     if raw_path.exists():
         try:
-            rows = parse_jsonl_file(raw_path, strict=strict_jsonl and command_error is None)
+            if row_consumer is not None:
+                for row in iter_jsonl_file(raw_path, strict=strict_jsonl and command_error is None):
+                    row_consumer(row)
+                    streamed += 1
+            else:
+                rows = parse_jsonl_file(raw_path, strict=strict_jsonl and command_error is None)
         except JsonlParseError as exc:
             parse_error = exc
             if retain_on_failure and command_error is not None:
-                rows = parse_jsonl_file(raw_path, strict=False)
+                if row_consumer is not None:
+                    for row in iter_jsonl_file(raw_path, strict=False):
+                        row_consumer(row)
+                        streamed += 1
+                else:
+                    rows = parse_jsonl_file(raw_path, strict=False)
             else:
                 rows = []
     artifact = None
@@ -159,7 +178,8 @@ def _execute_stage(
         raise StageExecutionError(str(command_error), rows=rows, artifact=artifact)
     if parse_error is not None:
         raise StageExecutionError(str(parse_error), rows=[], artifact=artifact)
-    _log(f"Finished {stage}: {len(rows)} records", log)
+    count = streamed if row_consumer is not None else len(rows)
+    _log(f"Finished {stage}: {count} records", log)
     return rows, artifact or artifact_meta(artifact_key=artifact_key, stage=stage, tool=tool, gz_path=gz_path)
 
 
@@ -207,6 +227,29 @@ def _unpack_stage(result: Any) -> tuple[list[dict[str, Any]], dict[str, Any] | N
     return result or [], None
 
 
+def _job_spool(job: dict[str, Any]) -> JobSpool:
+    raw = job.get("job_id")
+    if raw is None:
+        return JobSpool(spool_root(), int.from_bytes(os.urandom(4), "big"))
+    return JobSpool.for_job(int(raw))
+
+
+def _spool_coverage(spool: JobSpool, nuclei_targets: list[Any]) -> list[dict[str, Any]]:
+    targets = _coverage_targets(nuclei_targets)
+    coverage = [{"detector_type": "nuclei", "targets": targets}]
+    if not targets:
+        spool.append("coverage", coverage[0])
+        return coverage
+    for chunk in iter_ingest_chunks(targets, kind="coverage"):
+        spool.append("coverage", {"detector_type": "nuclei", "targets": chunk})
+    return coverage
+
+
+def _consume_returned_rows(rows: list[dict[str, Any]], consumer: RowConsumer) -> None:
+    for row in rows:
+        consumer(row)
+
+
 def run_pipeline(job: dict[str, Any], log: LogFn | None = None, control: JobControl | None = None) -> dict[str, Any]:
     active = control or JobControl.from_job(job)
     with use_job_control(active):
@@ -228,16 +271,67 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
 
     staging_dir = Path(tempfile.mkdtemp(prefix="nd-raw-"))
     artifacts: list[dict[str, Any]] = []
-    hosts: list[dict[str, Any]] = []
-    http_info: list[dict[str, Any]] = []
-    devices: list[dict[str, Any]] = []
-    findings: list[dict[str, Any]] = []
+    index = DeviceIndex(scope)
+    http_urls: list[dict[str, str]] = []
+    findings_acc: list[dict[str, Any]] = []
     coverage: list[dict[str, Any]] = []
-    nuclei_targets: list[str] = []
+    nuclei_targets: list[Any] = []
+    devices: list[dict[str, Any]] = []
+    spool = _job_spool(job)
+    keep_lists = job.get("job_id") is None
+    devices_spooled = False
+
+    def on_host(row: dict[str, Any]) -> None:
+        index.add_host(row)
+
+    def on_httpx(row: dict[str, Any]) -> None:
+        index.add_httpx(row)
+        url = row.get("url")
+        if url:
+            http_urls.append({"value": str(url), "source_fqdn": str(row.get("source_fqdn") or "")})
+
+    def on_finding(finding: dict[str, Any]) -> None:
+        index.apply_finding(finding)
+        spool.append("findings", finding)
+        if keep_lists:
+            findings_acc.append(finding)
+
+    def fail(
+        message: str,
+        *,
+        provenance: dict[str, Any],
+        staging_out: str | Path | None,
+        cause: BaseException | None = None,
+        cover: list[dict[str, Any]] | None = None,
+    ) -> None:
+        try:
+            if not devices_spooled:
+                sealed = index.finalize()
+                for device in sealed:
+                    spool.append("devices", device)
+                if keep_lists:
+                    devices[:] = sealed
+            spool.seal_all()
+        except Exception:
+            pass
+        error = PipelineError(
+            message,
+            artifacts=artifacts,
+            staging_dir=staging_out,
+            devices=devices if keep_lists else [],
+            findings=findings_acc if keep_lists else [],
+            provenance=provenance,
+            detector_coverage=cover if cover is not None else [],
+            spool=spool,
+        )
+        if cause is not None:
+            raise error from cause
+        raise error
+
     try:
         port_mode = stages.get("port_mode") or PORT_MODE_NONE
         if port_mode != PORT_MODE_NONE:
-            hosts, artifact = _unpack_stage(
+            rows, artifact = _unpack_stage(
                 run_naabu(
                     [row["value"] for row in targets],
                     port_mode=port_mode,
@@ -246,45 +340,50 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
                     exclude_hosts=_exclusion_hosts(job),
                     log=log,
                     staging_dir=staging_dir,
+                    row_consumer=on_host,
                 )
             )
             if artifact:
                 artifacts.append(artifact)
-            _apply_source_fqdns(hosts, targets)
+            _consume_returned_rows(rows, on_host)
         elif stages.get("discovery"):
-            hosts, artifact = _unpack_stage(
+            rows, artifact = _unpack_stage(
                 run_host_discovery(
                     targets,
                     intensity=intensity,
                     exclude_hosts=_exclusion_hosts(job),
                     log=log,
                     staging_dir=staging_dir,
+                    row_consumer=on_host,
                 )
             )
             if artifact:
                 artifacts.append(artifact)
-            _apply_source_fqdns(hosts, targets)
+            _consume_returned_rows(rows, on_host)
         if stages.get("fingerprint", True):
-            probe_hosts = hosts or [
-                {
-                    "ip": row["value"],
-                    **({"source_fqdn": row["source_fqdn"]} if row.get("source_fqdn") else {}),
-                }
-                for row in targets
-                if row["type"] in {"ip", "fqdn", "cidr"}
-            ]
-            _apply_source_fqdns(probe_hosts, targets)
-            http_info, artifact = _unpack_stage(
-                run_httpx(probe_hosts, intensity=intensity, log=log, staging_dir=staging_dir)
+            probe_hosts = index.probe_hosts(targets)
+            rows, artifact = _unpack_stage(
+                run_httpx(
+                    probe_hosts,
+                    intensity=intensity,
+                    log=log,
+                    staging_dir=staging_dir,
+                    row_consumer=on_httpx,
+                )
             )
             if artifact:
                 artifacts.append(artifact)
-        devices = merge_devices(hosts, http_info, scope)
+            _consume_returned_rows(rows, on_httpx)
+        devices = index.snapshot()
         attach_hostnames(devices, log=log)
         enrich_identities(devices, log=log)
+        index.replace_devices(devices)
         if stages.get("vulnerability"):
-            nuclei_targets = _nuclei_target_rows(http_info, hosts, targets)
-            findings, artifact = _unpack_stage(
+            nuclei_targets = http_urls or index.nuclei_host_targets() or [
+                {"value": row["value"], "source_fqdn": str(row.get("source_fqdn") or "")}
+                for row in targets
+            ]
+            rows, artifact = _unpack_stage(
                 run_nuclei(
                     nuclei_targets,
                     severities=stages.get("nuclei_severities") or "critical,high,medium",
@@ -292,18 +391,21 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
                     intensity=intensity,
                     log=log,
                     staging_dir=staging_dir,
+                    finding_consumer=on_finding,
                 )
             )
             if artifact:
                 artifacts.append(artifact)
-            apply_nuclei_hostnames(devices, findings)
-        finalize_devices(devices)
+            for finding in rows:
+                on_finding(finding)
+        devices = index.finalize()
+        for device in devices:
+            spool.append("devices", device)
+        devices_spooled = True
         named = sum(1 for d in devices if usable_hostname(d.get("hostname") or ""))
         _log(f"Hostnames resolved on agent: {named}/{len(devices)}", log)
         if stages.get("vulnerability"):
-            coverage.append(
-                {"detector_type": "nuclei", "targets": _coverage_targets(nuclei_targets)}
-            )
+            coverage = _spool_coverage(spool, nuclei_targets)
         used_tools = {str(row.get("tool") or "") for row in artifacts if row.get("tool")}
         try:
             provenance = collect_run_provenance(used_tools=used_tools, dry_run=False, log=log)
@@ -312,23 +414,34 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
                 str(exc),
                 artifacts=artifacts,
                 staging_dir=str(staging_dir) if artifacts else None,
-                devices=devices,
-                findings=findings,
+                devices=devices if keep_lists else [],
+                findings=findings_acc if keep_lists else [],
                 provenance={},
-                detector_coverage=coverage,
+                detector_coverage=coverage if keep_lists else [],
+                spool=spool,
             ) from exc
         if not artifacts:
             shutil.rmtree(staging_dir, ignore_errors=True)
             staging_out = None
         else:
             staging_out = str(staging_dir)
+        spool.mark_pipeline_complete(
+            {
+                "ok": True,
+                "artifacts": artifacts,
+                "staging_dir": staging_out,
+                "provenance": provenance,
+                "dry_run": False,
+            }
+        )
         return {
-            "devices": devices,
-            "findings": findings,
+            "devices": devices if keep_lists else [],
+            "findings": findings_acc if keep_lists else [],
             "provenance": provenance,
-            "detector_coverage": coverage,
+            "detector_coverage": coverage if keep_lists else [],
             "artifacts": artifacts,
             "staging_dir": staging_out,
+            "spool": spool,
         }
     except PipelineError:
         raise
@@ -343,20 +456,12 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             staging_out = None
         else:
             staging_out = staging_dir
-        raise PipelineError(
-            str(exc),
-            artifacts=artifacts,
-            staging_dir=staging_out,
-            devices=devices,
-            findings=findings,
-            provenance=provenance,
-            detector_coverage=[],
-        ) from exc
+        fail(str(exc), provenance=provenance, staging_out=staging_out, cause=exc)
     except StageExecutionError as exc:
         if exc.artifact:
             artifacts.append(exc.artifact)
-        if exc.findings:
-            findings = exc.findings
+        for finding in exc.findings:
+            on_finding(finding)
         used_tools = {str(row.get("tool") or "") for row in artifacts if row.get("tool")}
         try:
             provenance = collect_run_provenance(used_tools=used_tools, dry_run=False, log=log)
@@ -367,16 +472,8 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             staging_out = None
         else:
             staging_out = staging_dir
-        raise PipelineError(
-            str(exc),
-            artifacts=artifacts,
-            staging_dir=staging_out,
-            devices=devices,
-            findings=findings,
-            provenance=provenance,
-            detector_coverage=[],
-        ) from exc
-    except Exception as exc:
+        fail(str(exc), provenance=provenance, staging_out=staging_out, cause=exc)
+    except (SpoolCapExceeded, Exception) as exc:
         used_tools = {str(row.get("tool") or "") for row in artifacts if row.get("tool")}
         try:
             provenance = collect_run_provenance(used_tools=used_tools, dry_run=False, log=log)
@@ -387,15 +484,7 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             staging_out = None
         else:
             staging_out = staging_dir
-        raise PipelineError(
-            str(exc),
-            artifacts=artifacts,
-            staging_dir=staging_out,
-            devices=devices,
-            findings=findings,
-            provenance=provenance,
-            detector_coverage=[],
-        ) from exc
+        fail(str(exc), provenance=provenance, staging_out=staging_out, cause=exc)
 
 
 def resolve_execution_targets(job: dict[str, Any], log: LogFn | None = None) -> list[dict[str, str]]:
@@ -595,26 +684,30 @@ def _group_by_sni(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]
     return grouped
 
 
+def _nuclei_finding(raw: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        validate_nuclei_row(raw)
+    except JsonlParseError:
+        return None
+    info = raw.get("info") or {}
+    tags = info.get("tags") or []
+    return {
+        "template_id": raw.get("template-id") or raw.get("template_id") or "",
+        "name": info.get("name") or "",
+        "severity": (info.get("severity") or "info").lower(),
+        "host": raw.get("host") or "",
+        "matched_at": raw.get("matched-at") or "",
+        "tags": ",".join(str(tag) for tag in tags) if isinstance(tags, list) else str(tags),
+        "raw": raw,
+    }
+
+
 def _nuclei_findings(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     findings = []
     for raw in rows:
-        try:
-            validate_nuclei_row(raw)
-        except JsonlParseError:
-            continue
-        info = raw.get("info") or {}
-        tags = info.get("tags") or []
-        findings.append(
-            {
-                "template_id": raw.get("template-id") or raw.get("template_id") or "",
-                "name": info.get("name") or "",
-                "severity": (info.get("severity") or "info").lower(),
-                "host": raw.get("host") or "",
-                "matched_at": raw.get("matched-at") or "",
-                "tags": ",".join(str(tag) for tag in tags) if isinstance(tags, list) else str(tags),
-                "raw": raw,
-            }
-        )
+        finding = _nuclei_finding(raw)
+        if finding is not None:
+            findings.append(finding)
     return findings
 
 
@@ -629,6 +722,7 @@ def run_naabu(
     staging_dir: Path | None = None,
     artifact_key: str = "port_discovery.naabu",
     stage: str = "port_discovery",
+    row_consumer: RowConsumer | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     binary = _which("naabu")
     if not binary:
@@ -644,8 +738,21 @@ def run_naabu(
     if cmd is None:
         return [], None
     if staging_dir is None:
-        return _parse_jsonl(_run(cmd, log)), None
-    return _execute_stage(cmd, staging_dir, artifact_key=artifact_key, stage=stage, tool="naabu", log=log)
+        rows = _parse_jsonl(_run(cmd, log))
+        if row_consumer is not None:
+            for row in rows:
+                row_consumer(row)
+            return [], None
+        return rows, None
+    return _execute_stage(
+        cmd,
+        staging_dir,
+        artifact_key=artifact_key,
+        stage=stage,
+        tool="naabu",
+        log=log,
+        row_consumer=row_consumer,
+    )
 
 
 def run_host_discovery(
@@ -655,6 +762,7 @@ def run_host_discovery(
     intensity: dict[str, Any] | None = None,
     exclude_hosts: list[str] | None = None,
     staging_dir: Path | None = None,
+    row_consumer: RowConsumer | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     values = [row["value"] for row in targets]
     binary = _which("naabu")
@@ -668,7 +776,12 @@ def run_host_discovery(
         if cmd:
             _log("Discovery enabled with port mode none; running Naabu host discovery (-sn)", log)
             if staging_dir is None:
-                return _parse_jsonl(_run(cmd, log)), None
+                rows = _parse_jsonl(_run(cmd, log))
+                if row_consumer is not None:
+                    for row in rows:
+                        row_consumer(row)
+                    return [], None
+                return rows, None
             return _execute_stage(
                 cmd,
                 staging_dir,
@@ -676,6 +789,7 @@ def run_host_discovery(
                 stage="discovery",
                 tool="naabu",
                 log=log,
+                row_consumer=row_consumer,
             )
     hosts: list[dict[str, Any]] = []
     for row in targets:
@@ -688,6 +802,10 @@ def run_host_discovery(
     if not hosts:
         raise RuntimeError("Host discovery produced no hosts")
     _log(f"Host discovery recorded {len(hosts)} explicit IP/FQDN target(s)", log)
+    if row_consumer is not None:
+        for row in hosts:
+            row_consumer(row)
+        return [], None
     return hosts, None
 
 
@@ -705,12 +823,32 @@ def _is_pd_httpx(path: str) -> bool:
     return "projectdiscovery" in text or "current version" in text
 
 
+def _emit_httpx_row(
+    row: dict[str, Any],
+    *,
+    sni: str,
+    row_consumer: RowConsumer | None,
+    combined: list[dict[str, Any]],
+    raw_path: Path | None,
+) -> None:
+    if sni:
+        row["source_fqdn"] = sni
+    if row_consumer is not None:
+        row_consumer(row)
+    else:
+        combined.append(row)
+    if raw_path is not None:
+        with raw_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, default=str) + "\n")
+
+
 def run_httpx(
     hosts: list[dict[str, Any]],
     log: LogFn | None = None,
     *,
     intensity: dict[str, Any] | None = None,
     staging_dir: Path | None = None,
+    row_consumer: RowConsumer | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     if not hosts:
         return [], None
@@ -736,41 +874,29 @@ def run_httpx(
             try:
                 cmd = build_httpx_command(binary, path, intensity=intensity, tls_grab=True, sni=sni or None)
                 try:
-                    if staging_dir is None:
-                        rows = _parse_jsonl(_run(cmd, log))
-                    else:
-                        rows, artifact = _execute_stage(
-                            cmd,
-                            staging_dir,
-                            artifact_key="fingerprint.httpx.part",
-                            stage="fingerprint",
-                            tool="httpx",
-                            log=log,
-                        )
+                    artifact = _run_httpx_group(
+                        cmd,
+                        log=log,
+                        staging_dir=staging_dir,
+                        sni=sni,
+                        row_consumer=row_consumer,
+                        combined=combined,
+                        raw_path=raw_path,
+                    )
                 except RuntimeError as exc:
                     _log(f"httpx tls-grab failed ({exc}); retrying without it", log)
                     cmd = build_httpx_command(binary, path, intensity=intensity, tls_grab=False, sni=sni or None)
-                    if staging_dir is None:
-                        rows = _parse_jsonl(_run(cmd, log))
-                    else:
-                        rows, artifact = _execute_stage(
-                            cmd,
-                            staging_dir,
-                            artifact_key="fingerprint.httpx.part",
-                            stage="fingerprint",
-                            tool="httpx",
-                            log=log,
-                        )
+                    artifact = _run_httpx_group(
+                        cmd,
+                        log=log,
+                        staging_dir=staging_dir,
+                        sni=sni,
+                        row_consumer=row_consumer,
+                        combined=combined,
+                        raw_path=raw_path,
+                    )
             finally:
                 Path(path).unlink(missing_ok=True)
-            for row in rows:
-                if sni:
-                    row["source_fqdn"] = sni
-                combined.append(row)
-            if raw_path is not None:
-                with raw_path.open("a", encoding="utf-8") as handle:
-                    for row in rows:
-                        handle.write(json.dumps(row, default=str) + "\n")
     finally:
         if raw_path is not None and raw_path.exists():
             gz_path = staging_dir / "fingerprint.httpx.jsonl.gz"
@@ -785,6 +911,52 @@ def run_httpx(
                 gz_path=gz_path,
             )
     return combined, artifact
+
+
+def _run_httpx_group(
+    cmd: list[str],
+    *,
+    log: LogFn | None,
+    staging_dir: Path | None,
+    sni: str,
+    row_consumer: RowConsumer | None,
+    combined: list[dict[str, Any]],
+    raw_path: Path | None,
+) -> dict[str, Any] | None:
+    artifact = None
+    if staging_dir is None:
+        rows = _parse_jsonl(_run(cmd, log))
+        for row in rows:
+            _emit_httpx_row(
+                row,
+                sni=sni,
+                row_consumer=row_consumer,
+                combined=combined,
+                raw_path=raw_path,
+            )
+        return None
+
+    def consume(row: dict[str, Any]) -> None:
+        _emit_httpx_row(
+            row,
+            sni=sni,
+            row_consumer=row_consumer,
+            combined=combined,
+            raw_path=raw_path,
+        )
+
+    rows, artifact = _execute_stage(
+        cmd,
+        staging_dir,
+        artifact_key="fingerprint.httpx.part",
+        stage="fingerprint",
+        tool="httpx",
+        log=log,
+        row_consumer=consume,
+    )
+    for row in rows:
+        consume(row)
+    return artifact
 
 
 def _artifact_gz_path(artifact: dict[str, Any] | None) -> Path | None:
@@ -831,6 +1003,7 @@ def run_nuclei(
     *,
     intensity: dict[str, Any] | None = None,
     staging_dir: Path | None = None,
+    finding_consumer: RowConsumer | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     if not targets:
         return [], None
@@ -848,9 +1021,20 @@ def run_nuclei(
     if not normalized:
         return [], None
     grouped = _group_by_sni(normalized)
-    all_rows: list[dict[str, Any]] = []
+    collected: list[dict[str, Any]] = []
     last_error: StageExecutionError | None = None
     raw_path = (staging_dir / "vulnerability.nuclei.jsonl") if staging_dir is not None else None
+
+    def emit_raw(raw: dict[str, Any]) -> None:
+        validate_nuclei_row(raw)
+        finding = _nuclei_finding(raw)
+        if finding is None:
+            return
+        if finding_consumer is not None:
+            finding_consumer(finding)
+        else:
+            collected.append(finding)
+
     try:
         for sni, group in grouped.items():
             with tempfile.NamedTemporaryFile("w", delete=False) as handle:
@@ -869,8 +1053,7 @@ def run_nuclei(
                     text = _run(cmd, log)
                     rows = _parse_jsonl(text, strict=True)
                     for raw in rows:
-                        validate_nuclei_row(raw)
-                    all_rows.extend(rows)
+                        emit_raw(raw)
                     continue
                 try:
                     rows, part = _execute_stage(
@@ -882,14 +1065,15 @@ def run_nuclei(
                         log=log,
                         strict_jsonl=True,
                         retain_on_failure=True,
+                        row_consumer=emit_raw,
                     )
                     for raw in rows:
-                        validate_nuclei_row(raw)
+                        emit_raw(raw)
                     _append_gzipped_jsonl(_artifact_gz_path(part), raw_path)
-                    all_rows.extend(rows)
                 except StageExecutionError as exc:
                     _append_gzipped_jsonl(_artifact_gz_path(exc.artifact), raw_path)
-                    all_rows.extend(exc.rows)
+                    for raw in exc.rows:
+                        emit_raw(raw)
                     last_error = StageExecutionError(str(exc))
                     continue
                 except JsonlParseError as exc:
@@ -912,10 +1096,10 @@ def run_nuclei(
                 part_key="vulnerability.nuclei.part",
             )
     if last_error is not None:
-        last_error.findings = _nuclei_findings(all_rows)
+        last_error.findings = [] if finding_consumer is not None else collected
         last_error.artifact = artifact
         raise last_error
-    return _nuclei_findings(all_rows), artifact
+    return collected, artifact
 
 
 def merge_devices(hosts: list[dict[str, Any]], http_info: list[dict[str, Any]], scope: str) -> list[dict[str, Any]]:
@@ -982,6 +1166,143 @@ def merge_devices(hosts: list[dict[str, Any]], http_info: list[dict[str, Any]], 
             }
         )
     return devices
+
+
+class DeviceIndex:
+    """IP-keyed device merge. RAM tracks unique hosts, not every scanner row."""
+
+    def __init__(self, scope: str):
+        self.scope = scope
+        self.ports: dict[str, set[int]] = defaultdict(set)
+        self.meta: dict[str, dict[str, str]] = {}
+        self.fqdn_by_ip: dict[str, str] = {}
+        self._devices: dict[str, dict[str, Any]] = {}
+
+    def add_host(self, row: dict[str, Any]) -> None:
+        ip = row.get("ip")
+        if not ip:
+            return
+        ip = str(ip)
+        if row.get("port"):
+            try:
+                self.ports[ip].add(int(row["port"]))
+            except (TypeError, ValueError):
+                self.ports.setdefault(ip, set())
+        else:
+            self.ports.setdefault(ip, set())
+        fqdn = str(row.get("source_fqdn") or "").strip()
+        if fqdn and ip not in self.fqdn_by_ip:
+            self.fqdn_by_ip[ip] = fqdn
+
+    def add_httpx(self, row: dict[str, Any]) -> None:
+        host = row.get("host") or row.get("input") or ""
+        ip = str(host).split("://")[-1].split(":")[0].split("/")[0]
+        if not ip:
+            raw_ip = row.get("ip")
+            ip = str(raw_ip) if raw_ip else ""
+        if not ip:
+            return
+        title = (row.get("title") or "").strip()
+        techs = row.get("tech") or []
+        if isinstance(techs, str):
+            tech = techs
+        else:
+            tech = ",".join(str(item) for item in techs if item)
+        server = (row.get("webserver") or row.get("web-server") or "").strip()
+        if server and server not in tech:
+            tech = ",".join(part for part in (tech, server) if part)
+        http_name = _http_hostname(row)
+        prev = self.meta.get(ip, {"title": "", "tech": "", "hostname": ""})
+        title = max([prev.get("title") or "", title], key=len)
+        tech_parts = []
+        for part in f"{prev.get('tech', '')},{tech}".split(","):
+            part = part.strip()
+            if part and part not in tech_parts:
+                tech_parts.append(part)
+        self.meta[ip] = {
+            "title": title,
+            "tech": ",".join(tech_parts),
+            "hostname": prev.get("hostname") or http_name,
+        }
+        if row.get("port"):
+            try:
+                self.ports[ip].add(int(row["port"]))
+            except (TypeError, ValueError):
+                pass
+        fqdn = str(row.get("source_fqdn") or "").strip()
+        if fqdn and ip not in self.fqdn_by_ip:
+            self.fqdn_by_ip[ip] = fqdn
+
+    def probe_hosts(self, targets: list[dict[str, str]]) -> list[dict[str, Any]]:
+        by_ip = _fqdns_for_ip(targets)
+        hosts: list[dict[str, Any]] = []
+        if self.ports:
+            for ip, portset in self.ports.items():
+                fqdns = by_ip.get(ip) or ([self.fqdn_by_ip[ip]] if ip in self.fqdn_by_ip else [""])
+                if not fqdns:
+                    fqdns = [""]
+                for fqdn in fqdns:
+                    if portset:
+                        for port in portset:
+                            row: dict[str, Any] = {"ip": ip, "port": port}
+                            if fqdn:
+                                row["source_fqdn"] = fqdn
+                            hosts.append(row)
+                    else:
+                        row = {"ip": ip}
+                        if fqdn:
+                            row["source_fqdn"] = fqdn
+                        hosts.append(row)
+            return hosts
+        for row in targets:
+            if row.get("type") not in {"ip", "fqdn", "cidr"}:
+                continue
+            host = {"ip": row["value"]}
+            if row.get("source_fqdn"):
+                host["source_fqdn"] = row["source_fqdn"]
+            hosts.append(host)
+        _apply_source_fqdns(hosts, targets)
+        return hosts
+
+    def nuclei_host_targets(self) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        for ip, portset in self.ports.items():
+            fqdn = self.fqdn_by_ip.get(ip, "")
+            for port in portset:
+                rows.append({"value": f"{ip}:{port}", "source_fqdn": fqdn})
+        return rows
+
+    def apply_finding(self, finding: dict[str, Any]) -> None:
+        apply_nuclei_hostnames(self.snapshot(), [finding])
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        if self._devices:
+            return [self._devices[ip] for ip in sorted(self._devices)]
+        devices = []
+        for ip, portset in sorted(self.ports.items()):
+            info = self.meta.get(ip, {})
+            devices.append(
+                {
+                    "ip": ip,
+                    "scope": self.scope,
+                    "ports": sorted(portset),
+                    "hostname": info.get("hostname") or self.fqdn_by_ip.get(ip, ""),
+                    "title": info.get("title", ""),
+                    "tech": info.get("tech", ""),
+                    "auto_label": "",
+                }
+            )
+        self.replace_devices(devices)
+        return devices
+
+    def replace_devices(self, devices: list[dict[str, Any]]) -> None:
+        self._devices = {str(row.get("ip")): row for row in devices if row.get("ip")}
+
+    def finalize(self) -> list[dict[str, Any]]:
+        devices = self.snapshot()
+        finalize_devices(devices)
+        self.replace_devices(devices)
+        return devices
 
 
 def _http_hostname(row: dict[str, Any]) -> str:

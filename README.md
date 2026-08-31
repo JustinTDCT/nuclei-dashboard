@@ -8,7 +8,9 @@ The platform is designed so that an entry-level technician can follow the normal
 
 > **Important:** Only scan systems and networks that you are authorized to assess.
 
-`MASTER_PLAN.md` is the canonical architecture and product source of truth. Development, migration, TLS, and upgrade notes are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+To get a working system: [install the central server](#install-the-central-server), then [add a remote Site Agent](#add-a-remote-site-agent) if you need LAN scans.
+
+`MASTER_PLAN.md` is the architecture and product source of truth. Developer migration, TLS, and upgrade notes are in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ---
 
@@ -19,9 +21,8 @@ The platform is designed so that an entry-level technician can follow the normal
 - [Core capabilities](#core-capabilities)
 - [How the system is organized](#how-the-system-is-organized)
 - [Scanning workflow](#scanning-workflow)
-- [Installation overview](#installation-overview)
-- [Part 1 — Central Server Installation](#part-1--central-server-installation)
-- [Part 2 — Site Agent Installation](#part-2--site-agent-installation)
+- [Install the central server](#install-the-central-server)
+- [Add a remote Site Agent](#add-a-remote-site-agent)
 - [Creating and running scans](#creating-and-running-scans)
 - [Scanner and template version control](#scanner-and-template-version-control)
 - [Raw scan evidence](#raw-scan-evidence)
@@ -360,7 +361,7 @@ Central API
 | `web` | React frontend |
 | `scanner` | Central WAN scanner |
 | `caddy` | HTTPS entry point / reverse proxy |
-| `nuclei-agent` | Optional LAN Agent profile; normally deployed separately at client Sites |
+| `nuclei-agent` | Not started on the central host. Deploy a remote Agent from the dashboard instead. |
 
 The central API automatically applies the repository's Alembic schema on startup. A normal Docker installation does **not** require a separate manual `alembic upgrade head`.
 
@@ -385,339 +386,186 @@ A normal technician workflow is:
 
 ---
 
-# Installation overview
+# Install the central server
 
-Installation is intentionally split into two independent stages.
+Do this first. Do not start a remote Agent until the dashboard opens over HTTPS and `/api/health` returns `{"ok":true}`.
 
-```text
-PART 1
-Central Server
-    |
-    |  Get this fully working first
-    v
-Dashboard reachable over HTTPS
-Admin can sign in
-API health returns OK
-Central WAN scanner is running
-    |
-    v
-PART 2
-Site Agent
-    |
-    |  Deploy after the central server works
-    v
-Agent enrolls
-Agent is approved
-Agent is authorized for LAN Networks
-Agent becomes available for LAN scans
-```
+When this section is done you will have:
 
-Do **not** begin Agent troubleshooting until the central server is healthy and reachable at the exact URL the Agent will use.
+- the dashboard in a browser at `https://YOUR_SERVER:8118`
+- an administrator login
+- PostgreSQL, the API, the web UI, Caddy, and the central WAN scanner running
+- one Tenant, one Site, and one LAN Network ready for an Agent later
+
+A Site Agent is **not** required to start the server. WAN scans use the central scanner. LAN scans need [Add a remote Site Agent](#add-a-remote-site-agent) after this section.
 
 ---
 
-# Part 1 — Central Server Installation
+## What you need
 
-This section gets the **core Nuclei Dashboard server** running.
+Use a Linux host with Docker for a real install (Ubuntu 22.04/24.04 is a good default). Docker Desktop or Colima on a Mac is fine for a first lab.
 
-When Part 1 is complete, you should have:
+You need:
 
-- PostgreSQL running;
-- the FastAPI backend running;
-- the React frontend running;
-- Caddy serving the dashboard over HTTPS;
-- the central WAN scanner running;
-- the database schema automatically migrated;
-- a working administrator login;
-- `/api/health` returning `{"ok":true}`.
-
-The central server does **not** require a Site Agent in order to start.
-
----
-
-## 1.1 Central server requirements
-
-A Linux Docker host is recommended.
-
-The central server needs:
-
-- Docker Engine
-- Docker Compose v2 (`docker compose`)
+- a computer you can SSH to (or sit at)
 - Git
-- OpenSSL for certificate generation/inspection
-- TCP port **8118** available
-- inbound TCP 8118 from administrators who use the dashboard
-- inbound TCP 8118 from Site Agents
-- outbound Internet access during scanner image builds
-- enough storage for PostgreSQL
-- enough storage for retained raw scan evidence
-- a TLS certificate and matching private key
+- Docker Engine and Docker Compose v2 (`docker compose`, not the old `docker-compose`)
+- OpenSSL (to create secrets and, for a first lab, a certificate)
+- **TCP port 8118** free on this host
+- inbound TCP 8118 from the browsers that will use the dashboard
+- inbound TCP 8118 from any Site Agent you add later
+- outbound Internet during the first image build (Nuclei, Naabu, httpx, and templates are downloaded once and pinned)
+- disk for PostgreSQL and retained raw scan evidence
 
-Supported scanner build architectures:
+You also need the address others will use to reach this host: a DNS name **or** the host’s IP. Do not use `localhost` or `127.0.0.1` if Agents or other machines will connect.
 
-- `amd64` / `x86_64`
-- `arm64` / `aarch64`
-
-The TLS certificate may be:
-
-- publicly trusted;
-- issued by your organization's internal CA; or
-- self-signed.
+Only scan networks you are authorized to assess.
 
 ---
 
-## 1.2 Clone the repository
+## 1. Install Docker, Git, and OpenSSL (if they are missing)
+
+On Ubuntu or Debian:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl git openssl
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER"
+```
+
+Log out and log back in (or reboot) so the `docker` group applies. Then check:
+
+```bash
+git --version
+openssl version
+docker --version
+docker compose version
+```
+
+You should see `Docker Compose version v2` or newer.
+
+If `docker` says permission denied, either log out and back in again or prefix commands with `sudo`.
+
+---
+
+## 2. Clone the repository
+
+```bash
+cd ~
 git clone https://github.com/JustinTDCT/nuclei-dashboard.git
 cd nuclei-dashboard
 ```
 
+Later commands in this section assume you are in that directory.
+
 ---
 
-## 1.3 Create the central environment file
+## 3. Find the address the dashboard will use
 
-Copy the example:
+On the server:
+
+```bash
+hostname -I
+```
+
+Pick the IP that other machines can actually reach. If you have a DNS name that points at this host, use the name instead.
+
+Examples used below:
+
+```text
+YOUR_SERVER=10.20.30.40
+```
+
+or:
+
+```text
+YOUR_SERVER=nuclei.example.com
+```
+
+Replace those with your values everywhere they appear.
+
+---
+
+## 4. Create `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Edit it:
+The example file may contain a lab IP such as `10.150.10.155`. That is **not** a default you should keep. Replace it with `YOUR_SERVER`.
+
+Generate four different secrets:
+
+```bash
+openssl rand -hex 32
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+Use a different output for each of `POSTGRES_PASSWORD`, `SECRET_KEY`, and `SCANNER_TOKEN`. The API will not start if those are empty, the word `changeme`, or copied from each other.
+
+Open the file:
 
 ```bash
 nano .env
 ```
 
-or:
-
-```bash
-vi .env
-```
-
-At minimum, set these to unique strong values. The API refuses to start if `SECRET_KEY`, `SCANNER_TOKEN`, or the database password is empty, a known placeholder such as `changeme`, or reused across those credentials. `ADMIN_PASSWORD` is required only to create the first administrator:
+Set at least:
 
 ```dotenv
-POSTGRES_PASSWORD=use-a-strong-database-password
+POSTGRES_USER=nuclei
+POSTGRES_PASSWORD=paste-the-first-openssl-value
+POSTGRES_DB=nuclei
 
-SECRET_KEY=use-a-long-random-secret
-SCANNER_TOKEN=use-a-different-long-random-secret
+SECRET_KEY=paste-the-second-openssl-value
+SCANNER_TOKEN=paste-the-third-openssl-value
 
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=use-a-strong-admin-password
-ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=choose-a-strong-admin-password
+ADMIN_EMAIL=admin@localhost
 
-PUBLIC_URL=https://dashboard.example.com:8118
-SITE_ADDRESS=https://dashboard.example.com:8118
+PUBLIC_URL=https://YOUR_SERVER:8118
+SITE_ADDRESS=https://YOUR_SERVER:8118
+
+AGENT_TLS_VERIFY=1
+SCAN_DRY_RUN=0
 ```
 
-Compose also fails closed if those secret variables are unset. Copying `.env.example` unchanged is not a working production configuration.
+`PUBLIC_URL` and `SITE_ADDRESS` must be the same URL people type in a browser, including `https://` and `:8118`.
 
-### Important: replace the example IP
-
-The current `.env.example` contains the environment-specific address:
-
-```text
-10.150.10.155
-```
-
-Do **not** leave that value in a new installation unless that is actually your server's address.
-
-Use the hostname or IP technicians and Agents will really use.
-
-Examples:
-
-```dotenv
-PUBLIC_URL=https://nuclei.example.com:8118
-SITE_ADDRESS=https://nuclei.example.com:8118
-```
-
-or:
-
-```dotenv
-PUBLIC_URL=https://10.20.30.40:8118
-SITE_ADDRESS=https://10.20.30.40:8118
-```
-
-### Generate strong random values
-
-Example:
+Leave `SETTINGS_ENCRYPTION_KEY` empty until you store an SMTP password in **Admin → Settings**. If you add an SMTP password later, generate a Fernet key first:
 
 ```bash
-openssl rand -hex 32
+python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
 ```
 
-Run it separately for:
+Put that value in `SETTINGS_ENCRYPTION_KEY` and recreate the API container. Do not reuse `SECRET_KEY` or `SCANNER_TOKEN` for it.
 
-- `SECRET_KEY`
-- `SCANNER_TOKEN`
-
-Use separate strong passwords for:
-
-- `POSTGRES_PASSWORD`
-- `ADMIN_PASSWORD`
-
-Do not reuse one secret everywhere.
-
-> `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `ADMIN_EMAIL` seed the first administrator on an empty database. After that user exists, `ADMIN_PASSWORD` may be removed from the environment. Changing those environment values later is not the normal procedure for resetting an existing administrator password.
+Save the file (`Ctrl+O`, Enter, `Ctrl+X` in nano).
 
 ---
 
-## 1.4 Choose the central server certificate method
+## 5. Create a TLS certificate
 
-Caddy requires these exact files:
+Caddy will not start without both of these files:
 
 ```text
-./certs/cert.pem
-./certs/key.pem
+certs/cert.pem
+certs/key.pem
 ```
-
-Create the directory first:
 
 ```bash
 mkdir -p certs
 ```
 
-Choose **one** of the following certificate methods.
+Choose **one** method.
 
----
+### Fastest first install: self-signed certificate
 
-## 1.4A Publicly trusted certificate
+This encrypts traffic. Browsers and Agents will not trust it until you import the public certificate. Use this for a lab or a first bring-up.
 
-Use this option if you already have a certificate from a public CA.
-
-Copy the certificate/chain:
-
-```bash
-cp /path/to/server-cert.pem certs/cert.pem
-```
-
-Copy the matching private key:
-
-```bash
-cp /path/to/server-key.pem certs/key.pem
-```
-
-Protect the private key:
-
-```bash
-chmod 600 certs/key.pem
-chmod 644 certs/cert.pem
-```
-
-The certificate must contain the hostname used in `PUBLIC_URL`.
-
-Example:
-
-```dotenv
-PUBLIC_URL=https://nuclei.example.com:8118
-```
-
-requires a certificate valid for:
-
-```text
-nuclei.example.com
-```
-
----
-
-## 1.4B Internal CA certificate
-
-Use this option if your organization already operates an internal/private certificate authority.
-
-Issue a server certificate for the exact hostname or IP used in:
-
-```dotenv
-PUBLIC_URL=
-```
-
-Copy the issued server certificate/chain:
-
-```bash
-cp /path/to/server-cert.pem certs/cert.pem
-```
-
-Copy the matching server private key:
-
-```bash
-cp /path/to/server-key.pem certs/key.pem
-```
-
-Protect the key:
-
-```bash
-chmod 600 certs/key.pem
-chmod 644 certs/cert.pem
-```
-
-Agents will later need the **CA certificate** that issued this server certificate.
-
-Do **not** copy the central server's private key to an Agent.
-
----
-
-## 1.4C Self-signed certificate
-
-Use this option for a lab, test environment, small internal deployment, or another environment where you can explicitly trust the certificate on every browser and Agent.
-
-A self-signed certificate still encrypts traffic, but it is not trusted automatically.
-
-### Example: hostname and IP
-
-Assume the dashboard will be reached as:
-
-```text
-https://nuclei-dashboard.example.local:8118
-```
-
-and the server IP is:
-
-```text
-10.20.30.40
-```
-
-Run:
-
-```bash
-openssl req -x509 \
-  -newkey rsa:4096 \
-  -sha256 \
-  -days 825 \
-  -nodes \
-  -keyout certs/key.pem \
-  -out certs/cert.pem \
-  -subj "/CN=nuclei-dashboard.example.local" \
-  -addext "subjectAltName=DNS:nuclei-dashboard.example.local,IP:10.20.30.40" \
-  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
-  -addext "extendedKeyUsage=serverAuth"
-```
-
-Replace:
-
-```text
-nuclei-dashboard.example.local
-10.20.30.40
-```
-
-with your real values.
-
-### Hostname only
-
-```bash
-openssl req -x509 \
-  -newkey rsa:4096 \
-  -sha256 \
-  -days 825 \
-  -nodes \
-  -keyout certs/key.pem \
-  -out certs/cert.pem \
-  -subj "/CN=nuclei-dashboard.example.local" \
-  -addext "subjectAltName=DNS:nuclei-dashboard.example.local" \
-  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
-  -addext "extendedKeyUsage=serverAuth"
-```
-
-### IP only
+**IP address:**
 
 ```bash
 openssl req -x509 \
@@ -733,75 +581,81 @@ openssl req -x509 \
   -addext "extendedKeyUsage=serverAuth"
 ```
 
-### Protect the self-signed private key
+**DNS name:**
+
+```bash
+openssl req -x509 \
+  -newkey rsa:4096 \
+  -sha256 \
+  -days 825 \
+  -nodes \
+  -keyout certs/key.pem \
+  -out certs/cert.pem \
+  -subj "/CN=nuclei.example.com" \
+  -addext "subjectAltName=DNS:nuclei.example.com" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+  -addext "extendedKeyUsage=serverAuth"
+```
+
+Replace the IP or hostname with `YOUR_SERVER`. The name or IP in `PUBLIC_URL` **must** appear in the certificate SAN.
 
 ```bash
 chmod 600 certs/key.pem
 chmod 644 certs/cert.pem
+openssl x509 -in certs/cert.pem -noout -text | grep -A2 "Subject Alternative Name"
 ```
 
-### Verify the certificate SAN
+### Publicly trusted certificate
+
+Copy your issued certificate (and chain, if required) and the matching private key:
 
 ```bash
-openssl x509 \
-  -in certs/cert.pem \
-  -noout \
-  -text | grep -A2 "Subject Alternative Name"
+cp /path/to/server-cert.pem certs/cert.pem
+cp /path/to/server-key.pem certs/key.pem
+chmod 600 certs/key.pem
+chmod 644 certs/cert.pem
 ```
 
-The exact hostname/IP used in `PUBLIC_URL` must appear in the SAN.
+The certificate must be valid for the hostname in `PUBLIC_URL`.
 
-### Verify the certificate and key match
+### Internal / private CA
 
-```bash
-openssl x509 -noout -modulus -in certs/cert.pem | openssl sha256
-openssl rsa  -noout -modulus -in certs/key.pem  | openssl sha256
-```
+Issue a server certificate for the same hostname or IP as `PUBLIC_URL`. Copy the **server** cert and key into `certs/` as above.
 
-The two hashes should match.
-
-### Configure `.env`
-
-Example:
-
-```dotenv
-PUBLIC_URL=https://nuclei-dashboard.example.local:8118
-SITE_ADDRESS=https://nuclei-dashboard.example.local:8118
-```
+Keep the **CA** certificate for Agents and administrator browsers. Never copy `certs/key.pem` to an Agent.
 
 ---
 
-## 1.5 Verify certificate files exist
+## 6. Open port 8118 if a firewall is on
 
-From the repository root:
+Ubuntu with `ufw`:
 
 ```bash
-ls -l certs/cert.pem certs/key.pem
+sudo ufw allow 8118/tcp
+sudo ufw status
 ```
 
-Both files must exist before Caddy can start correctly.
+On a cloud VM, also allow TCP 8118 in that provider’s security group.
 
 ---
 
-## 1.6 Validate the Compose configuration
+## 7. Start the central stack
+
+Confirm Compose can read your files:
 
 ```bash
-docker compose config
+docker compose config >/dev/null && echo "compose ok"
 ```
 
-Resolve errors before continuing.
-
----
-
-## 1.7 Build and start the central server
-
-Run:
+Start everything:
 
 ```bash
 docker compose up -d --build
 ```
 
-The central stack starts:
+The first build downloads pinned Naabu, ProjectDiscovery httpx, Nuclei, and Nuclei templates. That often takes **10–20 minutes**. Leave it running.
+
+These five services should start:
 
 ```text
 postgres
@@ -811,698 +665,373 @@ scanner
 caddy
 ```
 
-The first scanner image build downloads the pinned:
-
-- Naabu release
-- ProjectDiscovery httpx release
-- Nuclei release
-- Nuclei templates release
-
-The build does not intentionally follow ProjectDiscovery `latest`.
+Do not start the optional `nuclei-agent` profile on this host. That is not how you add a remote Site Agent.
 
 ---
 
-## 1.8 Confirm containers are running
+## 8. Confirm it is healthy
 
 ```bash
 docker compose ps
 ```
 
-Expected central services:
+Every service above should be running (or healthy). Then:
 
-```text
-postgres
-api
-web
-scanner
-caddy
+**Publicly trusted certificate**
+
+```bash
+curl https://YOUR_SERVER:8118/api/health
 ```
 
-The optional `nuclei-agent` profile is not required for the central server.
+**Self-signed certificate** (use the public cert you just created)
 
----
+```bash
+curl --cacert certs/cert.pem https://YOUR_SERVER:8118/api/health
+```
 
-## 1.9 Check central server logs
+**Internal CA**
 
-API:
+```bash
+curl --cacert /path/to/internal-ca.pem https://YOUR_SERVER:8118/api/health
+```
+
+You want:
+
+```json
+{"ok":true}
+```
+
+If that fails:
 
 ```bash
 docker compose logs --tail=100 api
-```
-
-Caddy:
-
-```bash
 docker compose logs --tail=100 caddy
 ```
 
-WAN scanner:
+Typical problems:
 
-```bash
-docker compose logs --tail=100 scanner
-```
+- `.env` still has empty or placeholder secrets
+- `certs/cert.pem` or `certs/key.pem` missing
+- `PUBLIC_URL` / `SITE_ADDRESS` still set to the example lab IP
+- port 8118 blocked
+- first build still running (`docker compose logs -f scanner`)
 
-Follow them live:
-
-```bash
-docker compose logs -f api caddy scanner
-```
+Do not use `curl -k` as your normal check. It hides certificate mistakes that will break Agents later.
 
 ---
 
-## 1.10 Verify API health
+## 9. Sign in
+
+In a browser open exactly the URL from `PUBLIC_URL`, for example:
+
+```text
+https://10.20.30.40:8118
+```
+
+Sign in with `ADMIN_USERNAME` and `ADMIN_PASSWORD` from `.env`.
+
+If you used a self-signed certificate, the browser will warn until you trust `certs/cert.pem` (the public file only — never `certs/key.pem`). A permanent certificate warning is not the intended production state.
+
+`ADMIN_USERNAME` / `ADMIN_PASSWORD` / `ADMIN_EMAIL` create the first administrator on an empty database. After that user exists you can remove `ADMIN_PASSWORD` from `.env`. Changing those variables later does **not** reset an existing admin password.
+
+---
+
+## 10. Point Agents at this server
+
+In the left sidebar open **Admin → Settings**.
+
+Set:
+
+- **Central host or IP** — `YOUR_SERVER` (the same name or IP as in `PUBLIC_URL`, without `https://`)
+- **Central port** — `8118`
+- **Agents use HTTPS** — checked
+
+Save.
+
+Do not put `localhost` or `127.0.0.1` here. Remote Agents cannot reach those addresses.
+
+SMTP, retention, scanner limits, and approved scanner versions can wait. You can leave them at the defaults for a first install.
+
+---
+
+## 11. Create the first Tenant, Site, and LAN Network
+
+These are required before a remote Agent can do LAN work. WAN-only use still needs a Tenant.
+
+1. Open **Tenants**.
+2. Enter a name such as `Acme Manufacturing` and click **Create tenant**.
+3. Click the new Tenant.
+4. Open the **sites** tab.
+5. Enter a Site name such as `Hartford Headquarters` and click **Create site**.
+6. Under **Networks**, enter a name such as `Corporate LAN` and a CIDR such as `10.20.0.0/24`, then click **Add network**.
+
+The CIDR must be a network you are authorized to scan from a future Agent at that Site.
+
+Optional: open the **WAN targets** tab and add a public IP, public CIDR, or FQDN. Private, loopback, link-local, multicast, reserved, cloud-metadata, and ranges larger than 65,536 addresses are rejected.
+
+---
+
+## Central server checklist
+
+```text
+[ ] docker compose ps shows postgres, api, web, scanner, and caddy running
+[ ] curl https://YOUR_SERVER:8118/api/health returns {"ok":true}
+[ ] the dashboard opens in a browser
+[ ] you can sign in as the administrator
+[ ] Admin → Settings has the reachable central host and port 8118
+[ ] a Tenant exists
+[ ] that Tenant has a Site
+[ ] that Site has an authorized LAN Network
+```
+
+The **central server is installed**. Continue only when every box is checked.
+
+---
+
+# Add a remote Site Agent
+
+A Site Agent is a small Docker worker you place **on the customer LAN**. It makes outbound HTTPS to the dashboard on TCP 8118, then runs Naabu / httpx / Nuclei against Networks you authorize.
+
+Start this section only after the [central server](#install-the-central-server) is healthy at the **same URL** the Agent will use.
+
+---
+
+## What the Agent host needs
+
+- Linux with Docker Engine and Docker Compose v2 (same install as step 1 of the server, if needed)
+- outbound HTTPS to `https://YOUR_SERVER:8118`
+- outbound Internet for the **first** image build
+- reachability to the LAN CIDRs this Agent will scan
+- disk for the image and two Docker volumes (`agent-keys`, `nuclei-templates`)
+
+The downloaded Compose file uses `network_mode: host` so the Agent can see site RFC1918 addresses. Keep that unless you have a tested alternative.
+
+You do **not** copy the whole Nuclei Dashboard repo onto the Agent host.
+
+---
+
+## 1. Prove the Agent host can reach the dashboard
+
+On the **Agent** machine:
+
+**Public certificate**
+
+```bash
+curl https://YOUR_SERVER:8118/api/health
+```
+
+**Self-signed** (copy `certs/cert.pem` from the server first; see step 4)
+
+```bash
+curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
+```
+
+**Internal CA**
+
+```bash
+curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
+```
+
+You want `{"ok":true}`. If you do not have `agent-certs/ca.pem` yet, use the public-certificate curl or finish step 4 first. If this fails, fix DNS, routing, firewall, or TLS before creating a container.
+
+---
+
+## 2. Create the Agent in the dashboard
+
+On a computer that can open the dashboard:
+
+1. Open **Tenants** and click the client.
+2. Open the **agents** tab (or the **sites** tab — both can create an Agent).
+3. Enter an Agent name such as `Agent-HQ-01`.
+4. Select the Site you created earlier.
+5. Click **Create agent**.
+
+The page shows a UUID and an enrollment secret. Treat the secret like a password.
+
+Immediately download both files:
+
+- **Download docker-compose.yml** — saved as `agent-<UUID>.yml`
+- **Download .env** — saved as `agent-<UUID>.env`
+
+The enrollment secret is already inside the `.env` file. You will not need to type it by hand.
+
+---
+
+## 3. Copy the files onto the Agent host
+
+On the Agent host:
+
+```bash
+mkdir -p ~/nuclei-agent
+```
+
+Copy the two downloaded files into that directory (USB, `scp`, etc.). Example from the machine that downloaded them:
+
+```bash
+scp agent-********-****-****-****-************.yml \
+    agent-********-****-****-****-************.env \
+    user@AGENT_HOST:~/nuclei-agent/
+```
+
+On the Agent host, rename them so everyday commands stay short:
+
+```bash
+cd ~/nuclei-agent
+mv agent-*.yml docker-compose.yml
+mv agent-*.env agent.env
+chmod 600 agent.env
+```
+
+If you prefer to keep the UUID filenames, use `-f agent-<UUID>.yml --env-file agent-<UUID>.env` on every `docker compose` command instead.
+
+Open `agent.env` and confirm:
+
+```dotenv
+CENTRAL_URL=https://YOUR_SERVER:8118
+TLS_VERIFY=1
+```
+
+`CENTRAL_URL` must match the working `curl` URL from step 1.
+
+---
+
+## 4. Trust the server certificate (if it is not public)
 
 ### Publicly trusted certificate
 
+Nothing else to copy. Skip to step 5.
+
+### Self-signed certificate
+
+On the **central server**, the public certificate is `certs/cert.pem`. Copy **only that file** to the Agent host. Do not copy `certs/key.pem`.
+
 ```bash
-curl https://dashboard.example.com:8118/api/health
+cd ~/nuclei-agent
+mkdir -p agent-certs
+# after you have copied cert.pem onto this host:
+cp /path/to/copied-central-cert.pem agent-certs/ca.pem
+```
+
+Edit `agent.env` and set:
+
+```dotenv
+TLS_VERIFY=1
+TLS_CA_FILE=/certs/ca.pem
+```
+
+`/certs/ca.pem` is the path **inside** the container. The Compose file mounts `./agent-certs` there.
+
+Test again:
+
+```bash
+curl --cacert ./agent-certs/ca.pem https://YOUR_SERVER:8118/api/health
 ```
 
 ### Internal CA
 
-```bash
-curl --cacert /path/to/internal-ca.pem \
-  https://dashboard.example.com:8118/api/health
-```
+Put the **CA** certificate (the issuer, not the server private key) at `~/nuclei-agent/agent-certs/ca.pem` and set the same `TLS_CA_FILE` line.
 
-### Self-signed certificate
+### Lab-only bypass
 
-Use the public self-signed certificate itself as the trust anchor:
-
-```bash
-curl --cacert certs/cert.pem \
-  https://nuclei-dashboard.example.local:8118/api/health
-```
-
-Expected response:
-
-```json
-{"ok":true}
-```
-
-Do not use `curl -k` as normal production validation because it disables certificate verification.
+`TLS_VERIFY=0` turns verification off. Use it only for temporary lab debugging, not as a normal setting.
 
 ---
 
-## 1.11 Open the dashboard
-
-Browse to the exact URL configured in `PUBLIC_URL`.
-
-Example:
-
-```text
-https://nuclei-dashboard.example.local:8118
-```
-
-Sign in with:
-
-```text
-ADMIN_USERNAME
-ADMIN_PASSWORD
-```
-
-from `.env`.
-
-Do not assume:
-
-```text
-https://localhost:8118
-```
-
-will work unless the certificate is valid for `localhost`.
-
----
-
-## 1.12 Trust a self-signed certificate on administrator workstations
-
-If you used a self-signed certificate, browsers will normally warn until the certificate is trusted.
-
-Distribute only:
-
-```text
-certs/cert.pem
-```
-
-to managed administrator workstations and import it into the trusted certificate store according to your organization's procedures.
-
-Never distribute:
-
-```text
-certs/key.pem
-```
-
-A permanent browser certificate warning should not be treated as normal operation.
-
----
-
-## 1.13 Complete the first central configuration
-
-After login, open:
-
-**Admin → Settings**
-
-Review:
-
-- Central host/IP
-- Central port
-- Agents use HTTPS
-- SMTP settings
-- Default timezone
-- Scanner limits
-- Raw evidence retention
-- Approved scanner versions
-- Vulnerability intelligence options
-
-The Agent-facing central host must be reachable from remote Sites.
-
-Do not use:
-
-```text
-localhost
-127.0.0.1
-```
-
-for remote Agents.
-
----
-
-## 1.14 Create the first Tenant and Site
-
-Example Tenant:
-
-```text
-Acme Manufacturing
-```
-
-Example Site:
-
-```text
-Hartford Headquarters
-```
-
-Add authorized LAN Networks to the Site.
-
-Example:
-
-```text
-Corporate LAN
-10.20.0.0/24
-```
-
-If WAN scanning is needed, add authorized WAN Targets separately. WAN targets must be public IP/CIDR/FQDN scope — private, loopback, link-local, multicast, reserved, cloud-metadata, IPv4-mapped IPv6, and ranges larger than 65,536 addresses (`0.0.0.0/0`, IPv6 `/32`) are rejected. Authorized FQDNs are pinned to resolved IPs for the connection and still use the original hostname for HTTP Host / TLS SNI.
-
-At this point the **central server installation is complete**.
-
-Before moving to Part 2, verify all of the following:
-
-```text
-[ ] docker compose ps shows the central services running
-[ ] /api/health returns {"ok":true}
-[ ] the dashboard opens over HTTPS
-[ ] certificate validation works
-[ ] administrator login works
-[ ] Central host/port in Admin Settings is correct
-[ ] a Tenant exists
-[ ] a Site exists
-[ ] authorized LAN Networks are configured
-```
-
----
-
-# Part 2 — Site Agent Installation
-
-This section starts **after the central server is already working**.
-
-A Site Agent performs LAN scanning from inside a customer/client Site.
-
-The Agent:
-
-- runs on Linux with Docker;
-- makes outbound HTTPS connections to the central server;
-- does not need the full central application copied locally;
-- builds the scanner runtime from the GitHub repository;
-- keeps its private Agent identity key in a Docker volume;
-- must be approved and authorized before it can perform normal LAN work.
-
----
-
-## 2.1 Site Agent requirements
-
-The remote Agent host needs:
-
-- Linux
-- Docker Engine
-- Docker Compose v2
-- outbound HTTPS access to the central dashboard on TCP 8118
-- outbound Internet access during Agent image builds
-- network reachability to the LAN Networks it is authorized to scan
-- enough local storage for the Docker image and Agent volumes
-
-The generated Agent configuration uses:
-
-```yaml
-network_mode: host
-```
-
-Keep host networking unless you deliberately redesign and validate LAN reachability.
-
----
-
-## 2.2 Verify the central server from the Agent host
-
-Do this **before creating/troubleshooting the Agent container**.
-
-### Public certificate
-
-```bash
-curl https://dashboard.example.com:8118/api/health
-```
-
-Expected:
-
-```json
-{"ok":true}
-```
-
-If this does not work, fix:
-
-- DNS;
-- routing;
-- firewall;
-- central server;
-- certificate validity;
-
-before continuing.
-
----
-
-## 2.3 Create the Agent in Nuclei Dashboard
-
-In the dashboard:
-
-1. Open the correct Tenant.
-2. Open/select the correct Site.
-3. Create a new Agent.
-
-The Agent receives:
-
-- a UUID;
-- an enrollment secret.
-
-Treat the enrollment material as sensitive.
-
----
-
-## 2.4 Download the Agent deployment files
-
-Download:
-
-- **Compose**
-- **Env**
-
-The current UI downloads names similar to:
-
-```text
-agent-<UUID>.yml
-agent-<UUID>.env
-```
-
-There are two deployment methods.
-
----
-
-## 2.5 Option A — Keep the downloaded filenames
-
-On the Agent host:
-
-```bash
-mkdir -p ~/nuclei-agent
-cd ~/nuclei-agent
-```
-
-Copy both downloaded files into that directory.
-
-Run:
-
-```bash
-docker compose \
-  -f agent-<UUID>.yml \
-  --env-file agent-<UUID>.env \
-  up -d --build
-```
-
-Example:
-
-```bash
-docker compose \
-  -f agent-12345678-1234-1234-1234-123456789abc.yml \
-  --env-file agent-12345678-1234-1234-1234-123456789abc.env \
-  up -d --build
-```
-
----
-
-## 2.6 Option B — Rename the Agent files
-
-This is usually easier for ongoing maintenance.
-
-```bash
-mkdir -p ~/nuclei-agent
-cd ~/nuclei-agent
-```
-
-Copy the downloaded files into the directory and rename them:
-
-```bash
-mv agent-<UUID>.yml docker-compose.yml
-mv agent-<UUID>.env agent.env
-```
-
-Do not start the Agent yet if you still need to configure certificate trust.
-
----
-
-## 2.7 Configure Agent certificate trust
-
-Choose the method that matches the certificate used on the central server.
-
----
-
-## 2.7A Central server uses a publicly trusted certificate
-
-Normally no extra CA file is required.
-
-Confirm `agent.env` points to the correct URL:
-
-```dotenv
-CENTRAL_URL=https://dashboard.example.com:8118
-TLS_VERIFY=1
-```
-
-Then continue to [2.8 Start the Agent](#28-start-the-agent).
-
----
-
-## 2.7B Central server uses an internal CA
-
-The Agent must trust the CA that issued the central server certificate.
-
-From the Agent directory:
-
-```bash
-mkdir -p agent-certs
-```
-
-Copy the **CA certificate**, not the central server private key:
-
-```bash
-cp /path/to/internal-ca.pem agent-certs/ca.pem
-```
-
-Edit `agent.env`:
-
-```dotenv
-CENTRAL_URL=https://nuclei-dashboard.example.local:8118
-TLS_VERIFY=1
-TLS_CA_FILE=/certs/ca.pem
-```
-
-Test from the Agent host:
-
-```bash
-curl --cacert ./agent-certs/ca.pem \
-  https://nuclei-dashboard.example.local:8118/api/health
-```
-
-Expected:
-
-```json
-{"ok":true}
-```
-
----
-
-## 2.7C Central server uses a self-signed certificate
-
-The Agent must explicitly trust the public self-signed certificate.
-
-On the **central server**, the public certificate is:
-
-```text
-certs/cert.pem
-```
-
-Copy only that public certificate to the Site Agent host.
-
-Do **not** copy:
-
-```text
-certs/key.pem
-```
-
-On the Agent host:
+## 5. Start the Agent
 
 ```bash
 cd ~/nuclei-agent
-mkdir -p agent-certs
-```
-
-Place the central public certificate at:
-
-```text
-agent-certs/ca.pem
-```
-
-Example:
-
-```bash
-cp /path/to/copied-central-cert.pem agent-certs/ca.pem
-```
-
-Edit `agent.env`:
-
-```dotenv
-CENTRAL_URL=https://nuclei-dashboard.example.local:8118
-TLS_VERIFY=1
-TLS_CA_FILE=/certs/ca.pem
-```
-
-Test certificate validation from the Agent host:
-
-```bash
-curl --cacert ./agent-certs/ca.pem \
-  https://nuclei-dashboard.example.local:8118/api/health
-```
-
-Expected:
-
-```json
-{"ok":true}
-```
-
-If validation fails, check:
-
-1. `CENTRAL_URL` uses a hostname/IP present in the certificate SAN.
-2. DNS resolves correctly.
-3. TCP 8118 is reachable.
-4. `agent-certs/ca.pem` is the correct public certificate.
-5. The certificate is not expired.
-
----
-
-## 2.7D Lab-only TLS verification bypass
-
-For temporary lab troubleshooting only:
-
-```dotenv
-TLS_VERIFY=0
-```
-
-Do not use disabled TLS verification as the normal production configuration.
-
----
-
-## 2.8 Start the Agent
-
-### If using renamed files
-
-```bash
 docker compose --env-file agent.env up -d --build
 ```
 
-### If keeping the UUID filenames
-
-```bash
-docker compose \
-  -f agent-<UUID>.yml \
-  --env-file agent-<UUID>.env \
-  up -d --build
-```
-
-The first build installs the project's pinned:
-
-- Naabu
-- ProjectDiscovery httpx
-- Nuclei
-- Nuclei templates
-
----
-
-## 2.9 Verify the Agent container
+The first build pulls the pinned `scan_runtime` commit from GitHub and installs the same scanner tools as the central scanner. That can take a while.
 
 ```bash
 docker compose ps
-```
-
-View logs:
-
-```bash
 docker compose logs -f nuclei-agent
 ```
 
-The Agent should:
+You should see the Agent connect and enroll, then wait for approval. `Ctrl+C` stops following logs; the container keeps running.
 
-1. connect to the central server;
-2. enroll;
-3. wait for approval.
+If the container name is not `nuclei-agent`, `docker compose ps` will show the actual name.
 
 ---
 
-## 2.10 Approve the Agent
+## 6. Approve the Agent
 
-Back in Nuclei Dashboard:
+Back in the dashboard, **Tenants → (client) → agents**:
 
-1. Locate the Agent.
-2. Confirm its Site and identity.
-3. Confirm it is the Agent you just deployed.
-4. Approve it.
+1. Find the Agent. Status should be pending approval after a successful enroll.
+2. Confirm the UUID matches the files you deployed.
+3. Click **Approve**.
 
-After approval, the enrollment secret is no longer the Agent's normal authentication mechanism.
-
----
-
-## 2.11 Authorize the Agent for LAN Networks
-
-Approval does not mean unrestricted scanning.
-
-Configure the Agent for the Networks it is allowed to scan.
-
-Verify:
-
-- Agent belongs to the correct Site;
-- Network belongs to the correct Site;
-- Agent is authorized for that Network;
-- dispatch mode is correct.
-
-Available dispatch models include:
-
-- Any Available
-- Preferred + Failover
+After approval, the enrollment secret is no longer used for normal authentication. The Agent keeps a private key in the `agent-keys` Docker volume.
 
 ---
 
-## 2.12 Confirm Agent health
+## 7. Authorize it for LAN Networks
 
-The Agent should eventually appear online/healthy.
+Approval does not grant scan rights.
 
-A running scan must not make the Agent look Offline. The Agent heartbeats on its own control loop while one scan worker executes.
+1. Open **Tenants → (client) → sites**.
+2. Select the Site.
+3. On the Network card, check the Agent under **Authorized agents**.
+4. Leave **Dispatch** on **Any Available** unless you have a preferred Agent.
+5. Click **Save network**.
 
-Check:
-
-```bash
-docker compose logs --tail=100 nuclei-agent
-```
-
-In the dashboard review:
-
-- status;
-- online state;
-- last seen;
-- runtime version;
-- Nuclei version;
-- template version;
-- Naabu version;
-- httpx version;
-- approved-version status.
+The Agent must belong to the same Site as the Network.
 
 ---
 
-## 2.13 Verify installed scanner versions
+## 8. Confirm it is online
 
-From the Agent host:
+In **agents**, the row should show **online** and a recent last-seen time. A long scan must not flip it to Offline; heartbeats run on a separate loop.
+
+Optional, on the Agent host:
 
 ```bash
 docker compose exec nuclei-agent nuclei -version
-docker compose exec nuclei-agent nuclei -tv -disable-update-check
 docker compose exec nuclei-agent naabu -version
 docker compose exec nuclei-agent pd-httpx -version
 ```
 
-The dashboard should receive Agent runtime inventory during heartbeat reporting.
+---
 
-Inventory is sent when the Agent starts, when installed versions change, and on a periodic refresh. Ordinary heartbeats can be empty authenticated pings, or they can include the current job and activity while a scan is running.
+## 9. Run a small first LAN scan
+
+1. **Tenants → (client) → scans**.
+2. Create a LAN Scan Definition that targets the Network you authorized.
+3. For the first run, keep the target small and intensity conservative.
+4. Start the run.
+
+Confirm the job is claimed by **this** Agent, Assets appear, and (if you enabled vulnerability scanning) Findings or clean coverage appear. Raw evidence is stored on the **central** server, not on the Agent.
 
 ---
 
-## 2.14 Protect the Agent identity volume
+## Protect the Agent identity
 
-The Agent private key is stored in the Docker volume:
-
-```text
-agent-keys
-```
-
-Do **not** use this during routine maintenance:
+Do **not** run:
 
 ```bash
 docker compose down -v
 ```
 
-`-v` deletes Compose-managed volumes.
-
-If the Agent private key is lost, do not try to impersonate/reconstruct the old Agent from its UUID.
-
-Create and enroll a new Agent.
+`-v` deletes volumes, including `agent-keys`. If that key is lost, create a **new** Agent in the dashboard and deploy new files. Do not reuse the old UUID.
 
 ---
 
-## 2.15 Run a first LAN scan
-
-After the Agent is:
-
-- approved;
-- online;
-- assigned to the correct Site;
-- authorized for the target Networks;
-
-create or use a LAN Scan Definition.
-
-For the first validation scan, use a small authorized target and conservative settings.
-
-Confirm:
-
-1. the Scan Run is claimed by the expected Agent;
-2. discovery completes;
-3. Assets/Devices appear as expected;
-4. Findings appear if vulnerability scanning is enabled;
-5. raw evidence is recorded;
-6. runtime/tool/template provenance is visible on the Scan Run.
-
-At this point the **Site Agent installation is complete**.
-
-Agent completion checklist:
+## Remote Agent checklist
 
 ```text
-[ ] Agent host can validate central HTTPS
-[ ] Agent files are installed
-[ ] correct CA/self-signed certificate is trusted if required
-[ ] Agent container is running
-[ ] Agent enrolled
-[ ] Agent approved
-[ ] Agent authorized for correct Networks
-[ ] Agent reports online/healthy
-[ ] runtime/tool/template inventory is visible
-[ ] a small authorized LAN test scan completes successfully
+[ ] curl from the Agent host to https://YOUR_SERVER:8118/api/health succeeds
+[ ] Agent created on the correct Tenant and Site
+[ ] docker-compose.yml and agent.env are on the Agent host
+[ ] certificate trust matches the server (public, CA file, or self-signed)
+[ ] docker compose ps shows the Agent running
+[ ] Agent approved in the dashboard
+[ ] Agent checked on the Network and Save network clicked
+[ ] Agent shows online
+[ ] a small authorized LAN scan completes
 ```
 
 ---
@@ -1906,14 +1435,14 @@ Check:
 Example test from the Agent host:
 
 ```bash
-curl https://dashboard.example.com:8118/api/health
+curl https://YOUR_SERVER:8118/api/health
 ```
 
-With an internal CA:
+With an internal CA or self-signed public cert:
 
 ```bash
 curl --cacert ./agent-certs/ca.pem \
-  https://dashboard.example.com:8118/api/health
+  https://YOUR_SERVER:8118/api/health
 ```
 
 ---
@@ -2003,13 +1532,11 @@ Do not manually edit old/frozen Alembic migration files on an installed system.
 
 # Updating a Site Agent
 
-An Agent rebuild retrieves the current `scan_runtime` source used by its Compose build context and installs the pinned tool/template releases defined by that revision.
+An Agent rebuild clones the pinned `scan_runtime` commit from GitHub (the `#<40-character-sha>:scan_runtime` value in the downloaded Compose file) and installs the scanner tools for that revision.
 
-Scale S1 lives in the Agent image (independent heartbeat/control loop, persistent HTTPS client, scan-stage progress logs, and the httpx DIT stub that prevents a runtime Hugging Face download). After this change, rebuild the Agent image. A container restart of an old image is not enough.
+A container **restart is not enough** after Agent/runtime changes on the central server. Download a fresh Compose file if the dashboard pin changed, then rebuild the image. Do not use `docker compose down -v`.
 
-Scale S2A froze ingest semantics against commit `312e0d0`. S2B (`d9afc55`) collapses Device/Asset lookups; S2C (`fa67a89`) collapses Finding/coverage current-run resolution the same way. S2D (`c59e144`, boundary fix `1040549`, pin `5a5f922`) bounds Device/Finding/coverage uploads by row count and encoded bytes on the same endpoints. All three are accepted on security baseline `5aaf4fc`. Schema head is `0017_security_h6_h8`. Correlation and Finding-lifecycle meaning are unchanged. Generated Agents pin to `1040549`, not the pin-bump SHA. Run `cd backend && pytest tests/test_scale_s2a.py tests/test_scale_s2b.py tests/test_scale_s2c.py tests/test_scale_s2d.py` for the small correctness/replay gate, or `python scripts/scale_s2a_benchmark.py --size small` for a JSON metrics report. Add `--chunk-rows` / `--chunk-bytes` to measure per-chunk `FindingRunIndex` preload cost. Medium and large sizes are opt-in and are not part of ordinary `pytest`. After Agent/runtime changes, rebuild site Agents; do not pin generated Agents to a pin-bump SHA.
-
-From the Agent directory:
+From the Agent directory (`~/nuclei-agent` if you followed the install):
 
 ```bash
 docker compose --env-file agent.env up -d --build
@@ -2133,7 +1660,7 @@ docker compose logs --tail=100 api caddy scanner
 ## API health
 
 ```bash
-curl https://dashboard.example.com:8118/api/health
+curl https://YOUR_SERVER:8118/api/health
 ```
 
 ## Start Agent with renamed files
