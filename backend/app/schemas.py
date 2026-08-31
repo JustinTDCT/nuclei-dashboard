@@ -290,9 +290,11 @@ class RawEvidenceDeclaration(BaseModel):
     @field_validator("status")
     @classmethod
     def _valid_status(cls, value: str) -> str:
-        allowed = {"captured", "dry_run", "none_executed"}
+        allowed = {"captured", "dry_run", "none_executed", "skipped_no_targets"}
         if value not in allowed:
-            raise ValueError("raw evidence status must be captured, dry_run, or none_executed")
+            raise ValueError(
+                "raw evidence status must be captured, dry_run, none_executed, or skipped_no_targets"
+            )
         return value
 
 

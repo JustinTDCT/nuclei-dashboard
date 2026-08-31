@@ -9,7 +9,13 @@ from artifact_io import JobControl, cleanup_staging, use_job_control
 from job_finish import finish_pipeline_run
 from runner import PipelineError, run_pipeline
 from scan_progress import bind_job, clear_job, snapshot as progress_snapshot
-from spool import abandon_job_spool, discover_completed_job_ids, recover_owned_spool, resume_pipeline_result
+from spool import (
+    JobSpool,
+    abandon_job_spool,
+    discover_completed_job_ids,
+    recover_owned_spool,
+    resume_pipeline_result,
+)
 
 
 def try_resume_completed_jobs(client: ScannerClient) -> bool:
@@ -108,12 +114,20 @@ def execute_wan_job(client: ScannerClient, job: dict, *, resume: bool = False) -
             )
         except Exception as persist_exc:
             traceback.print_exc()
-            cleanup_staging(result.get("staging_dir"))
-            client.complete(job_id, ok=False, error=str(persist_exc))
+            spool = result.get("spool")
+            if isinstance(spool, JobSpool) and spool.pipeline_complete():
+                print(f"Keeping raw staging after persist failure for WAN job {job_id}", flush=True)
+            else:
+                cleanup_staging(result.get("staging_dir"))
+                client.complete(job_id, ok=False, error=str(persist_exc))
     except Exception as exc:
         traceback.print_exc()
-        cleanup_staging(result.get("staging_dir"))
-        client.complete(job_id, ok=False, error=str(exc))
+        spool = result.get("spool")
+        if isinstance(spool, JobSpool) and spool.pipeline_complete():
+            print(f"Keeping raw staging after persist failure for WAN job {job_id}", flush=True)
+        else:
+            cleanup_staging(result.get("staging_dir"))
+            client.complete(job_id, ok=False, error=str(exc))
     finally:
         cancel.set()
         clear_job()

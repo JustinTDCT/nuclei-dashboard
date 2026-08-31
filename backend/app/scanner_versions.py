@@ -241,12 +241,22 @@ def provenance_version(payload: dict[str, Any] | None, field: str) -> str | None
 
 
 def required_run_version_keys(job: ScanJob) -> list[str]:
-    from app.raw_artifacts import expected_artifact_keys, snapshot_is_dry_run
+    from app.raw_artifacts import (
+        RAW_EVIDENCE_SKIPPED_NO_TARGETS,
+        expected_artifact_keys,
+        snapshot_is_dry_run,
+    )
 
     if snapshot_is_dry_run(job):
         return []
+    payload = job.runtime_provenance if isinstance(job.runtime_provenance, dict) else {}
+    evidence = payload.get("raw_evidence") if isinstance(payload.get("raw_evidence"), dict) else {}
+    if evidence.get("status") == RAW_EVIDENCE_SKIPPED_NO_TARGETS:
+        artifact_keys = [str(key) for key in (evidence.get("artifact_keys") or [])]
+    else:
+        artifact_keys = expected_artifact_keys(job)
     keys = ["runtime_version"]
-    for artifact_key in expected_artifact_keys(job):
+    for artifact_key in artifact_keys:
         if artifact_key.endswith(".naabu") and "naabu_version" not in keys:
             keys.append("naabu_version")
         elif artifact_key.endswith(".httpx") and "httpx_version" not in keys:

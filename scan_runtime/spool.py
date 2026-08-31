@@ -294,6 +294,7 @@ def resume_pipeline_result(spool: JobSpool) -> dict[str, Any]:
         "detector_coverage": [],
         "spool": spool,
         "spool_resume": True,
+        "skipped_no_targets": bool(meta.get("skipped_no_targets")),
     }
 
 

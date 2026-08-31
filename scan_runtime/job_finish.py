@@ -112,16 +112,12 @@ def finish_pipeline_run(
 ) -> None:
     artifacts = list(result.get("artifacts") or [])
     note_stage("upload", "Uploading results")
-    try:
-        persist_artifacts(
-            upload,
-            artifacts,
-            result.get("provenance"),
-            skip_missing=bool(result.get("spool_resume")),
-        )
-    except Exception:
-        cleanup_staging(result.get("staging_dir"))
-        raise
+    persist_artifacts(
+        upload,
+        artifacts,
+        result.get("provenance"),
+        skip_missing=bool(result.get("spool_resume")),
+    )
     cleanup_staging(result.get("staging_dir"))
     provenance_error: str | None = None
     dry_run = bool(result.get("dry_run"))
@@ -166,6 +162,8 @@ def raw_evidence_declaration(result: dict[str, Any]) -> dict[str, Any]:
     keys = [str(row["artifact_key"]) for row in artifacts if row.get("artifact_key")]
     if result.get("dry_run"):
         return {"status": "dry_run", "artifact_keys": []}
+    if result.get("skipped_no_targets"):
+        return {"status": "skipped_no_targets", "artifact_keys": keys}
     if keys:
         return {"status": "captured", "artifact_keys": keys}
     return {"status": "none_executed", "artifact_keys": []}

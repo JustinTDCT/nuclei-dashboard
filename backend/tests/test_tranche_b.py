@@ -470,6 +470,45 @@ def test_finish_pipeline_run_declares_raw_evidence():
     assert completed == [(True, None, {"status": "captured", "artifact_keys": ["port_discovery.naabu"]})]
     assert raw_evidence_declaration({"artifacts": [], "dry_run": True}) == {"status": "dry_run", "artifact_keys": []}
     assert raw_evidence_declaration({"artifacts": []}) == {"status": "none_executed", "artifact_keys": []}
+    assert raw_evidence_declaration(
+        {"artifacts": [{"artifact_key": "discovery.naabu"}], "skipped_no_targets": True}
+    ) == {"status": "skipped_no_targets", "artifact_keys": ["discovery.naabu"]}
+
+
+def test_finish_pipeline_run_keeps_raw_staging_on_upload_failure(tmp_path):
+    from job_finish import finish_pipeline_run
+
+    staging = tmp_path / "raw"
+    staging.mkdir()
+    artifact_path = staging / "discovery.naabu.jsonl.gz"
+    artifact_path.write_bytes(b"\x1f\x8b")
+
+    def boom(_payload):
+        raise RuntimeError("central artifact upload failed")
+
+    with pytest.raises(RuntimeError, match="artifact upload failed"):
+        finish_pipeline_run(
+            result={
+                "artifacts": [
+                    {
+                        "artifact_key": "discovery.naabu",
+                        "tool": "naabu",
+                        "stage": "discovery",
+                        "path": str(artifact_path),
+                    }
+                ],
+                "staging_dir": str(staging),
+                "provenance": {"runtime_version": "t"},
+                "dry_run": False,
+                "devices": [],
+                "findings": [],
+                "detector_coverage": [],
+            },
+            upload=boom,
+            complete=lambda *_args, **_kwargs: None,
+        )
+    assert artifact_path.exists()
+    assert staging.is_dir()
 
 
 @requires_postgres
@@ -1029,6 +1068,133 @@ def test_successful_complete_requires_raw_evidence_contract(reset_db, tmp_path, 
             json={"status": "none_executed", "artifact_keys": []},
         )
         assert wan_lied.status_code == 409
+
+
+@requires_postgres
+def test_skipped_no_targets_complete_requires_detected_empty_discovery(reset_db, tmp_path, monkeypatch):
+    _artifact_root(tmp_path, monkeypatch)
+    gz = _gzip_jsonl([])
+    stages = {
+        "discovery": True,
+        "port_mode": "common",
+        "port_scope": "detected",
+        "fingerprint": True,
+        "vulnerability": True,
+        "nuclei_severities": "critical",
+        "nuclei_tags": "",
+    }
+    with _client() as client:
+        token = _login(client)
+        world = _world(client, token)
+        job_id, agent = _claim_lan(client, token, world, stage_config=stages)
+        headers = _agent_headers(agent)
+        expected = _expected_artifact_keys(job_id)
+        assert "fingerprint.httpx" in expected
+        assert "vulnerability.nuclei" in expected
+        captured_missing = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "captured", "artifact_keys": ["discovery.naabu"]},
+        )
+        assert captured_missing.status_code == 409
+        none = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "none_executed", "artifact_keys": []},
+        )
+        assert none.status_code == 409
+        uploaded = _upload_keys(
+            client, f"/api/agent/jobs/{job_id}/artifacts", headers, gz, ["discovery.naabu"]
+        )
+        assert uploaded[0]["artifact_key"] == "discovery.naabu"
+        client.post(
+            f"/api/agent/jobs/{job_id}/provenance",
+            headers=headers,
+            json={"runtime_version": "test-runtime_version", "naabu_version": "test-naabu_version"},
+        )
+        ok = client.post(
+            f"/api/agent/jobs/{job_id}/complete",
+            headers=headers,
+            params={"ok": "true"},
+            json={"status": "skipped_no_targets", "artifact_keys": ["discovery.naabu"]},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["status"] == "done"
+
+        from app.database import SessionLocal
+        from app.models import EVALUATION_CLEAN, AssetFindingRunEvaluation, ScanJob
+
+        db = SessionLocal()
+        try:
+            job = db.get(ScanJob, job_id)
+            assert job.status == "done"
+            assert job.runtime_provenance["raw_evidence"]["status"] == "skipped_no_targets"
+            cleans = (
+                db.query(AssetFindingRunEvaluation)
+                .filter(
+                    AssetFindingRunEvaluation.scan_job_id == job_id,
+                    AssetFindingRunEvaluation.outcome == EVALUATION_CLEAN,
+                )
+                .count()
+            )
+            assert cleans == 0
+        finally:
+            db.close()
+
+        populated_job, populated_agent = _claim_lan(client, token, world, stage_config=stages)
+        pop_headers = _agent_headers(populated_agent)
+        _upload_keys(
+            client,
+            f"/api/agent/jobs/{populated_job}/artifacts",
+            pop_headers,
+            gz,
+            ["discovery.naabu"],
+        )
+        client.post(
+            f"/api/agent/jobs/{populated_job}/devices",
+            headers=pop_headers,
+            json=[{"ip": "10.1.0.8", "scope": "lan", "hostname": "live-host", "ports": [80]}],
+        )
+        client.post(
+            f"/api/agent/jobs/{populated_job}/provenance",
+            headers=pop_headers,
+            json={"runtime_version": "test-runtime_version", "naabu_version": "test-naabu_version"},
+        )
+        rejected_hosts = client.post(
+            f"/api/agent/jobs/{populated_job}/complete",
+            headers=pop_headers,
+            params={"ok": "true"},
+            json={"status": "skipped_no_targets", "artifact_keys": ["discovery.naabu"]},
+        )
+        assert rejected_hosts.status_code == 409
+        _finish_job(populated_job, "failed")
+
+        all_job, all_agent = _claim_lan(
+            client,
+            token,
+            world,
+            stage_config={
+                "discovery": True,
+                "port_mode": "common",
+                "port_scope": "all",
+                "fingerprint": True,
+                "vulnerability": False,
+            },
+        )
+        all_headers = _agent_headers(all_agent)
+        _upload_keys(
+            client, f"/api/agent/jobs/{all_job}/artifacts", all_headers, gz, ["discovery.naabu"]
+        )
+        rejected_all = client.post(
+            f"/api/agent/jobs/{all_job}/complete",
+            headers=all_headers,
+            params={"ok": "true"},
+            json={"status": "skipped_no_targets", "artifact_keys": ["discovery.naabu"]},
+        )
+        assert rejected_all.status_code == 409
+        _finish_job(all_job, "failed")
 
 
 @requires_postgres

@@ -998,7 +998,7 @@ def test_detected_empty_discovery_does_not_reexpand_cidrs():
         patch.object(runtime_runner, "fingerprint_non_http", return_value=[]),
         patch.object(runtime_runner, "collect_run_provenance", return_value={"runtime_version": "t"}),
     ):
-        runtime_runner.run_pipeline(
+        result = runtime_runner.run_pipeline(
             {
                 "scope": "lan",
                 "targets": [{"type": "cidr", "value": "10.1.0.0/24"}],
@@ -1018,8 +1018,8 @@ def test_detected_empty_discovery_does_not_reexpand_cidrs():
     naabu.assert_not_called()
     assert captured["httpx"] == []
     assert captured["nuclei"] == []
-    assert "10.1.0.0/24" not in captured["httpx"]
-    assert "10.1.0.0/24" not in [row.get("value") if isinstance(row, dict) else row for row in captured["nuclei"]]
+    assert result["skipped_no_targets"] is True
+    assert result["detector_coverage"] == []
 
 
 def test_custom_ports_and_fqdn_normalization():

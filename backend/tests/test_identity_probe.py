@@ -111,11 +111,38 @@ def test_icmp_sweep_rejects_replies_outside_requested_set():
     )
     with (
         patch("identity_probe.os.getpid", return_value=ident),
-        patch("identity_probe._open_icmp_socket", return_value=sock),
+        patch("identity_probe._open_icmp_socket", return_value=(sock, socket.SOCK_RAW)),
     ):
         alive = icmp_sweep(["10.1.0.9"])
     assert alive == {"10.1.0.9"}
     assert "8.8.8.8" not in alive
+
+
+def test_icmp_dgram_accepts_kernel_echo_id_and_raw_rejects_wrong_id():
+    from identity_probe import icmp_sweep
+
+    ident = 0x1234
+    kernel_id = 0xABCD
+    dgram = _FakeIcmp(
+        [
+            (_echo_reply(kernel_id, 0), ("10.1.0.9", 0)),
+            (_echo_reply(kernel_id, 99), ("10.1.0.9", 0)),
+            (_echo_reply(kernel_id, 0), ("8.8.8.8", 0)),
+        ]
+    )
+    with (
+        patch("identity_probe.os.getpid", return_value=ident),
+        patch("identity_probe._open_icmp_socket", return_value=(dgram, socket.SOCK_DGRAM)),
+    ):
+        alive = icmp_sweep(["10.1.0.9"])
+    assert alive == {"10.1.0.9"}
+
+    raw = _FakeIcmp([(_echo_reply(kernel_id, 0, with_ip_header=True), ("10.1.0.9", 0))])
+    with (
+        patch("identity_probe.os.getpid", return_value=ident),
+        patch("identity_probe._open_icmp_socket", return_value=(raw, socket.SOCK_RAW)),
+    ):
+        assert icmp_sweep(["10.1.0.9"]) == set()
 
 
 def test_classify_uses_snmp_sysdescr():

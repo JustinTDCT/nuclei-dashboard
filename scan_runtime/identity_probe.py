@@ -55,9 +55,10 @@ def discover_liveness(targets: list[dict[str, str]], log: LogFn | None = None) -
 def icmp_sweep(ips: list[str], timeout: float = ICMP_TIMEOUT) -> set[str]:
     if not ips:
         return set()
-    sock = _open_icmp_socket()
-    if sock is None:
+    opened = _open_icmp_socket()
+    if opened is None:
         return set()
+    sock, kind = opened
     ident = os.getpid() & 0xFFFF
     allowed = {_canonical_ip(ip) for ip in ips}
     sent_seqs: set[int] = set()
@@ -83,7 +84,7 @@ def icmp_sweep(ips: list[str], timeout: float = ICMP_TIMEOUT) -> set[str]:
             host = _canonical_ip(addr[0]) if addr else ""
             if host not in allowed:
                 continue
-            if _is_our_echo_reply(data, ident, sent_seqs):
+            if _is_our_echo_reply(data, ident, sent_seqs, raw=kind == socket.SOCK_RAW):
                 alive.add(host)
     finally:
         sock.close()
@@ -131,14 +132,14 @@ def _identity_row(ip: str, *, mac: str, via: str) -> dict[str, Any]:
     return row
 
 
-def _open_icmp_socket() -> socket.socket | None:
+def _open_icmp_socket() -> tuple[socket.socket, int] | None:
     """Prefer unprivileged ICMP datagrams; fall back to NET_RAW."""
     for kind in (socket.SOCK_DGRAM, socket.SOCK_RAW):
         try:
             sock = socket.socket(socket.AF_INET, kind, socket.IPPROTO_ICMP)
         except OSError:
             continue
-        return sock
+        return sock, kind
     return None
 
 
@@ -179,9 +180,17 @@ def _icmp_header_offset(data: bytes) -> int | None:
     return 0
 
 
-def _is_our_echo_reply(data: bytes, ident: int, sent_seqs: set[int]) -> bool:
+def _is_our_echo_reply(
+    data: bytes, ident: int, sent_seqs: set[int], *, raw: bool
+) -> bool:
     offset = _icmp_header_offset(data)
     if offset is None or data[offset] != 0:
         return False
     reply_ident, reply_seq = struct.unpack_from("!HH", data, offset + 4)
-    return reply_ident == ident and reply_seq in sent_seqs
+    if reply_seq not in sent_seqs:
+        return False
+    # Linux SOCK_DGRAM ping sockets replace the user ICMP ID with inet_sport.
+    # The kernel has already demultiplexed the reply onto this socket.
+    if raw and reply_ident != ident:
+        return False
+    return True

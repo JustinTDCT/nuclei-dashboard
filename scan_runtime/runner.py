@@ -445,8 +445,9 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
         devices_spooled = True
         named = sum(1 for d in devices if usable_hostname(d.get("hostname") or ""))
         _log(f"Hostnames resolved on agent: {named}/{len(devices)}", log)
-        if stages.get("vulnerability"):
+        if stages.get("vulnerability") and nuclei_targets:
             coverage = _spool_coverage(spool, nuclei_targets)
+        skipped_no_targets = bool(lock_detected and not index.discovered_ips() and not http_urls)
         used_tools = {str(row.get("tool") or "") for row in artifacts if row.get("tool")}
         try:
             provenance = collect_run_provenance(used_tools=used_tools, dry_run=False, log=log)
@@ -473,6 +474,7 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
                 "staging_dir": staging_out,
                 "provenance": provenance,
                 "dry_run": False,
+                "skipped_no_targets": skipped_no_targets,
             }
         )
         return {
@@ -483,6 +485,7 @@ def _run_pipeline(job: dict[str, Any], log: LogFn | None = None) -> dict[str, An
             "artifacts": artifacts,
             "staging_dir": staging_out,
             "spool": spool,
+            "skipped_no_targets": skipped_no_targets,
         }
     except PipelineError:
         raise

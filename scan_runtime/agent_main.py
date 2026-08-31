@@ -12,7 +12,13 @@ from keys import load_or_create_keypair, sign
 from runner import PipelineError, run_pipeline
 from artifact_io import JobControl, cleanup_staging, use_job_control
 from scan_progress import bind_job, clear_job, snapshot as progress_snapshot
-from spool import abandon_job_spool, discover_completed_job_ids, recover_owned_spool, resume_pipeline_result
+from spool import (
+    JobSpool,
+    abandon_job_spool,
+    discover_completed_job_ids,
+    recover_owned_spool,
+    resume_pipeline_result,
+)
 from tool_versions import collect_runtime_inventory
 
 INVENTORY_REFRESH_SECONDS = 3600
@@ -132,19 +138,27 @@ def run_job(client: CentralClient, token: str, job: dict, refresh_token, cancel_
             )
         except Exception as persist_exc:
             traceback.print_exc()
-            cleanup_staging(result.get("staging_dir"))
-            try:
-                client.complete(token, job_id, ok=False, error=str(persist_exc))
-            except ApiError:
-                pass
+            spool = result.get("spool")
+            if isinstance(spool, JobSpool) and spool.pipeline_complete():
+                print(f"Keeping raw staging after persist failure for job {job_id}", flush=True)
+            else:
+                cleanup_staging(result.get("staging_dir"))
+                try:
+                    client.complete(token, job_id, ok=False, error=str(persist_exc))
+                except ApiError:
+                    pass
     except Exception as exc:
         traceback.print_exc()
-        cleanup_staging(result.get("staging_dir"))
-        try:
-            token = refresh_token() or token
-            client.complete(token, job_id, ok=False, error=str(exc))
-        except ApiError:
-            pass
+        spool = result.get("spool")
+        if isinstance(spool, JobSpool) and spool.pipeline_complete():
+            print(f"Keeping raw staging after persist failure for job {job_id}", flush=True)
+        else:
+            cleanup_staging(result.get("staging_dir"))
+            try:
+                token = refresh_token() or token
+                client.complete(token, job_id, ok=False, error=str(exc))
+            except ApiError:
+                pass
     finally:
         clear_job()
 

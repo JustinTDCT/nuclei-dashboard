@@ -17,7 +17,11 @@ from sqlalchemy.orm import Session
 
 from app.audit import record_audit
 from app.config import settings
-from app.models import ScanArtifact, ScanJob
+from app.models import (
+    PORT_SCOPE_DETECTED,
+    ScanArtifact,
+    ScanJob,
+)
 from app.scan_snapshot import PROVENANCE_SCALAR_KEYS, is_secret_key, merge_provenance, scalar_provenance_value
 from app.schemas import RawEvidenceDeclaration, ScanArtifactOut
 from app.settings_store import get_settings
@@ -39,7 +43,19 @@ ARTIFACT_STATUS_UNAVAILABLE = "unavailable"
 RAW_EVIDENCE_CAPTURED = "captured"
 RAW_EVIDENCE_DRY_RUN = "dry_run"
 RAW_EVIDENCE_NONE_EXECUTED = "none_executed"
-RAW_EVIDENCE_STATUSES = frozenset({RAW_EVIDENCE_CAPTURED, RAW_EVIDENCE_DRY_RUN, RAW_EVIDENCE_NONE_EXECUTED})
+RAW_EVIDENCE_SKIPPED_NO_TARGETS = "skipped_no_targets"
+RAW_EVIDENCE_STATUSES = frozenset(
+    {
+        RAW_EVIDENCE_CAPTURED,
+        RAW_EVIDENCE_DRY_RUN,
+        RAW_EVIDENCE_NONE_EXECUTED,
+        RAW_EVIDENCE_SKIPPED_NO_TARGETS,
+    }
+)
+DISCOVERY_NAABU_KEY = "discovery.naabu"
+DOWNSTREAM_ARTIFACT_KEYS = frozenset(
+    {"port_discovery.naabu", "fingerprint.httpx", "vulnerability.nuclei"}
+)
 CLIENT_PROVENANCE_ALLOWLIST = frozenset(
     {
         "runtime_version",
@@ -492,6 +508,47 @@ def snapshot_requires_raw_artifacts(job: ScanJob) -> bool:
     return bool(expected_artifact_keys(job))
 
 
+def snapshot_allows_skipped_no_targets(job: ScanJob) -> bool:
+    if snapshot_is_dry_run(job):
+        return False
+    snapshot = job.execution_snapshot if isinstance(job.execution_snapshot, dict) else {}
+    stages = snapshot.get("stages")
+    if not isinstance(stages, dict):
+        return False
+    if not stages.get("discovery"):
+        return False
+    port_scope = str(stages.get("port_scope") or PORT_SCOPE_DETECTED)
+    return port_scope == PORT_SCOPE_DETECTED
+
+
+def job_has_ingested_scan_results(db: Session, job: ScanJob) -> bool:
+    from app.models import AssetObservation, Finding, ScanRunDetectorCoverage
+
+    if (
+        db.query(AssetObservation.id)
+        .filter(AssetObservation.scan_job_id == job.id, AssetObservation.tenant_id == job.tenant_id)
+        .first()
+        is not None
+    ):
+        return True
+    if (
+        db.query(Finding.id)
+        .filter(Finding.scan_job_id == job.id, Finding.tenant_id == job.tenant_id)
+        .first()
+        is not None
+    ):
+        return True
+    return (
+        db.query(ScanRunDetectorCoverage.id)
+        .filter(
+            ScanRunDetectorCoverage.scan_job_id == job.id,
+            ScanRunDetectorCoverage.tenant_id == job.tenant_id,
+        )
+        .first()
+        is not None
+    )
+
+
 def apply_raw_evidence_declaration(
     db: Session,
     job: ScanJob,
@@ -530,6 +587,21 @@ def apply_raw_evidence_declaration(
         missing = [key for key in normalized_keys if key not in existing]
         if missing:
             raise RawEvidenceError("Declared raw evidence artifacts were not persisted")
+    elif status == RAW_EVIDENCE_SKIPPED_NO_TARGETS:
+        if snapshot_is_dry_run(job):
+            raise RawEvidenceError("dry_run execution must declare dry_run raw evidence")
+        if not snapshot_allows_skipped_no_targets(job):
+            raise RawEvidenceError("skipped_no_targets requires detected-host discovery")
+        if job_has_ingested_scan_results(db, job):
+            raise RawEvidenceError(
+                "skipped_no_targets is not valid after hosts, findings, or coverage were ingested"
+            )
+        if existing & DOWNSTREAM_ARTIFACT_KEYS:
+            raise RawEvidenceError("skipped_no_targets cannot complete with downstream raw artifacts")
+        if DISCOVERY_NAABU_KEY not in existing:
+            raise RawEvidenceError("detected-host discovery still requires discovery.naabu evidence")
+        if set(normalized_keys) != existing:
+            raise RawEvidenceError("skipped_no_targets declaration must match persisted discovery evidence")
     else:
         if normalized_keys:
             raise RawEvidenceError(f"{status} raw evidence must not declare artifact_keys")
