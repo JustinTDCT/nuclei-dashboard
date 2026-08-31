@@ -2,7 +2,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -17,10 +18,15 @@ from app.settings_store import get_settings
 log = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
 
-# In-process keyset cursor for discovery-metadata catch-up. Reset when a short
-# page shows the table walk is complete. Lost on process restart (harmless:
-# the next page is idempotent). S3B will relocate this job with the scheduler.
+# Keyset cursor for discovery-metadata catch-up in the scheduler process.
+# Reset when a short page shows the table walk is complete. Lost on process
+# restart (harmless: the next page is idempotent).
 _discovery_metadata_after_id = 0
+
+# Session-level PostgreSQL advisory lock. Distinct from intel sync keyspace 742201.
+# Held for the life of the scheduler process so two Compose replicas cannot both
+# own APScheduler.
+SCHEDULER_LEADER_LOCK_KEY = 91304701
 
 
 def _now() -> datetime:
@@ -127,7 +133,7 @@ def expire_stuck_jobs() -> None:
 
 
 def refresh_vulnerability_intelligence() -> None:
-    """Single API process owns APScheduler; PostgreSQL advisory locks still gate overlap."""
+    """Scheduler process owns APScheduler; per-source advisory locks still gate overlap."""
     db: Session = SessionLocal()
     try:
         from app.intel.sync import refresh_due_sources
@@ -228,71 +234,80 @@ def cleanup_raw_artifacts() -> None:
         db.close()
 
 
-def start_scheduler() -> None:
-    if scheduler.running:
-        return
-    scheduler.add_job(tick_schedules, "interval", seconds=30, id="schedules", replace_existing=True)
-    scheduler.add_job(mark_stale_devices, "interval", minutes=30, id="stale", replace_existing=True)
-    scheduler.add_job(mark_inactive_assets, "interval", minutes=30, id="asset-inactive", replace_existing=True)
-    scheduler.add_job(
-        refresh_discovery_metadata_job,
-        "interval",
-        minutes=5,
-        id="discovery-metadata",
-        replace_existing=True,
-    )
+def scheduler_job_catalog() -> list[dict]:
+    """Frozen S3B job ids and intervals. Semantics stay the former in-process catalog."""
+    return [
+        {"id": "schedules", "seconds": 30},
+        {"id": "stale", "minutes": 30},
+        {"id": "asset-inactive", "minutes": 30},
+        {"id": "discovery-metadata", "minutes": 5},
+        {"id": "policy-reconcile", "minutes": 20},
+        {"id": "stuck-jobs", "minutes": 5},
+        {"id": "vuln-intel", "minutes": 15},
+        {"id": "finding-age-priority", "hours": 12},
+        {"id": "treatment-expiration", "minutes": 15},
+        {"id": "alert-routing", "seconds": 15},
+        {"id": "alert-delivery", "seconds": 20},
+        {"id": "raw-artifact-retention", "hours": 1},
+    ]
+
+
+def _scheduler_job_callables() -> list[tuple]:
+    from app.alert_engine import process_pending_deliveries_job, route_pending_events_job
     from app.policy import reconcile_asset_handling_job
 
-    scheduler.add_job(
-        reconcile_asset_handling_job,
-        "interval",
-        minutes=20,
-        id="policy-reconcile",
-        replace_existing=True,
-    )
-    scheduler.add_job(expire_stuck_jobs, "interval", minutes=5, id="stuck-jobs", replace_existing=True)
-    scheduler.add_job(
-        refresh_vulnerability_intelligence,
-        "interval",
-        minutes=15,
-        id="vuln-intel",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        recalculate_finding_age_priority,
-        "interval",
-        hours=12,
-        id="finding-age-priority",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        expire_finding_treatments,
-        "interval",
-        minutes=15,
-        id="treatment-expiration",
-        replace_existing=True,
-    )
-    from app.alert_engine import process_pending_deliveries_job, route_pending_events_job
+    return [
+        (tick_schedules, "schedules", {"seconds": 30}),
+        (mark_stale_devices, "stale", {"minutes": 30}),
+        (mark_inactive_assets, "asset-inactive", {"minutes": 30}),
+        (refresh_discovery_metadata_job, "discovery-metadata", {"minutes": 5}),
+        (reconcile_asset_handling_job, "policy-reconcile", {"minutes": 20}),
+        (expire_stuck_jobs, "stuck-jobs", {"minutes": 5}),
+        (refresh_vulnerability_intelligence, "vuln-intel", {"minutes": 15}),
+        (recalculate_finding_age_priority, "finding-age-priority", {"hours": 12}),
+        (expire_finding_treatments, "treatment-expiration", {"minutes": 15}),
+        (route_pending_events_job, "alert-routing", {"seconds": 15}),
+        (process_pending_deliveries_job, "alert-delivery", {"seconds": 20}),
+        (cleanup_raw_artifacts, "raw-artifact-retention", {"hours": 1}),
+    ]
 
-    scheduler.add_job(
-        route_pending_events_job,
-        "interval",
-        seconds=15,
-        id="alert-routing",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        process_pending_deliveries_job,
-        "interval",
-        seconds=20,
-        id="alert-delivery",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        cleanup_raw_artifacts,
-        "interval",
-        hours=1,
-        id="raw-artifact-retention",
-        replace_existing=True,
-    )
+
+def register_scheduler_jobs(sched: BackgroundScheduler) -> None:
+    for func, job_id, interval in _scheduler_job_callables():
+        sched.add_job(func, "interval", id=job_id, replace_existing=True, **interval)
+
+
+def start_scheduler() -> None:
+    """Start APScheduler. Call only from the scheduler process after taking the leader lock."""
+    if scheduler.running:
+        return
+    register_scheduler_jobs(scheduler)
     scheduler.start()
+
+
+def stop_scheduler(*, wait: bool = False) -> None:
+    if scheduler.running:
+        scheduler.shutdown(wait=wait)
+
+
+def try_acquire_scheduler_leader_lock(conn: Connection) -> bool:
+    acquired = bool(
+        conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": SCHEDULER_LEADER_LOCK_KEY}).scalar()
+    )
+    if conn.in_transaction():
+        conn.commit()
+    return acquired
+
+
+def release_scheduler_leader_lock(conn: Connection) -> None:
+    conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": SCHEDULER_LEADER_LOCK_KEY})
+    if conn.in_transaction():
+        conn.commit()
+
+
+def start_scheduler_if_leader(conn: Connection) -> bool:
+    """Start APScheduler only when this connection holds the leader lock."""
+    if not try_acquire_scheduler_leader_lock(conn):
+        return False
+    start_scheduler()
+    return True

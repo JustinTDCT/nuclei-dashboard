@@ -358,6 +358,7 @@ Central API
 |---|---|
 | `postgres` | PostgreSQL database |
 | `api` | FastAPI backend |
+| `scheduler` | Control-plane APScheduler (exactly one process) |
 | `web` | React frontend |
 | `scanner` | Central WAN scanner |
 | `caddy` | HTTPS entry point / reverse proxy |
@@ -655,11 +656,12 @@ docker compose up -d --build
 
 The first build downloads pinned Naabu, ProjectDiscovery httpx, Nuclei, and Nuclei templates. That often takes **10–20 minutes**. Leave it running.
 
-These five services should start:
+These six services should start:
 
 ```text
 postgres
 api
+scheduler
 web
 scanner
 caddy
@@ -775,7 +777,7 @@ Optional: open the **WAN targets** tab and add a public IP, public CIDR, or FQDN
 ## Central server checklist
 
 ```text
-[ ] docker compose ps shows postgres, api, web, scanner, and caddy running
+[ ] docker compose ps shows postgres, api, scheduler, web, scanner, and caddy running
 [ ] curl -k https://YOUR_SERVER:8118/api/health returns {"ok":true}
 [ ] curl --cacert certs/cert.pem (or a public CA) also returns {"ok":true} for that same URL
 [ ] the dashboard opens in a browser
@@ -1380,6 +1382,14 @@ docker compose logs --tail=200 api
 
 ---
 
+## Scheduler logs
+
+```bash
+docker compose logs --tail=200 scheduler
+```
+
+---
+
 ## Caddy/TLS logs
 
 ```bash
@@ -1518,7 +1528,7 @@ Typical update flow:
 ```bash
 cd nuclei-dashboard
 git pull
-docker compose build api scanner web
+docker compose build api scheduler scanner web
 docker compose up -d
 ```
 

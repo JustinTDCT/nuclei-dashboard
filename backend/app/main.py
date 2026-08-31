@@ -32,15 +32,14 @@ from app.routers import (
     users,
     wan_targets,
 )
-from app.scheduler import start_scheduler
 from app.seed import seed
 
 
 def prepare_control_plane(db) -> None:
     """API process bootstrap. Must stay independent of Device inventory size.
 
-    Device classification/auto_label/tech catch-up is a bounded scheduler page,
-    not a startup table scan.
+    Device classification/auto_label/tech catch-up is a bounded scheduler page
+    in the dedicated scheduler process, not a startup table scan.
     """
     seed(db)
 
@@ -55,7 +54,6 @@ async def lifespan(_: FastAPI):
         prepare_control_plane(db)
     finally:
         db.close()
-    start_scheduler()
     yield
 
 

@@ -132,9 +132,9 @@ def test_refresh_source_is_keyset_bounded():
 def test_scheduler_source_registers_bounded_discovery_job():
     from app import scheduler as sched
 
-    src = inspect.getsource(sched.start_scheduler)
-    assert "refresh_discovery_metadata_job" in src
-    assert 'id="discovery-metadata"' in src
+    src = inspect.getsource(sched.scheduler_job_catalog)
+    assert any(row["id"] == "discovery-metadata" and row.get("minutes") == 5 for row in sched.scheduler_job_catalog())
+    assert "discovery-metadata" in src
     job_src = inspect.getsource(sched.refresh_discovery_metadata_job)
     assert "query(Device).all()" not in job_src
     assert "after_id" in job_src
@@ -148,11 +148,10 @@ def test_lifespan_does_not_call_discovery_refresh(reset_db):
 
     apply_schema()
     with patch("app.inventory.refresh_discovery_metadata") as refresh:
-        with patch("app.main.start_scheduler"):
-            from app.main import app
+        from app.main import app
 
-            with TestClient(app):
-                pass
+        with TestClient(app):
+            pass
     refresh.assert_not_called()
 
 

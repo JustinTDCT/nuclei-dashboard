@@ -28,11 +28,10 @@ if str(RUNTIME_ROOT) not in sys.path:
 
 @contextmanager
 def _client() -> Iterator[TestClient]:
-    with patch("app.main.start_scheduler"):
-        from app.main import app
+    from app.main import app
 
-        with TestClient(app) as client:
-            yield client
+    with TestClient(app) as client:
+        yield client
 
 
 def _login(client: TestClient, username: str = "admin", password: str = "test-admin-pass") -> str:

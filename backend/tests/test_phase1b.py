@@ -33,11 +33,10 @@ PHASE1B_TABLES = {
 
 @contextmanager
 def _client() -> Iterator[TestClient]:
-    with patch("app.main.start_scheduler"):
-        from app.main import app
+    from app.main import app
 
-        with TestClient(app) as client:
-            yield client
+    with TestClient(app) as client:
+        yield client
 
 
 def _login(client: TestClient, username: str, password: str) -> str:

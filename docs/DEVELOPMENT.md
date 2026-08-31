@@ -175,11 +175,20 @@ S2E is ACCEPT at implementation `3cdb52c` (generated Agents pin that SHA, not th
 
 ### Scale S3A startup Device refresh
 
-S3A removes `refresh_discovery_metadata` from API process startup. That call used to `query(Device).all()` and rewrite classification / `auto_label` / tech from the current heuristics, so startup cost grew with inventory size. Live ingest already applies the same heuristics per DeviceReport. Leftover catch-up for rows that have not been re-observed is one keyset page (`Device.id > after_id ORDER BY id LIMIT N`) per in-process scheduler tick (`discovery-metadata`, every 5 minutes, `DISCOVERY_METADATA_BATCH_SIZE` default 250). The page uses `FOR UPDATE SKIP LOCKED`: catch-up does not wait on a Device ingest already owns, and if catch-up holds the lock first, ingest's UPDATE waits and still commits last. Do not loop the whole table in one tick, and do not put this work back in `lifespan`. Device field semantics stay the former startup-refresh rules; this tranche does not change Asset classification, policy reconcile, or `stale_days`. Schema head remains `0017_security_h6_h8`; do not add `0018`. S3B (scheduler process split / API replicas) is the next tranche, not this one. Agent pin stays `3cdb52c`.
+S3A is ACCEPT at implementation `75034d7` plus concurrency correction `901f159`. It removes `refresh_discovery_metadata` from API process startup. That call used to `query(Device).all()` and rewrite classification / `auto_label` / tech from the current heuristics, so startup cost grew with inventory size. Live ingest already applies the same heuristics per DeviceReport. Leftover catch-up for rows that have not been re-observed is one keyset page (`Device.id > after_id ORDER BY id LIMIT N`) per scheduler tick (`discovery-metadata`, every 5 minutes, `DISCOVERY_METADATA_BATCH_SIZE` default 250). The page uses `FOR UPDATE SKIP LOCKED`: catch-up does not wait on a Device ingest already owns, and if catch-up holds the lock first, ingest's UPDATE waits and still commits last. Do not loop the whole table in one tick, and do not put this work back in `lifespan`. Device field semantics stay the former startup-refresh rules. Schema head remains `0017_security_h6_h8`; do not add `0018`. Agent pin stays `3cdb52c`.
 
 ```bash
 cd backend
 pytest tests/test_scale_s3a.py
+```
+
+### Scale S3B scheduler process
+
+S3B moves APScheduler out of the API process into Compose service `scheduler` (`python -m app.scheduler_process`). API `lifespan` only applies schema, `ensure_columns`, and `seed`; it must not start or stop the scheduler. Two API replicas therefore cannot create duplicate scheduler ownership. The scheduler process takes a session-level PostgreSQL advisory lock (`SCHEDULER_LEADER_LOCK_KEY`) before calling `start_scheduler()`. A second scheduler replica waits on that lock and does not start APScheduler. Job ids and intervals stay the S3A catalog (including `discovery-metadata` at 5 minutes). The scheduler mounts `scan-artifacts` so raw-artifact retention can delete bytes. Do not `docker compose up --scale scheduler=2` as the operating model; the lock is the fail-closed fence. Schema stays `0017_security_h6_h8`. This tranche does not add a second API replica.
+
+```bash
+cd backend
+pytest tests/test_scale_s3a.py tests/test_scale_s3b.py
 ```
 
 S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. S2D records `finding_index_preloads`, `finding_index_preload_selects`, `finding_index_preload_wall_ms`, and `finding_index_preload_peak_rss_bytes` when Finding/coverage/finalize each build a `FindingRunIndex`. Use medium/large sizes with `--chunk-rows` / `--chunk-bytes` when measuring per-chunk preload cost. If preload RSS dominates, that is evidence for a later request/run-scoped optimization — do not automatically redesign S2C, and do not return to per-report queries.
@@ -299,7 +308,7 @@ Sources (central backend only; no tenant, Asset, IP, hostname, or tag data is se
 - **FIRST EPSS** daily CSV (`https://epss.empiricalsecurity.com/epss_scores-current.csv.gz`) — exploit probability and percentile, not severity.
 - **CISA KEV** JSON catalog — official known-exploited membership only. KEV is never inferred from Nuclei tags, CVSS, or EPSS.
 
-Refresh is scheduled from the existing single-process APScheduler (the Compose `api` service is one replica). Sources self-gate: EPSS daily, NVD/KEV every six hours. PostgreSQL advisory locks prevent overlapping refresh of the same source. A source outage records `last_error`, updates `last_attempt_at`, and preserves `last_success_at` plus last known-good intelligence. NVD batch updates share one transaction; a later batch failure rolls back the entire refresh, including priority projections. EPSS applies rows present in a valid file and does not treat absence as authority to clear existing scores unless completeness is proven. KEV is three-state: confirmed member, confirmed absent after a complete catalog, or unknown/not synchronized. Failed refreshes do not change finding identity or lifecycle. Vulnerability detail requires a tenant and a linked Asset Finding.
+Refresh is scheduled from the dedicated Compose `scheduler` process (not the API). Sources self-gate: EPSS daily, NVD/KEV every six hours. PostgreSQL advisory locks prevent overlapping refresh of the same source. A source outage records `last_error`, updates `last_attempt_at`, and preserves `last_success_at` plus last known-good intelligence. NVD batch updates share one transaction; a later batch failure rolls back the entire refresh, including priority projections. EPSS applies rows present in a valid file and does not treat absence as authority to clear existing scores unless completeness is proven. KEV is three-state: confirmed member, confirmed absent after a complete catalog, or unknown/not synchronized. Failed refreshes do not change finding identity or lifecycle. Vulnerability detail requires a tenant and a linked Asset Finding.
 
 Admin endpoints:
 

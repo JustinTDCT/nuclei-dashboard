@@ -17,7 +17,7 @@ services:
   api:
     build: ./backend
     pull_policy: build
-    environment:
+    environment: &backend-environment
       DATABASE_URL: postgresql://${POSTGRES_USER:-nuclei}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-nuclei}
       SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
       SCANNER_TOKEN: ${SCANNER_TOKEN:?Set SCANNER_TOKEN in .env}
@@ -43,6 +43,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  # Exactly one scheduler process. Do not `docker compose up --scale scheduler=N`.
+  # A second replica waits on the PostgreSQL leader lock and does not start APScheduler.
+  scheduler:
+    build: ./backend
+    pull_policy: build
+    command: ["python", "-m", "app.scheduler_process"]
+    environment: *backend-environment
+    volumes:
+      - scan-artifacts:/var/lib/nuclei-dashboard/raw-artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
   web:
