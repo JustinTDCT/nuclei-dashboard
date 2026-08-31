@@ -1,5 +1,6 @@
 # Reference only. Prefer agent/docker-compose.yml plus a downloaded .env,
 # or the per-agent compose file from the dashboard.
+# Rebuild with docker compose --env-file agent.env so TLS_CA_FILE is supplied.
 # Rebuild the image after control-plane changes. Pin the git context to a
 # 40-character commit SHA — not a branch or tag.
 

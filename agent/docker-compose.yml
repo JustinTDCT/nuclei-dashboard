@@ -1,6 +1,8 @@
 # Site agent. Credentials come from a sibling .env (download from the dashboard).
 #   curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/JustinTDCT/nuclei-dashboard/main/agent/docker-compose.yml
 #   docker compose --env-file agent.env up -d --build
+# Always use --env-file agent.env on rebuild/recreate. Without it TLS_CA_FILE
+# is not passed and the Agent cannot verify the central certificate.
 #
 # Docker clones scan_runtime from an immutable 40-character commit and builds the image.
 # After Agent/runtime changes land, bump the #commit below, then rebuild:

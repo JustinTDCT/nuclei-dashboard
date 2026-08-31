@@ -941,6 +941,8 @@ cd ~/nuclei-agent
 docker compose --env-file agent.env up -d --build
 ```
 
+Always pass `--env-file agent.env` (or the downloaded `agent-<UUID>.env`) on rebuild and recreate. Without it the container can come up healthy but fail TLS verification because `TLS_CA_FILE` is empty.
+
 The first build pulls the pinned `scan_runtime` commit from GitHub and installs the same scanner tools as the central scanner. That can take a while.
 
 ```bash

@@ -12,6 +12,8 @@ def agent_compose(agent: Agent, central_url: str, include_secret: bool = True) -
     return f"""# Site agent for {agent.name} ({agent.uuid})
 # On the LAN host (outbound HTTPS to GitHub and {central_url}):
 #   docker compose --env-file agent.env up -d --build
+# Always use --env-file agent.env on rebuild/recreate. Without it TLS_CA_FILE
+# is not passed and the Agent cannot verify the central certificate.
 # Docker clones scan_runtime from an immutable 40-character commit and builds the image.
 # Scanner tool versions and SHA-256 checksums are pinned in scan_runtime/pinned_versions.json.
 # After we push agent changes: bump AGENT_GIT_CONTEXT to that commit, then:

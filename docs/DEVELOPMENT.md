@@ -266,6 +266,8 @@ Keep agent trust material in `./agent-certs`. Caddy's `./certs` directory is onl
 
 `TLS_CA_FILE` is a container path. A host path such as `/home/tech/ca.pem` is not visible unless that file is mounted into the container. `--env-file` only sets variables that the compose file passes through; the stock file passes `TLS_CA_FILE`.
 
+LAN Agent rebuild/recreate on NUCLEI-AGENT (and any generated site Agent) must use `docker compose --env-file agent.env ...`. A plain `docker compose up` without that file can recreate a running container that still cannot verify the central certificate because `TLS_CA_FILE` was never interpolated into the container environment.
+
 Do not embed environment-specific CA material in the repository.
 
 Development opt-out only: `AGENT_TLS_VERIFY=0` or `TLS_VERIFY=0`.
