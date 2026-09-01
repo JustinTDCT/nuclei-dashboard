@@ -1,3 +1,9 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -13,6 +19,7 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   # Default is one API replica. Two replicas are supported:
   # `docker compose up -d --scale api=2` against the same postgres and
@@ -48,6 +55,7 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    logging: *default-logging
 
   # Exactly one scheduler process. Do not `docker compose up --scale scheduler=2`.
   # A second replica waits on the PostgreSQL leader lock and does not start APScheduler.
@@ -64,6 +72,7 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
 
   web:
     build: ./frontend
@@ -71,6 +80,7 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    logging: *default-logging
 
   scanner:
     build: ./scan_runtime
@@ -97,6 +107,7 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
 
   # LAN site agent. Not started by default.
   # On the LAN host: sudo docker compose --profile lan-agent up -d --build nuclei-agent
@@ -109,6 +120,7 @@ services:
     build: ./scan_runtime
     command: ["python", "agent_main.py"]
     restart: unless-stopped
+    logging: *default-logging
     network_mode: host
     # Host networking reaches site RFC1918. The process is uid 1000 with
     # only NET_RAW so ICMP and Naabu SYN can open raw sockets. Do not add
@@ -151,6 +163,7 @@ services:
       - api
       - web
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   postgres-data:

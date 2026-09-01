@@ -176,6 +176,8 @@ API startup runs `alembic upgrade head`. That is forward-only for this schema.
 - Any Alembic revision that has been applied. Downgrade from `0002`–`0017` is refused when data exists (`docs/DEVELOPMENT.md`). There is no safe `alembic downgrade` of production data.
 - After a future migration lands, rollback of **code** to a pre-migration SHA while leaving the upgraded database is undefined. Restore from the pre-upgrade dump instead.
 
+**Walked 2026-09-01** on isolated Compose project `nuclei-v1b-rollback` (not production): restore dump → known-good API config → harmless later label → return to known-good. Alembic stayed `0017_security_h6_h8`. The postgres volume identity did not change. `alembic downgrade 0016` refused (`50` history rows) and left the schema at 0017. Then `down -v` only on that project. Repeat: `ops/v1b-rollback-walk.sh`.
+
 **Forbidden**
 
 ```bash
@@ -196,17 +198,7 @@ docker compose down -v   # deletes postgres-data, scan-artifacts, scanner-data, 
 | Certificate | `openssl x509 -enddate` | 30 days |
 | Logs | Docker `json-file` | Must have `max-size` / `max-file` so logs cannot fill the disk |
 
-Compose in this repository does not yet set `json-file` rotation. V1B must add and deploy:
-
-```yaml
-logging:
-  driver: json-file
-  options:
-    max-size: "20m"
-    max-file: "5"
-```
-
-on every service, then recreate containers **without** `-v`. Until that is deployed, `docker compose logs` can grow without bound.
+Compose sets a shared `json-file` ceiling on every long-lived service (`x-logging: &default-logging`, `max-size: 10m`, `max-file: 5`, about 50 MB per container). Recreate containers **without** `-v` after changing it. Live secdock applied this on 2026-09-01 (`--scale api=2 --no-build`); inspect with `docker inspect <container> --format '{{json .HostConfig.LogConfig}}'`.
 
 ---
 
@@ -224,6 +216,8 @@ Do not reopen S3F. Document and, where safe, re-run **restart** (not replica top
 | PostgreSQL | Recreate `postgres` on the **same** `postgres-data` volume; wait for healthy; API reconnects | New volume, `down -v`, or `pg_restore` onto live |
 
 WAN scanner talks to `http://api:8000` (no Caddy retry). A brief API recreate can 502 in-flight scanner POSTs; that is accepted H9 non-claim.
+
+**Walked 2026-09-01** as part of log-rotation deploy: `docker compose up -d --no-build --scale api=2` recreated postgres (same volume), both API replicas, web, Caddy, scanner, and scheduler. Health `{"ok":true}`; scheduler lock `91304701` granted; APScheduler started. Did not reopen S3F.
 
 ---
 
