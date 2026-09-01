@@ -176,7 +176,17 @@ API startup runs `alembic upgrade head`. That is forward-only for this schema.
 - Any Alembic revision that has been applied. Downgrade from `0002`–`0017` is refused when data exists (`docs/DEVELOPMENT.md`). There is no safe `alembic downgrade` of production data.
 - After a future migration lands, rollback of **code** to a pre-migration SHA while leaving the upgraded database is undefined. Restore from the pre-upgrade dump instead.
 
-**Walked 2026-09-01** on isolated Compose project `nuclei-v1b-rollback` (not production): restore dump → known-good API config → harmless later label → return to known-good. Alembic stayed `0017_security_h6_h8`. The postgres volume identity did not change. `alembic downgrade 0016` refused (`50` history rows) and left the schema at 0017. Then `down -v` only on that project. Repeat: `ops/v1b-rollback-walk.sh` (fails closed if postgres or `/api/health` never becomes ready).
+**Walked 2026-09-01** on isolated Compose project `nuclei-v1b-rollback` (not production). Rerun 16:02Z used two distinct immutable API images, not a label-only recreation:
+
+- known-good: `nuclei-dashboard-api:v1b-7f5b4af` (`sha256:4cfcb8ba…17904f`) booted against the restored DB
+- later: `nuclei-dashboard-api:v1b-d161490` (`sha256:5b9b58c6…b8183e`) booted
+- return: the running container image ID equaled the original known-good ID
+- `/api/health` succeeded after every transition; Alembic stayed `0017_security_h6_h8`; postgres volume identity did not change
+- `alembic downgrade 0016` refused (`50` history rows) and left the schema at 0017
+- then `down -v` only on that project
+- production `nuclei-dashboard-api:latest` remained `1cd4014153d8`
+
+Repeat: `ops/v1b-rollback-walk.sh` (run with docker sudo). It builds the two tags from `git archive` of those SHAs if they are missing; it does not retag `:latest`. It fails closed if postgres or `/api/health` never becomes ready, if the two image IDs are identical, or if the final container is not the original known-good image.
 
 **Forbidden**
 
