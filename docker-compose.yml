@@ -14,6 +14,10 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Default is one API replica. The replica gate is
+  # `docker compose up -d --scale api=2` against the same postgres and
+  # scan-artifacts volume. Caddy re-resolves `api`. Do not treat two
+  # replicas as the live operating model until that gate is accepted.
   api:
     build: ./backend
     pull_policy: build
@@ -45,7 +49,7 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Exactly one scheduler process. Do not `docker compose up --scale scheduler=N`.
+  # Exactly one scheduler process. Do not `docker compose up --scale scheduler=2`.
   # A second replica waits on the PostgreSQL leader lock and does not start APScheduler.
   scheduler:
     build: ./backend

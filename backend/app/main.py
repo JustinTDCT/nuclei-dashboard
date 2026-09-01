@@ -5,9 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.security_headers import SecurityHeadersMiddleware
 
+from app.bootstrap import run_api_bootstrap
 from app.config import settings
-from app.database import SessionLocal, ensure_columns
-from app.migrate import apply_schema
 from app.routers import (
     admin,
     agent_api,
@@ -46,14 +45,7 @@ def prepare_control_plane(db) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    apply_schema()
-    # Retained until existing-install adoption is proven. Do not add new ALTER TABLE here.
-    ensure_columns()
-    db = SessionLocal()
-    try:
-        prepare_control_plane(db)
-    finally:
-        db.close()
+    run_api_bootstrap()
     yield
 
 

@@ -61,7 +61,7 @@ The central API owns raw scanner artifacts. PostgreSQL stores metadata only (`sc
 
 - `RAW_ARTIFACT_DIR` defaults to `/var/lib/nuclei-dashboard/raw-artifacts`.
 - `RAW_ARTIFACT_MAX_BYTES` defaults to 268435456 (256 MiB). Oversized uploads are rejected; artifacts are never silently truncated.
-- Compose volume `scan-artifacts` is mounted only on the API. Remote LAN agents upload over HTTPS; they do not receive the volume.
+- Compose volume `scan-artifacts` is mounted on every API replica and on the scheduler (retention deletes bytes). Remote LAN agents upload over HTTPS; they do not receive the volume. Replicas that do not share this volume cannot serve downloads of artifacts another replica ingested.
 - Default retention is 365 days (`raw_scan_artifact_retention_days` in Admin → Settings). The value at upload time sets that artifact's `retention_expires_at`. Changing the setting does not bulk-delete existing artifacts.
 - Successful `complete?ok=true` requires an explicit raw-evidence declaration (`captured`, `dry_run`, `none_executed`, or `skipped_no_targets`). The declaration is checked against the immutable execution snapshot: a normal scan with an unconditional scanner stage cannot claim `none_executed`, `dry_run` is accepted only when the snapshot itself is a dry-run, and `captured` must persist and declare every expected artifact for those stages (`port_discovery.naabu` / `discovery.naabu`, `fingerprint.httpx`, `vulnerability.nuclei`). `skipped_no_targets` is only for `port_scope=detected` discovery that found no hosts: discovery.naabu must still be persisted, downstream httpx/Nuclei/port artifacts must not exist, and the job must have ingested no observations, findings, or detector coverage (so it cannot become CLEAN). A successful real run must also persist the required scanner version provenance for that snapshot (`runtime_version`, plus `naabu_version` / `httpx_version` / `nuclei_version` / `nuclei_templates_version` when those stages executed). A stale client that omits the declaration, required evidence, or required versions is rejected and the run is not marked successful. Failed completes remain optional and may keep partial artifacts and partial provenance. Dry-run jobs must not fabricate Nuclei/Naabu/httpx/template execution versions.
 - Client-supplied artifact provenance is allowlisted to scalar runtime/tool/template version strings. Secret-bearing keys and nested objects are rejected.
@@ -223,15 +223,51 @@ pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py t
 
 ### Scale S3E keyset report/export iteration
 
-S3E streams report CSV/PDF exports and the three compatibility CSV exports so a large inventory cannot force the API to hold the full result set in Python memory. Full-result semantics stay: same columns, same filters, same deterministic order, every matching row. Preview and staff list GETs stay on the S3D `HistoryPage` / `page`/`page_size` offset contract.
+S3E is ACCEPT at implementation `b241ee9` plus correction `a6eabbe`. It streams report CSV/PDF exports and the three compatibility CSV exports so a large inventory cannot force the API to hold the full result set in Python memory. Full-result semantics stay: same columns, same filters, same deterministic order, every matching row. Preview and staff list GETs stay on the S3D `HistoryPage` / `page`/`page_size` offset contract.
 
 Do not use `OFFSET n` or `query.all()` for export iteration. Walk keyset batches (`(sort keys, id)` seek, default 200 rows, `REPORT_EXPORT_BATCH_SIZE`) and drop the batch from the Session after it is serialized. Equivalence is first row, last row, and total row count against the former full-load exporter. Peak RSS must not grow linearly with row count; SELECT count may grow with batch count.
+
+The correction keeps two export paths from loading or skipping rows. `_open_age_buckets()` computes the six open-age bands in PostgreSQL (`CASE` + `GROUP BY`, at most six grouped rows) with `greatest(0, age)` so future/negative age clamps to zero: 0–30, 31–60, 61–90, 91–180, 181–365, 365+. `executive_summary()` must not `query(AssetFinding.first_seen)...all()`. Resolved-finding export selects `sort_at = COALESCE(AssetFinding.resolved_at, latest resolution-history timestamp)` and keysets `(sort_at ASC, id ASC)`; the cursor reads `row.sort_at` and must not substitute `row.first_seen`. Preview keeps the existing entity/offset query.
 
 Do not add `0018`. Agent pin stays `3cdb52c`. This tranche does not add a second API replica.
 
 ```bash
 cd backend
 pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py tests/test_scale_s3d.py tests/test_scale_s3e.py
+```
+
+### Scale S3F replica-readiness inventory and two-API gate
+
+S3F inventories what is still process-local or filesystem-local, then proves two API processes against the same PostgreSQL and shared artifact storage. It does not declare H9 / horizontal scaling complete. Default Compose still runs one API replica. Do not `--scale scheduler=2`.
+
+**Replica-safe (shared PostgreSQL / image / request scope):**
+
+- Staff JWT is signed with shared `SECRET_KEY` and bound to the current password hash (H5). The browser holds the token in `sessionStorage`.
+- Agent JWT is likewise stateless. Challenge nonces are durable `agent_challenges` rows; consume uses `SELECT ... FOR UPDATE`.
+- Login and Agent-challenge rate limits / lockouts are PostgreSQL `auth_throttles` UPSERT + `FOR UPDATE` (H8).
+- Settings, job claim (`SELECT Agent ... FOR UPDATE` then atomic `UPDATE ... WHERE unclaimed`), alert-queue claim (`FOR UPDATE SKIP LOCKED`), and ingest write-through caches (`ScanIngestContext`, `FindingRunIndex`, `PolicyResolver`) are request/run scoped, not process globals.
+- Report CSV/PDF spool files are per-response `tempfile.SpooledTemporaryFile` objects. They never replace `RAW_ARTIFACT_DIR`.
+- Compliance catalog JSON and `pinned_scanner_versions.json` are read-only files in the image.
+
+**Must stay single-active (scheduler process):**
+
+- `_discovery_metadata_after_id` is a scheduler-process catch-up cursor. The dedicated `scheduler` service remains one replica. A second scheduler waits on the PostgreSQL leader lock and does not start APScheduler; that is fail-closed protection, not the operating model.
+
+**Filesystem / Compose assumptions:**
+
+- Artifact bytes live under `RAW_ARTIFACT_DIR` (`scan-artifacts` volume). Every API replica and the scheduler must mount the same volume. Incoming writes use a UUID `.part` then rename; same-key ingest locks the metadata row.
+- LAN Agents and staff reach the API through Caddy (`PUBLIC_URL`). Caddy must DNS-resolve every healthy `api` task (`dynamic a api 8000`), not pin a single container IP at start.
+- The WAN scanner calls `http://api:8000` on the Docker network (Caddy still 404s `/api/internal*`). Compose DNS for a scaled `api` service can return more than one address.
+- Every API lifespan runs `apply_schema()` + `seed()`. Concurrent replica start serializes that work with a session-level PostgreSQL advisory lock on a dedicated engine so `apply_schema()`'s `engine.dispose()` cannot drop the lock session. The lock key is not the scheduler leader key.
+- Agent/scanner spools stay on the worker (`AGENT_DATA_DIR`). They are not API-replica state.
+
+The pytest gate starts two uvicorn processes against the test PostgreSQL and shared `RAW_ARTIFACT_DIR`, then exercises login, staff reads/writes, Agent challenge/token, scanner poll, and artifact upload-on-one / download-on-the-other. Compose default remains one API until this gate is accepted live.
+
+Do not add `0018`. Agent pin stays `3cdb52c`. Do not reopen S2 / S3A–S3E.
+
+```bash
+cd backend
+pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py tests/test_scale_s3d.py tests/test_scale_s3e.py tests/test_scale_s3f.py
 ```
 
 S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. S2D records `finding_index_preloads`, `finding_index_preload_selects`, `finding_index_preload_wall_ms`, and `finding_index_preload_peak_rss_bytes` when Finding/coverage/finalize each build a `FindingRunIndex`. Use medium/large sizes with `--chunk-rows` / `--chunk-bytes` when measuring per-chunk preload cost. If preload RSS dominates, that is evidence for a later request/run-scoped optimization — do not automatically redesign S2C, and do not return to per-report queries.

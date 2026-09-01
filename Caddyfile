@@ -21,7 +21,13 @@ https://:8118 {
 		respond "Not Found" 404
 	}
 	handle /api* {
-		reverse_proxy api:8000
+		reverse_proxy {
+			dynamic a api 8000 {
+				refresh 5s
+				versions ipv4
+			}
+			lb_policy round_robin
+		}
 	}
 	handle {
 		reverse_proxy web:80
