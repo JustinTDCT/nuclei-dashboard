@@ -1,5 +1,9 @@
 # V1A — Master Plan Closure Audit
 
+**Tranche status:** ACCEPT / CLOSED  
+**Baseline audited:** `3f702b8`  
+**Audit checkpoint:** `a06e455`
+
 **Tranche:** V1A — Master Plan Closure Audit / No Code  
 **Plan version audited:** `MASTER_PLAN.md` v1.0.0  
 **Code baseline:** `3f702b8c970768ae82c9c48e58af171f2b84a913` (docs checkpoint on `fd697a6`)  
@@ -281,6 +285,4 @@ Do **not** name Phase 4A yet. Use closure-style tranches until a new immutable r
 
 ## Gate
 
-**V1A audit: READY as the closure record.**  
-**Product: NOT V1 RELEASE READY.**  
-**Next: V1B operational readiness, then V1C UX walk — not a new feature phase.**
+**Gate:** V1A audit CLOSED. Product still NOT V1 RELEASE READY. Next is V1B (this file is historical).

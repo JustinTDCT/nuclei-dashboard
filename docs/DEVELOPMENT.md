@@ -2,7 +2,7 @@
 
 `MASTER_PLAN.md` is the canonical architecture and phase contract. Do not implement later phases from it unless the current task says so.
 
-The defined implementation roadmap is complete through Phase 3C, Scale S3, and Sec H9 (`3f702b8`). Current tranche is **V1A — Master Plan Closure Audit** (`docs/V1A_CLOSURE_AUDIT.md`): no production code, no `0018`, no Agent pin change.
+The defined implementation roadmap is complete through Phase 3C, Scale S3, and Sec H9 (`3f702b8`). **V1A** is ACCEPT / CLOSED (`a06e455` on audited baseline `3f702b8`). Current tranche is **V1B — Operational Release Readiness** (`docs/V1B_OPERATIONS.md`, `docs/V1B_CLOSURE.md`): no product features, no `0018`, no Agent pin change, no V1A PARTIAL fixes.
 
 ## Database migrations (Alembic)
 
@@ -165,7 +165,7 @@ Staff bearer tokens are stored in `sessionStorage` so they do not survive a brow
 
 `SETTINGS_ENCRYPTION_KEY` must be a generated Fernet key and must differ from `SECRET_KEY`, `SCANNER_TOKEN`, and the database password. It may be empty only when no SMTP password is stored. If an SMTP password exists, startup migrates leftover plaintext and refuses to start when the key is missing or cannot decrypt. The API still masks the password on read. A blank save keeps the existing secret.
 
-GitHub Actions runs backend pytest plus the frontend typecheck/lint/test/build. Protect `main` so those checks are required before merge. That protection is a repository setting, not application code.
+GitHub Actions runs backend pytest plus the frontend typecheck/lint/test/build. Job names are `backend` and `frontend`. Frontend CI needs Node **22.10+** because jsdom 30’s undici requires `worker_threads.markAsUncloneable` (absent on Node 20). V1B policy: `main` is protected so those two checks are required on pull requests; force-push and deletion are forbidden; **direct pushes to `main` are prohibited** (`enforce_admins` on), including for repository admins. Land changes through a PR after both checks are green. That protection is a GitHub setting, not application code; enable it only after CI is green on the candidate SHA. Do not protect a red `main`.
 
 Migration tests start an isolated PostgreSQL on `127.0.0.1:55432` via Docker, or use `TEST_DATABASE_URL` if you set it.
 

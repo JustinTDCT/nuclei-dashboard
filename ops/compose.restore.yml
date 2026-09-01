@@ -1,0 +1,24 @@
+# Isolated restore overlay. Never use as the production Compose project.
+#
+#   COMPOSE_PROJECT_NAME=nuclei-v1b-restore
+#   docker compose -f docker-compose.yml -f ops/compose.restore.yml \
+#     --env-file .env up -d postgres api web caddy
+#
+# Do not start scheduler or scanner against a restored copy (alerts, WAN
+# claims, and live scans must not run from backup data).
+# Do not `docker compose down -v` on the production project.
+
+services:
+  api:
+    image: nuclei-dashboard-api:latest
+    pull_policy: never
+  web:
+    image: nuclei-dashboard-web:latest
+    pull_policy: never
+  caddy:
+    ports: !override
+      - "18118:8118"
+  scheduler:
+    profiles: ["v1b-restore-never"]
+  scanner:
+    profiles: ["v1b-restore-never"]

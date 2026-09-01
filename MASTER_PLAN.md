@@ -122,9 +122,10 @@ Inserted after a clean-room review of commit `312e0d0`. These are production-saf
 
 ### V1 closure sequence
 
-The implementation roadmap in this file ends at Phase 3C plus Scale S1–S3 and Sec H1–H9. There is no Phase 4. Do not invent one until the closure audit and operational/UX gates exist.
+The implementation roadmap in this file ends at Phase 3C plus Scale S1–S3 and Sec H1–H9. There is no Phase 4. Do not invent one until the remaining closure gates exist. V1A product PARTIALs (single-CIDR Networks, site-timezone display, scan cancel/dry-run UI, exclusions UI, guided merge/split, manual finding resolve, treatment-review policy, missing event families) stay in the V1A backlog. Do not fix them in V1B.
 
-- **V1A — Master Plan Closure Audit.** Current. No production code, no schema, no `0018`, no Agent pin change, no reopening S1–S3. Walk live HEAD against every Phase 0–3C requirement, every locked contract, and every deferred item. Output: `docs/V1A_CLOSURE_AUDIT.md`. The audit answers whether the software is the product described by plan v1.0.0, not whether a later feature tranche should start.
+- **V1A — Master Plan Closure Audit.** ACCEPT / CLOSED. Baseline audited: `3f702b8`. Audit checkpoint: `a06e455`. Output: `docs/V1A_CLOSURE_AUDIT.md`. Feature-complete for the written roadmap; not V1 release-ready.
+- **V1B — Operational Release Readiness.** Current. No product features, no V1A PARTIAL/MISSING UX fixes, no schema, no `0018`, no Agent pin change, no reopening S1–S3. Gates: CI green on the release-candidate lineage and `main` protection; proven PostgreSQL + `scan-artifacts` restore into isolation; certificate lifecycle exercised; upgrade/rollback playbook; disk/log/health operations; failure-recovery smoke documented from H9/S3F rather than reopened; `docs/V1B_CLOSURE.md` with a binary READY / NOT READY FOR V1C verdict. Runbook: `docs/V1B_OPERATIONS.md`. After V1B: V1C technician/auditor UX walk → V1D soak → V1 release decision → only then a V1.1/V2 roadmap.
 
 ---
 

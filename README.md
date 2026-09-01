@@ -1580,6 +1580,8 @@ Do not use `docker compose down -v` during a routine update because that can del
 
 At minimum, plan for these data categories.
 
+Operator procedure and isolated restore proof: [`docs/V1B_OPERATIONS.md`](docs/V1B_OPERATIONS.md). A `pg_dump` without a restore that boots the application is not a passed V1B gate. Never `docker compose down -v` on the production project.
+
 ## PostgreSQL
 
 The `postgres-data` volume contains the primary application database.
