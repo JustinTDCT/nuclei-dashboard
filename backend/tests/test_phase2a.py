@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import inspect, text
 
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 from tests.test_phase1d import (
     _agent_headers,
     _client,
@@ -743,7 +743,7 @@ def test_cross_tenant_and_authorization(reset_db):
         assert good.json()["finding_resolution_clean_scans"] == 3
         legacy = client.get(f"/api/tenants/{world['tenant']['id']}/findings", headers=_headers(viewer))
         assert legacy.status_code == 200
-        assert len(legacy.json()) == 1
+        assert len(page_items(legacy.json())) == 1
 
 
 @requires_postgres
@@ -852,11 +852,12 @@ def test_agent_and_central_use_same_lifecycle_and_legacy_api(reset_db):
             db.close()
         listed = client.get(f"/api/tenants/{world['tenant']['id']}/findings", headers=_headers(token))
         assert listed.status_code == 200
-        assert len(listed.json()) == 2
+        assert len(page_items(listed.json())) == 2
         logical = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token))
         assert logical.status_code == 200
-        assert len(logical.json()) == 2
-        detail = client.get(f"/api/asset-findings/{logical.json()[0]['id']}", headers=_headers(token))
+        logical_rows = page_items(logical.json())
+        assert len(logical_rows) == 2
+        detail = client.get(f"/api/asset-findings/{logical_rows[0]['id']}", headers=_headers(token))
         assert detail.status_code == 200
         assert detail.json()["history"]
         assert detail.json()["evidence"]
@@ -1266,8 +1267,9 @@ def test_list_and_dashboard_queries_are_bounded_and_severity_filters_before_limi
         finally:
             event.remove(engine, "before_cursor_execute", _before)
         assert listed.status_code == 200, listed.text
-        assert len(listed.json()) == 50
-        assert all(row["severity"] == "critical" for row in listed.json())
+        listed_rows = page_items(listed.json())
+        assert len(listed_rows) == 50
+        assert all(row["severity"] == "critical" for row in listed_rows)
         assert dashboard.status_code == 200
         assert dashboard.json()["findings"]["critical"] == 50
         assert dashboard.json()["findings"]["high"] == 2051

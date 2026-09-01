@@ -10,7 +10,7 @@ from alembic import command
 from alembic.util import CommandError
 from sqlalchemy import event, inspect, text
 
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 from tests.test_migrations import SECURITY_H_HEAD
 from tests.test_phase1d import _client, _create_staff, _headers, _login, _world
 from tests.test_phase2a import _finding_payload, _run_clean, _run_detected
@@ -384,8 +384,8 @@ def test_asset_handling_application_audit_and_auto_approval_safety(reset_db):
         _post_device(client, world, job_id, ip="10.1.0.50", hostname="LT-100")
         _post_coverage(client, world, job_id, ["https://10.1.0.50"])
         assert _complete(client, world, job_id).status_code == 200
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/assets", headers=_headers(admin))
-        lt = next(row for row in listed.json() if row["hostname"] == "LT-100" or row["display_name"] == "LT-100")
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/assets", headers=_headers(admin)).json())
+        lt = next(row for row in listed if row["hostname"] == "LT-100" or row["display_name"] == "LT-100")
         assert lt["classification"] == "Laptop"
         assert lt["disposition"] == "approved"
         db = SessionLocal()
@@ -424,7 +424,7 @@ def test_asset_handling_application_audit_and_auto_approval_safety(reset_db):
         _post_device(client, world, job_id, ip="10.1.0.60", hostname="SRV-1")
         _post_coverage(client, world, job_id, ["https://10.1.0.60"])
         assert _complete(client, world, job_id).status_code == 200
-        assets = client.get(f"/api/tenants/{world['tenant']['id']}/assets", headers=_headers(admin)).json()
+        assets = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/assets", headers=_headers(admin)).json())
         srv = next(row for row in assets if "SRV-1" in (row["hostname"] or "") or "SRV-1" in row["display_name"])
         assert srv["disposition"] == "unreviewed"
 
@@ -596,7 +596,7 @@ def test_finding_lifecycle_policy_threshold_and_history(reset_db):
             ip="10.1.0.70",
             findings=[_finding_payload(template="crit-tpl", name="Critical hole", severity="critical", host="https://10.1.0.70")],
         )
-        rows = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(admin)).json()
+        rows = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(admin)).json())
         af_id = rows[0]["id"]
         from tests.test_phase2a import _complete, _post_device, _start_lan
 
@@ -759,7 +759,7 @@ def test_manual_inheritance_scenario_and_performance(reset_db):
         ).status_code == 200
         _post_coverage(client, world, job_id, ["https://10.10.0.10", "https://10.20.0.10"])
         assert _complete(client, world, job_id).status_code == 200
-        rows = client.get(f"/api/tenants/{tenant['id']}/assets", headers=_headers(admin)).json()
+        rows = page_items(client.get(f"/api/tenants/{tenant['id']}/assets", headers=_headers(admin)).json())
         lan_asset = next(row for row in rows if "LT-100" in (row["hostname"] or row["display_name"]))
         other_asset = next(row for row in rows if "LT-200" in (row["hostname"] or row["display_name"]))
         assert lan_asset["classification"] == "Laptop"

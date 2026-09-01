@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from app.job_progress import planned_stage_ids, progress_view, record_job_progress
 from app.models import JOB_DONE, JOB_QUEUED, JOB_RUNNING
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 from tests.test_phase1d import _agent_headers, _client, _headers, _lan_scan, _login, _world
 from tests.test_phase2a import _start_lan
 
@@ -101,7 +101,7 @@ def test_heartbeat_persists_progress_for_owned_running_job(reset_db):
         assert beat.status_code == 200, beat.text
         listed = client.get(f"/api/tenants/{world['tenant']['id']}/jobs", headers=_headers(token))
         assert listed.status_code == 200
-        row = next(item for item in listed.json() if item["id"] == job_id)
+        row = next(item for item in page_items(listed.json()) if item["id"] == job_id)
         assert row["progress"]["stage"] == "scanning"
         assert row["progress"]["approximate"] is True
         assert row["status"] == "running"

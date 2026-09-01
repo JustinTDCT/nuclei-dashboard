@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, inspect, text
 from sqlalchemy.orm import Session
 
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 from tests.test_migrations import FROZEN_MIGRATION_HASHES, SECURITY_H_HEAD
 from tests.test_phase1d import _client, _create_staff, _headers, _login, _world
 
@@ -735,7 +735,7 @@ def test_webhook_validation_and_alert_api(reset_db):
             db.close()
         listed = client.get("/api/alerts?open_only=true&event_type=new_asset&severity=high", headers=_headers(viewer))
         assert listed.status_code == 200
-        assert any(row["id"] == alert_id for row in listed.json())
+        assert any(row["id"] == alert_id for row in page_items(listed.json()))
         detail = client.get(f"/api/alerts/{alert_id}", headers=_headers(viewer))
         assert detail.status_code == 200
         assert detail.json()["source_event"]["id"] == event_id
@@ -937,7 +937,7 @@ def test_routing_and_list_query_counts_are_bounded(reset_db):
             try:
                 response = client.get(f"/api/alerts?tenant_id={tenant_id}&open_only=true", headers=_headers(token))
                 assert response.status_code == 200
-                assert len(response.json()) == 40
+                assert len(page_items(response.json())) == 40
             finally:
                 event.remove(listen_on, "before_cursor_execute", before_cursor)
         assert len(queries) <= 16

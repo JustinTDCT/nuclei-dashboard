@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,7 @@ from app.job_progress import progress_view
 from app.jobs import create_job, has_active_job
 from app.locality import LanScanInvalidError, get_tenant
 from app.models import TRIGGER_MANUAL, Scan, ScanJob, User
+from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
 from app.raw_artifacts import (
     ArtifactError,
     download_filename,
@@ -28,7 +29,7 @@ from app.scan_definitions import (
     validate_definition,
 )
 from app.scan_dispatch import resolve_dispatch_policy
-from app.schemas import ScanArtifactOut, ScanIn, ScanJobOut, ScanOut
+from app.schemas import HistoryPage, ScanArtifactOut, ScanIn, ScanJobOut, ScanOut
 
 router = APIRouter(tags=["scans"])
 
@@ -203,28 +204,40 @@ def run_scan(scan_id: int, user: User = Depends(require_user), db: Session = Dep
     return job_out(job)
 
 
-@router.get("/tenants/{tenant_id}/jobs", response_model=list[ScanJobOut])
-def list_jobs(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+@router.get("/tenants/{tenant_id}/jobs", response_model=HistoryPage)
+def list_jobs(
+    tenant_id: int,
+    limit: int = Query(default=LIST_PAGE_DEFAULT, ge=1, le=LIST_PAGE_MAX),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(require_any),
+    db: Session = Depends(get_db),
+):
     require_visible_tenant(db, user, tenant_id)
-    jobs = (
-        db.query(ScanJob)
-        .filter(ScanJob.tenant_id == tenant_id)
-        .order_by(ScanJob.created_at.desc())
-        .limit(100)
-        .all()
+    query = db.query(ScanJob).filter(ScanJob.tenant_id == tenant_id)
+    total, jobs = paginate_query(
+        query,
+        order_by=(ScanJob.created_at.desc(), ScanJob.id.desc()),
+        limit=limit,
+        offset=offset,
     )
-    return [job_out(j) for j in jobs]
+    return as_page(jobs, total=total, limit=limit, offset=offset, serialize=job_out)
 
 
-@router.get("/jobs", response_model=list[ScanJobOut])
-def list_all_jobs(user: User = Depends(require_any), db: Session = Depends(get_db)):
-    jobs = (
-        apply_tenant_scope(db.query(ScanJob), user, ScanJob.tenant_id)
-        .order_by(ScanJob.created_at.desc())
-        .limit(50)
-        .all()
+@router.get("/jobs", response_model=HistoryPage)
+def list_all_jobs(
+    limit: int = Query(default=LIST_PAGE_DEFAULT, ge=1, le=LIST_PAGE_MAX),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(require_any),
+    db: Session = Depends(get_db),
+):
+    query = apply_tenant_scope(db.query(ScanJob), user, ScanJob.tenant_id)
+    total, jobs = paginate_query(
+        query,
+        order_by=(ScanJob.created_at.desc(), ScanJob.id.desc()),
+        limit=limit,
+        offset=offset,
     )
-    return [job_out(j) for j in jobs]
+    return as_page(jobs, total=total, limit=limit, offset=offset, serialize=job_out)
 
 
 @router.get("/jobs/{job_id}", response_model=ScanJobOut)

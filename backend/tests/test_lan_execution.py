@@ -5,7 +5,7 @@ from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
 
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 
 
 @contextmanager
@@ -86,7 +86,7 @@ def _setup_two_network_scan(client: TestClient, token: str) -> dict:
 def _job_count(client: TestClient, token: str, tenant_id: int) -> int:
     jobs = client.get(f"/api/tenants/{tenant_id}/jobs", headers=_headers(token))
     assert jobs.status_code == 200, jobs.text
-    return len(jobs.json())
+    return len(page_items(jobs.json()))
 
 
 def _approve_agent(agent_id: int) -> None:

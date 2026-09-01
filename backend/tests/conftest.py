@@ -108,6 +108,15 @@ os.environ.setdefault("AGENT_TLS_VERIFY", "1")
 requires_postgres = pytest.mark.skipif(not POSTGRES_AVAILABLE, reason=POSTGRES_SKIP_REASON)
 
 
+def page_items(payload):
+    """Collection GETs return HistoryPage; keep a list fallback for unpaged routes."""
+    if isinstance(payload, dict) and "items" in payload:
+        return list(payload["items"])
+    if isinstance(payload, list):
+        return payload
+    raise TypeError("expected a HistoryPage or a list")
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
     if _STARTED_CONTAINER:
         subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], check=False, capture_output=True)

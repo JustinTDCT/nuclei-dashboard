@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
+import { PageNav } from "../components/PageNav";
 import { formatUtc, useTimezone } from "../timezone";
-import type { AlertItem, Tenant } from "../types";
+import type { AlertItem, HistoryPage, Tenant } from "../types";
 
 const EVENT_LABELS: Record<string, string> = {
   new_asset: "New Asset",
@@ -55,19 +56,31 @@ export function Alerts({ tenantId }: { tenantId?: number }) {
   const [eventType, setEventType] = useState("");
   const [filterTenant, setFilterTenant] = useState(tenantId ? String(tenantId) : "");
   const [selected, setSelected] = useState<AlertItem | null>(null);
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const pageSize = 50;
 
-  function load() {
+  function load(nextOffset = offset) {
     const qs = new URLSearchParams();
     const tid = tenantId || (filterTenant ? Number(filterTenant) : undefined);
     if (tid) qs.set("tenant_id", String(tid));
     if (openOnly) qs.set("open_only", "true");
     if (severity) qs.set("severity", severity);
     if (eventType) qs.set("event_type", eventType);
-    api<AlertItem[]>(`/api/alerts?${qs}`).then(setAlerts);
+    qs.set("limit", String(pageSize));
+    qs.set("offset", String(nextOffset));
+    api<HistoryPage<AlertItem>>(`/api/alerts?${qs}`).then((page) => {
+      setAlerts(page.items);
+      setTotal(page.total);
+      setOffset(page.offset);
+    });
     if (!tenantId) api<Tenant[]>("/api/tenants").then(setTenants);
   }
 
-  useEffect(load, [tenantId, openOnly, severity, eventType, filterTenant]);
+  useEffect(() => {
+    setOffset(0);
+    load(0);
+  }, [tenantId, openOnly, severity, eventType, filterTenant]);
 
   async function ack(id: number) {
     await api(`/api/alerts/${id}/ack`, { method: "POST" });
@@ -190,6 +203,7 @@ export function Alerts({ tenantId }: { tenantId?: number }) {
             </div>
           ))}
           {alerts.length === 0 && <div className="text-slate-500 text-sm">No alerts.</div>}
+          <PageNav offset={offset} limit={pageSize} total={total} onPage={(next) => { setOffset(next); load(next); }} />
         </div>
         {selected && (
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3 h-fit">

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 
 from app.access import apply_tenant_scope, require_object_tenant, require_tenant_access
@@ -9,7 +9,8 @@ from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.models import EVENT_TYPE_LABELS, Alert, DomainEvent, User
-from app.schemas import AlertDetailOut, AlertDeliveryOut, AlertOut
+from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
+from app.schemas import AlertDetailOut, AlertDeliveryOut, AlertOut, HistoryPage
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
 events_router = APIRouter(prefix="/events", tags=["events"])
@@ -53,13 +54,15 @@ def _visible_query(db: Session):
     )
 
 
-@router.get("", response_model=list[AlertOut])
+@router.get("", response_model=HistoryPage)
 def list_alerts(
     tenant_id: int | None = None,
     open_only: bool = False,
     severity: str | None = None,
     event_type: str | None = None,
     type: str | None = None,
+    limit: int = Query(default=LIST_PAGE_DEFAULT, ge=1, le=LIST_PAGE_MAX),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -74,9 +77,19 @@ def list_alerts(
     kind = event_type or type
     if kind:
         query = query.filter(Alert.type == kind)
-    rows = query.order_by(Alert.created_at.desc()).limit(500).all()
+    total, rows = paginate_query(
+        query,
+        order_by=(Alert.created_at.desc(), Alert.id.desc()),
+        limit=limit,
+        offset=offset,
+    )
     summaries = delivery_summary_map(db, [row.id for row in rows])
-    return [_serialize_alert(row, summaries.get(row.id)) for row in rows]
+    return as_page(
+        [_serialize_alert(row, summaries.get(row.id)) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{alert_id}", response_model=AlertDetailOut)

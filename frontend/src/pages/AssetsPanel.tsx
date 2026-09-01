@@ -3,6 +3,7 @@ import { api, download } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import { ControlMapping } from "../components/ControlMapping";
+import { PageNav } from "../components/PageNav";
 import { formatUtc, useTimezone } from "../timezone";
 import type {
   Asset,
@@ -46,16 +47,28 @@ export function AssetsPanel({ tenantId }: { tenantId: number }) {
   const [disposition, setDisposition] = useState("");
   const [selected, setSelected] = useState<AssetDetail | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const pageSize = 50;
 
-  function load() {
+  function load(nextOffset = offset) {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     if (siteId) qs.set("site_id", siteId);
     if (disposition) qs.set("disposition", disposition);
-    api<Asset[]>(`/api/tenants/${tenantId}/assets?${qs}`).then(setRows);
+    qs.set("limit", String(pageSize));
+    qs.set("offset", String(nextOffset));
+    api<HistoryPage<Asset>>(`/api/tenants/${tenantId}/assets?${qs}`).then((page) => {
+      setRows(page.items);
+      setTotal(page.total);
+      setOffset(page.offset);
+    });
     api<Site[]>(`/api/tenants/${tenantId}/sites`).then(setSites);
   }
-  useEffect(load, [tenantId, siteId, disposition]);
+  useEffect(() => {
+    setOffset(0);
+    load(0);
+  }, [tenantId, siteId, disposition]);
 
   return (
     <div className="space-y-4">
@@ -86,7 +99,7 @@ export function AssetsPanel({ tenantId }: { tenantId: number }) {
           <label>Search</label>
           <input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
         </div>
-        <button className="text-cyan-400 text-sm" onClick={load}>
+        <button className="text-cyan-400 text-sm" onClick={() => { setOffset(0); load(0); }}>
           Search
         </button>
         <button
@@ -124,7 +137,7 @@ export function AssetsPanel({ tenantId }: { tenantId: number }) {
                 api(`/api/assets/${asset.id}`, {
                   method: "PATCH",
                   body: JSON.stringify({ disposition: e.target.value }),
-                }).then(load)
+                }).then(() => load())
               }
             >
               {DISPOSITIONS.map((value) => (
@@ -138,6 +151,7 @@ export function AssetsPanel({ tenantId }: { tenantId: number }) {
           ),
         ])}
       />
+      <PageNav offset={offset} limit={pageSize} total={total} onPage={(next) => { setOffset(next); load(next); }} />
       {showCreate && write && (
         <ExpectedForm
           tenantId={tenantId}

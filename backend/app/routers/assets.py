@@ -17,6 +17,7 @@ from app.assets import (
     validate_lifecycle,
 )
 from app.access import require_tenant_access, require_visible_tenant
+from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
 from app.reporting.csv_export import csv_streaming_response
 from app.audit import record_audit
 from app.auth import require_any, require_user
@@ -174,7 +175,7 @@ def create_tag(
     return tag
 
 
-@router.get("/tenants/{tenant_id}/assets", response_model=list[AssetListItem])
+@router.get("/tenants/{tenant_id}/assets", response_model=HistoryPage)
 def list_assets(
     tenant_id: int,
     site_id: int | None = None,
@@ -184,6 +185,8 @@ def list_assets(
     criticality: str | None = None,
     expected: bool | None = None,
     include_merged: bool = False,
+    limit: int = Query(default=LIST_PAGE_DEFAULT, ge=1, le=LIST_PAGE_MAX),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -227,9 +230,19 @@ def list_assets(
                 AssetAddress.ip.ilike(like),
             )
         ).distinct()
-    assets = query.order_by(Asset.last_seen.desc().nullslast(), Asset.display_name, Asset.id).limit(1000).all()
+    total, assets = paginate_query(
+        query,
+        order_by=(Asset.last_seen.desc().nullslast(), Asset.display_name, Asset.id),
+        limit=limit,
+        offset=offset,
+    )
     counts = _findings_count_map(db, [asset.id for asset in assets])
-    return [_serialize_list_item(asset, counts.get(asset.id, 0)) for asset in assets]
+    return as_page(
+        [_serialize_list_item(asset, counts.get(asset.id, 0)) for asset in assets],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/tenants/{tenant_id}/assets/export")

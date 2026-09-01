@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
 from sqlalchemy.orm import Session
 
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PHASE1A_REVISION = "0002_sites_networks"
@@ -561,7 +561,7 @@ def test_scanner_lan_wan_observations_and_service_history(reset_db):
             assert lan_asset.disposition == "unreviewed"
             devices = client.get(f"/api/tenants/{tenant['id']}/devices", headers=_headers(admin))
             assert devices.status_code == 200
-            assert {row["hostname"] for row in devices.json()} >= {"srv01", "edge01"}
+            assert {row["hostname"] for row in page_items(devices.json())} >= {"srv01", "edge01"}
         finally:
             db.close()
 
@@ -663,7 +663,7 @@ def test_expected_assets_tags_rbac_and_audit(reset_db):
         assert viewer_tag.status_code == 403
         listed = client.get(f"/api/tenants/{tenant_a['id']}/assets", headers=_headers(viewer))
         assert listed.status_code == 200
-        assert {row["display_name"] for row in listed.json()} == {"DC01", "IP Only Expected"}
+        assert {row["display_name"] for row in page_items(listed.json())} == {"DC01", "IP Only Expected"}
 
         bad_crit = client.patch(f"/api/assets/{asset_id}", headers=_headers(operator), json={"criticality": "urgent"})
         assert bad_crit.status_code == 400
@@ -795,7 +795,7 @@ def test_asset_list_avoids_nplus_one_and_no_phase1c(reset_db):
         try:
             listed = client.get(f"/api/tenants/{tenant_id}/assets", headers=_headers(admin))
             assert listed.status_code == 200
-            assert len(listed.json()) == 15
+            assert len(page_items(listed.json())) == 15
         finally:
             event.remove(engine, "before_cursor_execute", before_cursor)
     assert len(statements) < 20

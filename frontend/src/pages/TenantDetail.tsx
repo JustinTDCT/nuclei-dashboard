@@ -1,10 +1,11 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, download } from "../api";
 import { canWrite, useAuth } from "../auth";
 import { Badge } from "../components/Badge";
 import { ControlMapping } from "../components/ControlMapping";
 import { ScanProgressBar, ScanProgressDetail } from "../components/ScanProgress";
+import { PageNav } from "../components/PageNav";
 import { Alerts } from "./Alerts";
 import { formatUtc, useTimezone } from "../timezone";
 import { recordedVersion, versionStatusLabel } from "../versionStatus";
@@ -20,6 +21,7 @@ import type {
   ScanArtifact,
   ScanJob,
   Site,
+  HistoryPage,
   PolicyEvaluation,
   Tenant,
   TenantSummary,
@@ -332,6 +334,10 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
   const write = canWrite(user?.role);
   const [scans, setScans] = useState<Scan[]>([]);
   const [jobs, setJobs] = useState<ScanJob[]>([]);
+  const [jobOffset, setJobOffset] = useState(0);
+  const [jobTotal, setJobTotal] = useState(0);
+  const jobPageSize = 50;
+  const jobOffsetRef = useRef(0);
   const [networks, setNetworks] = useState<Network[]>([]);
   const [sites, setSites] = useState<Site[]>([]);
   const [wanTargets, setWanTargets] = useState<AuthorizedWanTarget[]>([]);
@@ -381,9 +387,15 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
   };
   const [form, setForm] = useState(emptyForm);
 
-  function load() {
+  function load(nextJobOffset = jobOffsetRef.current) {
     api<Scan[]>(`/api/tenants/${tenantId}/scans`).then(setScans);
-    api<ScanJob[]>(`/api/tenants/${tenantId}/jobs`).then(setJobs);
+    const jobQs = new URLSearchParams({ limit: String(jobPageSize), offset: String(nextJobOffset) });
+    api<HistoryPage<ScanJob>>(`/api/tenants/${tenantId}/jobs?${jobQs}`).then((page) => {
+      setJobs(page.items);
+      setJobTotal(page.total);
+      setJobOffset(page.offset);
+      jobOffsetRef.current = page.offset;
+    });
     api<Network[]>(`/api/tenants/${tenantId}/networks`).then(setNetworks);
     api<Site[]>(`/api/tenants/${tenantId}/sites`).then(setSites);
     api<AuthorizedWanTarget[]>(`/api/tenants/${tenantId}/wan-targets`).then(setWanTargets);
@@ -398,8 +410,10 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
   }
 
   useEffect(() => {
-    load();
-    const id = setInterval(load, 8000);
+    jobOffsetRef.current = 0;
+    setJobOffset(0);
+    load(0);
+    const id = setInterval(() => load(jobOffsetRef.current), 8000);
     return () => clearInterval(id);
   }, [tenantId]);
   useEffect(() => {
@@ -891,10 +905,10 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
                 <button className="text-cyan-400 text-sm" onClick={() => beginEdit(s)}>
                   Edit
                 </button>
-                <button className="text-cyan-400 text-sm" onClick={() => api(`/api/scans/${s.id}/run`, { method: "POST" }).then(load)}>
+                <button className="text-cyan-400 text-sm" onClick={() => api(`/api/scans/${s.id}/run`, { method: "POST" }).then(() => load())}>
                   Run now
                 </button>
-                <button className="text-rose-300 text-sm" onClick={() => api(`/api/scans/${s.id}/archive`, { method: "POST" }).then(load)}>
+                <button className="text-rose-300 text-sm" onClick={() => api(`/api/scans/${s.id}/archive`, { method: "POST" }).then(() => load())}>
                   Archive
                 </button>
               </div>
@@ -924,6 +938,16 @@ function Scans({ tenantId, focusJobId }: { tenantId: number; focusJobId?: number
             j.hosts_found,
             j.findings_count,
           ])}
+        />
+        <PageNav
+          offset={jobOffset}
+          limit={jobPageSize}
+          total={jobTotal}
+          onPage={(next) => {
+            jobOffsetRef.current = next;
+            setJobOffset(next);
+            load(next);
+          }}
         />
       </div>
       {selectedJob && (
@@ -1036,7 +1060,10 @@ function Findings({ tenantId }: { tenantId: number }) {
   const [selected, setSelected] = useState<AssetFindingDetail | null>(null);
   const [evidenceId, setEvidenceId] = useState<number | null>(null);
   const [policyEval, setPolicyEval] = useState<PolicyEvaluation | null>(null);
-  function load() {
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const pageSize = 50;
+  function load(nextOffset = offset) {
     const qs = new URLSearchParams();
     if (severity) qs.set("severity", severity);
     if (technicalState) qs.set("technical_state", technicalState);
@@ -1044,9 +1071,18 @@ function Findings({ tenantId }: { tenantId: number }) {
     if (kev) qs.set("kev", kev);
     if (treatmentState) qs.set("treatment_state", treatmentState);
     if (reviewOverdue) qs.set("treatment_review_overdue", reviewOverdue);
-    api<AssetFinding[]>(`/api/tenants/${tenantId}/asset-findings?${qs}`).then(setRows);
+    qs.set("limit", String(pageSize));
+    qs.set("offset", String(nextOffset));
+    api<HistoryPage<AssetFinding>>(`/api/tenants/${tenantId}/asset-findings?${qs}`).then((page) => {
+      setRows(page.items);
+      setTotal(page.total);
+      setOffset(page.offset);
+    });
   }
-  useEffect(load, [tenantId, severity, technicalState, priority, kev, treatmentState, reviewOverdue]);
+  useEffect(() => {
+    setOffset(0);
+    load(0);
+  }, [tenantId, severity, technicalState, priority, kev, treatmentState, reviewOverdue]);
   async function openDetail(id: number) {
     const detail = await api<AssetFindingDetail>(`/api/tenants/${tenantId}/asset-findings/${id}`);
     setSelected(detail);
@@ -1162,6 +1198,7 @@ function Findings({ tenantId }: { tenantId: number }) {
           </tbody>
         </table>
       </div>
+      <PageNav offset={offset} limit={pageSize} total={total} onPage={(next) => { setOffset(next); load(next); }} />
       {selected && (
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
           <div className="flex justify-between gap-3">

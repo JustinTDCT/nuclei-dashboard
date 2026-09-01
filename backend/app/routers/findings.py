@@ -3,6 +3,7 @@ from sqlalchemy import exists, or_
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.access import require_visible_tenant
+from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
 from app.reporting.csv_export import csv_streaming_response
 from app.auth import require_any
 from app.compliance import COMPLIANCE_MAPPING_DISCLAIMER, list_asset_finding_control_references
@@ -45,6 +46,7 @@ from app.schemas import (
     AssetFindingHistoryOut,
     AssetFindingOut,
     FindingOut,
+    HistoryPage,
     VulnerabilityIntelligenceOut,
 )
 from app.treatments import display_status, utcnow as treatment_utcnow
@@ -155,7 +157,7 @@ def _get_tenant_asset_finding(db: Session, tenant_id: int, asset_finding_id: int
     return row
 
 
-@router.get("/tenants/{tenant_id}/findings", response_model=list[FindingOut])
+@router.get("/tenants/{tenant_id}/findings", response_model=HistoryPage)
 def list_findings(
     tenant_id: int,
     severity: str | None = None,
@@ -164,6 +166,8 @@ def list_findings(
     device_id: int | None = None,
     template_id: str | None = None,
     scan_job_id: int | None = None,
+    limit: int = Query(default=LIST_PAGE_DEFAULT, ge=1, le=LIST_PAGE_MAX),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -184,8 +188,13 @@ def list_findings(
         query = query.filter(Finding.template_id.ilike(f"%{template_id}%"))
     if scan_job_id:
         query = query.filter(Finding.scan_job_id == scan_job_id)
-    rows = query.order_by(Finding.found_at.desc()).limit(2000).all()
-    return [_finding_out(f) for f in rows]
+    total, rows = paginate_query(
+        query,
+        order_by=(Finding.found_at.desc(), Finding.id.desc()),
+        limit=limit,
+        offset=offset,
+    )
+    return as_page(rows, total=total, limit=limit, offset=offset, serialize=_finding_out)
 
 
 @router.get("/tenants/{tenant_id}/findings/export")
@@ -218,7 +227,7 @@ def export_findings(tenant_id: int, user: User = Depends(require_any), db: Sessi
     return csv_streaming_response(f"tenant-{tenant_id}-findings", headers, exported)
 
 
-@router.get("/tenants/{tenant_id}/asset-findings", response_model=list[AssetFindingOut])
+@router.get("/tenants/{tenant_id}/asset-findings", response_model=HistoryPage)
 def list_asset_findings(
     tenant_id: int,
     technical_state: str | None = None,
@@ -231,6 +240,8 @@ def list_asset_findings(
     kev: bool | None = None,
     treatment_state: str | None = None,
     treatment_review_overdue: bool | None = None,
+    limit: int = Query(default=LIST_PAGE_DEFAULT, ge=1, le=LIST_PAGE_MAX),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -271,18 +282,24 @@ def list_asset_findings(
     query = apply_priority_filter(query, priority)
     query = apply_kev_filter(query, kev)
     query = apply_severity_filter(query, db, severity)
-    rows = (
-        query.order_by(priority_sort_sql(), AssetFinding.last_seen.desc(), AssetFinding.id.desc())
-        .limit(2000)
-        .all()
+    total, rows = paginate_query(
+        query,
+        order_by=(priority_sort_sql(), AssetFinding.last_seen.desc(), AssetFinding.id.desc()),
+        limit=limit,
+        offset=offset,
     )
     display = load_asset_finding_display(db, rows)
     intel_map = load_finding_intelligence(db, rows)
     active_treatments = _active_treatments_for(db, rows)
-    return [
-        _serialize_asset_finding(db, row, display=display, intel_map=intel_map, active_treatments=active_treatments)
-        for row in rows
-    ]
+    return as_page(
+        [
+            _serialize_asset_finding(db, row, display=display, intel_map=intel_map, active_treatments=active_treatments)
+            for row in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/tenants/{tenant_id}/asset-findings/{asset_finding_id}", response_model=AssetFindingDetail)

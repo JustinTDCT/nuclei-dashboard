@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import event, text
 
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 from tests.test_phase1d import _client, _create_staff, _headers, _login, _world
 from tests.test_phase2a import _finding_payload, _run_detected
 
@@ -271,7 +271,7 @@ def test_intelligence_and_priority_context(reset_db):
         token = _login(client)
         world = _world(client, token)
         _cve_finding(client, token, world)
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         assert listed[0]["cve_id"] == CVE
         vuln_id = listed[0]["vulnerability_id"]
         af_id = listed[0]["id"]
@@ -327,7 +327,7 @@ def test_intelligence_and_priority_context(reset_db):
         )
 
         other = _cve_finding(client, token, world, hostname="asset-b", ip="10.1.0.11", severity="critical")
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         b = next(row for row in listed if row["asset_hostname"] == "asset-b" or row["asset_id"] != asset_id)
         client.patch(f"/api/assets/{b['asset_id']}", headers=_headers(token), json={"criticality": "low"})
         from app.database import SessionLocal as SL
@@ -339,7 +339,7 @@ def test_intelligence_and_priority_context(reset_db):
             db.commit()
         finally:
             db.close()
-        again = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        again = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         a_row = next(row for row in again if row["id"] == af_id)
         b_row = next(row for row in again if row["id"] != af_id)
         assert a_row["vulnerability_id"] == b_row["vulnerability_id"]
@@ -352,7 +352,7 @@ def test_non_cve_has_local_priority_without_fake_intel(reset_db):
         token = _login(client)
         world = _world(client, token)
         _run_detected(client, token, world)
-        rows = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        rows = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         assert rows[0]["cve_id"] is None
         assert rows[0]["cvss_base_score"] is None
         assert rows[0]["epss_score"] is None
@@ -427,7 +427,7 @@ def test_list_filters_apply_before_limit_and_query_count_is_bounded(reset_db):
         token = _login(client)
         world = _world(client, token)
         _cve_finding(client, token, world)
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         seed = listed[0]
         now = datetime.now(timezone.utc)
         with engine.begin() as conn:
@@ -492,16 +492,18 @@ def test_list_filters_apply_before_limit_and_query_count_is_bounded(reset_db):
                 headers=_headers(token),
             )
             assert p1.status_code == 200
-            assert all(row["priority"] == "p1" for row in p1.json())
-            assert len(p1.json()) >= 5
+            p1_rows = page_items(p1.json())
+            assert all(row["priority"] == "p1" for row in p1_rows)
+            assert len(p1_rows) >= 5
             kev_rows = client.get(
                 f"/api/tenants/{world['tenant']['id']}/asset-findings?kev=true",
                 headers=_headers(token),
             )
             assert kev_rows.status_code == 200
-            assert len(kev_rows.json()) >= 5
-            assert len(kev_rows.json()) <= 2000
-            assert all(row.get("kev") is True for row in kev_rows.json())
+            kev_items = page_items(kev_rows.json())
+            assert len(kev_items) >= 5
+            assert len(kev_items) <= 2000
+            assert all(row.get("kev") is True for row in kev_items)
             dash = client.get("/api/dashboard", headers=_headers(token))
             assert dash.status_code == 200
             assert "priorities" in dash.json()
@@ -520,15 +522,15 @@ def test_viewer_can_read_but_not_refresh(reset_db):
         world = _world(client, admin)
         _cve_finding(client, admin, world)
         viewer = _create_staff(client, admin, "viewer2b", "viewer")
-        rows = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(viewer))
-        assert rows.status_code == 200
+        rows = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(viewer)).json())
+        assert rows
         detail = client.get(
-            f"/api/tenants/{world['tenant']['id']}/asset-findings/{rows.json()[0]['id']}",
+            f"/api/tenants/{world['tenant']['id']}/asset-findings/{rows[0]['id']}",
             headers=_headers(viewer),
         )
         assert detail.status_code == 200
         intel = client.get(
-            f"/api/vulnerabilities/{rows.json()[0]['vulnerability_id']}?tenant_id={world['tenant']['id']}",
+            f"/api/vulnerabilities/{rows[0]['vulnerability_id']}?tenant_id={world['tenant']['id']}",
             headers=_headers(viewer),
         )
         assert intel.status_code == 200
@@ -594,7 +596,7 @@ def test_nvd_second_batch_failure_rolls_back_all_batches(reset_db):
         token = _login(client)
         world = _world(client, token)
         _cve_finding(client, token, world)
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         asset_id = listed[0]["asset_id"]
 
     cves = [f"CVE-2024-{20000 + index}" for index in range(NVD_BATCH_SIZE + NVD_BATCH_SIZE + 1)]
@@ -644,7 +646,7 @@ def test_nvd_successful_record_without_cvss_clears_old_score(reset_db):
         token = _login(client)
         world = _world(client, token)
         _cve_finding(client, token, world, severity="high")
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         vuln_id = listed[0]["vulnerability_id"]
         af_id = listed[0]["id"]
 
@@ -700,7 +702,7 @@ def test_well_formed_partial_epss_does_not_clear_missing_cves(reset_db):
         token = _login(client)
         world = _world(client, token)
         _cve_finding(client, token, world)
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         _seed_cve_rows(world["tenant"]["id"], listed[0]["asset_id"], [other], cvss=None)
 
     db = SessionLocal()
@@ -758,7 +760,7 @@ def test_kev_null_excluded_from_false_filter(reset_db):
         token = _login(client)
         world = _world(client, token)
         _cve_finding(client, token, world)
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(token)).json())
         unknown_id = listed[0]["id"]
         confirmed_false = _seed_cve_rows(
             world["tenant"]["id"], listed[0]["asset_id"], ["CVE-2024-2222"], kev=False
@@ -791,11 +793,12 @@ def test_kev_null_excluded_from_false_filter(reset_db):
             headers=_headers(token),
         )
         assert false_rows.status_code == 200
-        ids = {row["id"] for row in false_rows.json()}
+        false_items = page_items(false_rows.json())
+        ids = {row["id"] for row in false_items}
         assert confirmed_false[1] in ids
         assert unknown_id not in ids
         assert confirmed_true[1] not in ids
-        assert all(row.get("kev") is False for row in false_rows.json())
+        assert all(row.get("kev") is False for row in false_items)
 
 
 @requires_postgres
@@ -807,7 +810,7 @@ def test_vulnerability_detail_requires_tenant_linkage(reset_db):
         admin = _login(client)
         world = _world(client, admin)
         _cve_finding(client, admin, world)
-        listed = client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(admin)).json()
+        listed = page_items(client.get(f"/api/tenants/{world['tenant']['id']}/asset-findings", headers=_headers(admin)).json())
         linked_id = listed[0]["vulnerability_id"]
         other = client.post("/api/tenants", headers=_headers(admin), json={"name": "Other 2B", "notes": ""}).json()
         with engine.begin() as conn:

@@ -1,14 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.access import require_object_tenant, require_visible_tenant
+from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
 from app.reporting.csv_export import csv_streaming_response
 from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
 from app.models import Asset, Device, Finding, Tenant, User
-from app.schemas import DEVICE_CLASSES, DeviceDetail, DeviceOut, DeviceUpdate, FindingOut
+from app.schemas import DEVICE_CLASSES, DeviceDetail, DeviceOut, DeviceUpdate, FindingOut, HistoryPage
 
 router = APIRouter(tags=["devices"])
 
@@ -59,12 +60,14 @@ def _with_counts(db: Session, devices: list[Device]) -> list[DeviceOut]:
     return rows
 
 
-@router.get("/tenants/{tenant_id}/devices", response_model=list[DeviceOut])
+@router.get("/tenants/{tenant_id}/devices", response_model=HistoryPage)
 def list_devices(
     tenant_id: int,
     status: str | None = None,
     scope: str | None = None,
     q: str | None = None,
+    limit: int = Query(default=LIST_PAGE_DEFAULT, ge=1, le=LIST_PAGE_MAX),
+    offset: int = Query(default=0, ge=0),
     user: User = Depends(require_any),
     db: Session = Depends(get_db),
 ):
@@ -84,7 +87,13 @@ def list_devices(
             | (Device.title.ilike(like))
             | (Device.description.ilike(like))
         )
-    return _with_counts(db, query.order_by(Device.last_seen.desc()).limit(1000).all())
+    total, rows = paginate_query(
+        query,
+        order_by=(Device.last_seen.desc(), Device.id.desc()),
+        limit=limit,
+        offset=offset,
+    )
+    return as_page(_with_counts(db, rows), total=total, limit=limit, offset=offset)
 
 
 @router.get("/devices/{device_id}", response_model=DeviceDetail)

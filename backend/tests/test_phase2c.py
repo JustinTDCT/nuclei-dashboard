@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import event, inspect, text
 from sqlalchemy.exc import IntegrityError
 
-from tests.conftest import requires_postgres
+from tests.conftest import page_items, requires_postgres
 from tests.test_phase1d import _client, _create_staff, _headers, _login, _world
 from tests.test_phase2a import _finding_payload, _run_detected
 
@@ -31,13 +31,13 @@ def _open_finding(client, token, world, **kwargs):
     hostname = kwargs.get("hostname", "asset-a")
     scan, job_id, _posted = _run_detected(client, token, world, **kwargs)
     tenant_id = world["tenant"]["id"]
-    rows = client.get(f"/api/tenants/{tenant_id}/asset-findings", headers=_headers(token)).json()
+    rows = page_items(client.get(f"/api/tenants/{tenant_id}/asset-findings", headers=_headers(token)).json())
     matched = [
         row
         for row in rows
         if hostname in (row.get("asset_hostname") or "") or hostname in (row.get("asset_display_name") or "")
     ]
-    evidence = client.get(f"/api/tenants/{tenant_id}/findings", headers=_headers(token)).json()
+    evidence = page_items(client.get(f"/api/tenants/{tenant_id}/findings", headers=_headers(token)).json())
     return {
         "scan": scan,
         "job_id": job_id,
@@ -322,7 +322,7 @@ def test_treatment_workflow_detection_priority_and_auth(reset_db):
             headers=headers,
         )
         assert overdue.status_code == 200
-        assert any(row["id"] == af_id for row in overdue.json())
+        assert any(row["id"] == af_id for row in page_items(overdue.json()))
         detail = client.get(f"/api/tenants/{tenant_id}/asset-findings/{af_id}", headers=headers).json()
         assert detail["treatment_display_status"] == "review_overdue"
         assert detail["treatment_state"] == "mitigated"
@@ -687,7 +687,7 @@ def test_exactly_one_subject_and_list_query_bound(reset_db):
         try:
             listed = client.get(f"/api/tenants/{tenant_id}/asset-findings?treatment_state=unaddressed", headers=_headers(token))
             assert listed.status_code == 200
-            assert all(row["treatment_state"] == "unaddressed" for row in listed.json())
+            assert all(row["treatment_state"] == "unaddressed" for row in page_items(listed.json()))
             detail = client.get(f"/api/tenants/{tenant_id}/asset-findings/{af['id']}", headers=_headers(token))
             assert detail.status_code == 200
             assert len(queries) < 60
