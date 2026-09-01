@@ -50,13 +50,13 @@ Sample at soak start, at least twice per day, and at soak end. Prefer `docker co
 
 | Signal | How | Fail if |
 |---|---|---|
-| PostgreSQL connections | `SELECT count(*) FROM pg_stat_activity;` plus `max_connections` | Unbounded climb, idle-in-transaction pile-up, connection exhaustion |
+| PostgreSQL connections | Session total **and** `state` breakdown, `max_connections`, idle-in-transaction ages | Unbounded climb, idle-in-transaction pile-up, approaching `max_connections`. A flat total is not a pass if `idle in transaction` rows persist or healthy states are replaced by leaked ones |
 | Database growth | `SELECT pg_size_pretty(pg_database_size(current_database()));` | Unexplained size jump unrelated to scans/events |
 | API / scanner / scheduler CPU+RSS | `sudo docker stats --no-stream` | Unexplained monotonic RSS growth across the window |
 | Scheduler | One Compose `scheduler`; advisory lock `91304701` granted once; job duration in scheduler logs | Two APSchedulers; lock held by two backends; jobs that never finish |
-| Scan job queue | `scan_jobs.status` counts | Permanently stuck `queued` / `running` / `waiting_for_agent` that never miss, fail, or complete |
-| Event/alert queue | `event_alert_queue.status` counts | Permanently `pending`/`processing` growth; duplicate open alerts for the same subject caused by two APIs |
-| Alert deliveries | `alert_deliveries.status` counts | Routing finished (`event_alert_queue` processed) while email/webhook rows stay `pending`/`processing`; delivery worker stuck |
+| Scan job queue | Status counts **and** nonterminal row identity/age (`id`, timestamps) | Same `queued` / `running` / `waiting_for_agent` **id** still nonterminal across samples (a count of 1 can hide one 72-hour stuck job while others rotate) |
+| Event/alert queue | Status counts **and** nonterminal row identity/age | Same `pending`/`processing` **id** across samples; duplicate open alerts for the same subject caused by two APIs |
+| Alert deliveries | Status counts **and** nonterminal row identity/age | Routing finished (`event_alert_queue` processed) while the same email/webhook **id** stays `pending`/`processing`; delivery worker stuck |
 | Duplicate processing | Compare job ids, domain events, alert deliveries | Duplicate jobs/events/alerts attributable to two API replicas (scheduler must stay single-active) |
 | Agent / scanner spool | Agent `/data/spool`, WAN `scanner-data` | Unbounded growth after ACKs; leftover `pipeline.done` that never uploads |
 | `scan-artifacts` | Volume size + `scan_artifacts` row count | Unbounded growth that retention cannot explain |
@@ -69,13 +69,49 @@ Sample at soak start, at least twice per day, and at soak end. Prefer `docker co
 
 Starter samples (read-only). Expand `$POSTGRES_USER` / `$POSTGRES_DB` **inside** the postgres container; they come from Compose `.env` and are often blank in the secdock host shell. API `:8000` is not published to host loopback — probe health from an `api` container, not `curl http://127.0.0.1:8000`. (`docker compose exec api` with `--scale api=2` hits one replica; that is enough for this baseline.)
 
+Compare nonterminal **ids** across samples. A stable status count is not a pass if the same row stays nonterminal for the soak window.
+
 ```bash
 sudo docker compose exec -T postgres \
   sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
 SELECT status, count(*) FROM scan_jobs GROUP BY status ORDER BY 1;
 SELECT status, count(*) FROM event_alert_queue GROUP BY status ORDER BY 1;
 SELECT status, count(*) FROM alert_deliveries GROUP BY status ORDER BY 1;
+
+-- Nonterminal scan jobs: identity + age
+SELECT id, status, created_at, started_at, waiting_since
+FROM scan_jobs
+WHERE status IN ('queued', 'waiting_for_agent', 'running')
+ORDER BY created_at, id;
+
+-- Event routing work that has not reached a terminal state
+SELECT id, domain_event_id, status, attempts,
+       created_at, updated_at, next_attempt_at
+FROM event_alert_queue
+WHERE status IN ('pending', 'processing')
+ORDER BY created_at, id;
+
+-- Notification deliveries that have not reached a terminal state
+SELECT id, alert_id, channel, status, attempt_count,
+       created_at, updated_at, next_attempt_at, last_attempt_at
+FROM alert_deliveries
+WHERE status IN ('pending', 'processing')
+ORDER BY created_at, id;
+
 SELECT count(*) AS pg_sessions FROM pg_stat_activity;
+SHOW max_connections;
+SELECT state, count(*)
+FROM pg_stat_activity
+GROUP BY state
+ORDER BY state;
+SELECT pid,
+       state,
+       now() - xact_start AS transaction_age,
+       now() - state_change AS state_age
+FROM pg_stat_activity
+WHERE state = 'idle in transaction'
+ORDER BY xact_start NULLS LAST;
+
 SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;
 SELECT objid, granted, pid
   FROM pg_locks
