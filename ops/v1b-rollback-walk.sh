@@ -1,6 +1,7 @@
 #!/bin/bash
 # Isolated rollback walk for V1B. Does not touch the production Compose project.
 # Uses existing V1B dump. No scanner/scheduler. No down -v on nuclei-dashboard.
+# Postgres readiness and API /api/health waits fail closed (nonzero) on timeout.
 set -euo pipefail
 
 ROOT=/home/jdube/nuclei-dashboard
@@ -9,6 +10,30 @@ DEST=${DEST%/}
 RESTORE_PROJECT=nuclei-v1b-rollback
 OVERRIDE=/tmp/v1b-rollback.override.yml
 RESTORE=(docker compose -p "$RESTORE_PROJECT" -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" --env-file "$ROOT/.env")
+
+wait_postgres_ready() {
+  local i
+  for i in $(seq 1 30); do
+    if "${RESTORE[@]}" exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "POSTGRES_NOT_READY" >&2
+  return 1
+}
+
+wait_api_health() {
+  local i
+  for i in $(seq 1 40); do
+    if "${RESTORE[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+  done
+  echo "API_HEALTH_TIMEOUT" >&2
+  return 1
+}
 
 if [ ! -f "$DEST/nuclei.dump" ]; then
   echo "missing dump at $DEST/nuclei.dump" >&2
@@ -40,21 +65,11 @@ echo "LIVE_GIT=$(git -C "$ROOT" rev-parse HEAD)"
 echo "DUMP=$DEST/nuclei.dump"
 
 "${RESTORE[@]}" up -d --no-build postgres
-for i in $(seq 1 30); do
-  if "${RESTORE[@]}" exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 2
-done
+wait_postgres_ready
 "${RESTORE[@]}" exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner' \
   < "$DEST/nuclei.dump"
 "${RESTORE[@]}" up -d --no-build postgres api
-for i in $(seq 1 40); do
-  if "${RESTORE[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 3
-done
+wait_api_health
 
 PG_VOL_BEFORE=$(docker volume inspect "${RESTORE_PROJECT}_postgres-data" --format '{{.Mountpoint}} {{.CreatedAt}}')
 ART_VOL_BEFORE=$(docker volume inspect "${RESTORE_PROJECT}_scan-artifacts" --format '{{.Mountpoint}} {{.CreatedAt}}' 2>/dev/null || echo "scan-artifacts-not-yet")
@@ -67,12 +82,7 @@ echo "ALEMBIC_BEFORE=$ALEMBIC_BEFORE"
 echo "== deploy harmless later config (same schema) =="
 sed -i 's/known-good/later/' "$OVERRIDE"
 "${RESTORE[@]}" up -d --no-build --no-deps --force-recreate api
-for i in $(seq 1 40); do
-  if "${RESTORE[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 3
-done
+wait_api_health
 STAGE_LATER=$(docker inspect "${RESTORE_PROJECT}-api-1" --format '{{index .Config.Labels "v1b.rollback"}}')
 ALEMBIC_LATER=$("${RESTORE[@]}" exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT version_num FROM alembic_version"')
 echo "STAGE_LATER=$STAGE_LATER"
@@ -81,12 +91,7 @@ echo "ALEMBIC_LATER=$ALEMBIC_LATER"
 echo "== return to prior application config =="
 sed -i 's/later/known-good/' "$OVERRIDE"
 "${RESTORE[@]}" up -d --no-build --no-deps --force-recreate api
-for i in $(seq 1 40); do
-  if "${RESTORE[@]}" exec -T api python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 3
-done
+wait_api_health
 STAGE_AFTER=$(docker inspect "${RESTORE_PROJECT}-api-1" --format '{{index .Config.Labels "v1b.rollback"}}')
 ALEMBIC_AFTER=$("${RESTORE[@]}" exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT version_num FROM alembic_version"')
 PG_VOL_AFTER=$(docker volume inspect "${RESTORE_PROJECT}_postgres-data" --format '{{.Mountpoint}} {{.CreatedAt}}')

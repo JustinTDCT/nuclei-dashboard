@@ -44,6 +44,11 @@ services:
       context: {git_context}
     command: ["python", "agent_main.py"]
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     network_mode: host
     user: "1000:1000"
     cap_drop:

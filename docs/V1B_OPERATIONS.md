@@ -176,7 +176,7 @@ API startup runs `alembic upgrade head`. That is forward-only for this schema.
 - Any Alembic revision that has been applied. Downgrade from `0002`–`0017` is refused when data exists (`docs/DEVELOPMENT.md`). There is no safe `alembic downgrade` of production data.
 - After a future migration lands, rollback of **code** to a pre-migration SHA while leaving the upgraded database is undefined. Restore from the pre-upgrade dump instead.
 
-**Walked 2026-09-01** on isolated Compose project `nuclei-v1b-rollback` (not production): restore dump → known-good API config → harmless later label → return to known-good. Alembic stayed `0017_security_h6_h8`. The postgres volume identity did not change. `alembic downgrade 0016` refused (`50` history rows) and left the schema at 0017. Then `down -v` only on that project. Repeat: `ops/v1b-rollback-walk.sh`.
+**Walked 2026-09-01** on isolated Compose project `nuclei-v1b-rollback` (not production): restore dump → known-good API config → harmless later label → return to known-good. Alembic stayed `0017_security_h6_h8`. The postgres volume identity did not change. `alembic downgrade 0016` refused (`50` history rows) and left the schema at 0017. Then `down -v` only on that project. Repeat: `ops/v1b-rollback-walk.sh` (fails closed if postgres or `/api/health` never becomes ready).
 
 **Forbidden**
 
@@ -198,7 +198,9 @@ docker compose down -v   # deletes postgres-data, scan-artifacts, scanner-data, 
 | Certificate | `openssl x509 -enddate` | 30 days |
 | Logs | Docker `json-file` | Must have `max-size` / `max-file` so logs cannot fill the disk |
 
-Compose sets a shared `json-file` ceiling on every long-lived service (`x-logging: &default-logging`, `max-size: 10m`, `max-file: 5`, about 50 MB per container). Recreate containers **without** `-v` after changing it. Live secdock applied this on 2026-09-01 (`--scale api=2 --no-build`); inspect with `docker inspect <container> --format '{{json .HostConfig.LogConfig}}'`.
+Compose sets a shared `json-file` ceiling on every long-lived central service (`x-logging: &default-logging`, `max-size: 10m`, `max-file: 5`, about 50 MB per container). Recreate containers **without** `-v` after changing it. Live secdock applied this on 2026-09-01 (`--scale api=2 --no-build`); inspect with `docker inspect <container> --format '{{json .HostConfig.LogConfig}}'`.
+
+Generated site Agent compose (`agent_compose()`, plus `agent/docker-compose.yml` and the reference template) uses the same `json-file` 10m × 5 ceiling. That is deployment configuration only; it does not change scan runtime and does not require an Agent pin bump. Existing Agent hosts still running an older compose file remain unbounded until that file is replaced and the container is recreated (`docker compose --env-file agent.env up -d`).
 
 ---
 
