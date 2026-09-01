@@ -238,9 +238,15 @@ pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py t
 
 ### Scale S3F replica-readiness inventory and two-API gate
 
-S3F `ab9fa42` is **CODE / PRE-LIVE GATE ACCEPTED**. It is not ACCEPT / FROZEN. H9 stays open. Two API replicas are not the live operating model yet.
+S3F `ab9fa42` is **CODE / PRE-LIVE GATE ACCEPTED**. Docs checkpoint `4735e57`. It is not ACCEPT / FROZEN. H9 stays open. Live Compose `--scale api=2` is a **PARTIAL PASS**. Two API replicas are not a supported operating model yet.
 
-It inventories what is still process-local or filesystem-local, then proves two API processes against the same PostgreSQL and shared artifact storage. The local pytest gate is process-level shared-filesystem semantics; the live gate is Compose `--scale api=2`, the named `scan-artifacts` volume, and Caddy `dynamic a api 8000`. Default Compose still runs one API replica. Do not `--scale scheduler=2`.
+Live evidence that passed: pre-gate PostgreSQL backup; upgrade without deleting volumes; two healthy API containers; shared `scan-artifacts`; exactly one scheduler leader; schema `0017`; Agent pin `3cdb52c`; Caddy dynamic API discovery loaded; public `/api/internal*` 404; staff JWT across replicas; DB write/read consistency; existing artifact readable through Caddy; LAN Agent heartbeat continuity.
+
+Single-replica removal is **PARTIAL**: seven of eight GETs succeeded, one 502 hit a stale Compose DNS address. If H9 means a planned or failed API replica can disappear without a user-visible failure on ordinary reads, that 502 must be corrected in Caddy (retry/failover on unavailable upstreams). Do not replay POST/PATCH; Caddy already retries GET after a connected round-trip and retries any method when dial fails. Repeat `api-1` stop with 50–100 health/authenticated GETs and require zero 502s.
+
+New LAN and WAN runs were **NOT RUN**. Downloading a pre-gate artifact proves both APIs can see the named volume; it does not prove a new run can upload through one replica and be consumed through the other. Remaining live work: one small authorized LAN scan (TAB1 or Nuclei-Pi4) through Caddy, one small authorized WAN scan through `http://api:8000`, download at least one artifact from each new run through Caddy, scheduler still exactly one leader.
+
+The local pytest gate is process-level shared-filesystem semantics. The live gate is Compose `--scale api=2`, the named `scan-artifacts` volume, and Caddy `dynamic a api 8000` with `lb_try_duration` so a dead replica is not a client 502. Default Compose still runs one API replica. Do not `--scale scheduler=2`.
 
 **Replica-safe (shared PostgreSQL / image / request scope):**
 
@@ -258,7 +264,7 @@ It inventories what is still process-local or filesystem-local, then proves two 
 **Filesystem / Compose assumptions:**
 
 - Artifact bytes live under `RAW_ARTIFACT_DIR` (`scan-artifacts` volume). Every API replica and the scheduler must mount the same volume. Incoming writes use a UUID `.part` then rename; same-key ingest locks the metadata row.
-- LAN Agents and staff reach the API through Caddy (`PUBLIC_URL`). Caddy must DNS-resolve every healthy `api` task (`dynamic a api 8000`), not pin a single container IP at start.
+- LAN Agents and staff reach the API through Caddy (`PUBLIC_URL`). Caddy must DNS-resolve every healthy `api` task (`dynamic a api 8000`), not pin a single container IP at start. When a replica disappears, Caddy must try another upstream for the same GET (`lb_try_duration`); do not replay POST/PATCH after a connected round-trip.
 - The WAN scanner calls `http://api:8000` on the Docker network (Caddy still 404s `/api/internal*`). Compose DNS for a scaled `api` service can return more than one address.
 - Every API lifespan runs `apply_schema()` + `seed()`. Concurrent replica start serializes that work with a session-level PostgreSQL advisory lock on a dedicated engine so `apply_schema()`'s `engine.dispose()` cannot drop the lock session. The lock key is not the scheduler leader key.
 - Agent/scanner spools stay on the worker (`AGENT_DATA_DIR`). They are not API-replica state.

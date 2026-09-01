@@ -23,10 +23,20 @@ https://:8118 {
 	handle /api* {
 		reverse_proxy {
 			dynamic a api 8000 {
-				refresh 5s
+				refresh 1s
 				versions ipv4
 			}
 			lb_policy round_robin
+			lb_try_duration 2s
+			lb_try_interval 25ms
+			fail_duration 2s
+			max_fails 1
+			health_uri /api/health
+			health_interval 1s
+			health_timeout 1s
+			transport http {
+				dial_timeout 500ms
+			}
 		}
 	}
 	handle {
