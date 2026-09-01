@@ -238,15 +238,15 @@ pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py t
 
 ### Scale S3F replica-readiness inventory and two-API gate
 
-S3F `ab9fa42` is **CODE / PRE-LIVE GATE ACCEPTED**. Docs checkpoint `4735e57`. It is not ACCEPT / FROZEN. H9 stays open. Live Compose `--scale api=2` is a **PARTIAL PASS**. Two API replicas are not a supported operating model yet.
+S3F is **ACCEPT / FROZEN**. Governing implementation chain: `ab9fa42` (base), `a856af8` (Caddy failover), `fd697a6` (drop ineffective `health_uri` on dynamic upstreams). Docs checkpoint `4735e57` remains the intermediate pre-live record. Sec H9 is **CLOSED**. One or two API replicas are a supported operating model; Compose default remains one API. Do not `--scale scheduler=2`.
 
-Live evidence that passed: pre-gate PostgreSQL backup; upgrade without deleting volumes; two healthy API containers; shared `scan-artifacts`; exactly one scheduler leader; schema `0017`; Agent pin `3cdb52c`; Caddy dynamic API discovery loaded; public `/api/internal*` 404; staff JWT across replicas; DB write/read consistency; existing artifact readable through Caddy; LAN Agent heartbeat continuity.
+Live Compose `--scale api=2` passed on operator-provided secdock evidence at HEAD `fd697a6`: two healthy APIs against shared PostgreSQL and `scan-artifacts`; exactly one scheduler leader (advisory lock `91304701`); Caddy `dynamic a api 8000`; public `/api/internal*` 404; staff JWT and DB writes through Caddy; LAN Agent heartbeats in the two-API topology. Stopping `api-1` while 100 `/api/health` plus 100 authenticated `GET /api/auth/me` overlapped the stop produced **200/200** with zero 502/503/timeouts (max 269 ms on the first failover GET). New LAN job 10 (`S2E recreate gate LAN`, Nuclei-Pi4) and WAN job 11 (`S2E recreate gate WAN`, `claimed_by=central`) both reached `done`; expected discovery-profile artifacts (`discovery.naabu`, `port_discovery.naabu`, `fingerprint.httpx`) uploaded and downloaded through Caddy; zero findings because those definitions have no Nuclei stage. Schema stayed `0017`; Agent pin stayed `3cdb52c`.
 
-Single-replica removal is **PARTIAL**: seven of eight GETs succeeded, one 502 hit a stale Compose DNS address. If H9 means a planned or failed API replica can disappear without a user-visible failure on ordinary reads, that 502 must be corrected in Caddy. Active `health_uri` checks do not run for `dynamic a` upstreams; do not leave them in the Caddyfile as if they probe API containers. Effective protection is 1s Docker DNS refresh, 500ms `transport http` `dial_timeout` (not `dynamic a` `dial_timeout`, which is the DNS resolver), 2s `lb_try_duration`, and 2s passive `fail_duration`. Dial failure may fail over any method; after a connected round-trip Caddy retries GET only. Repeat `api-1` stop with 100 `/api/health` plus 100 authenticated GETs through :8118, keep the replica down several seconds, and require 200/200 with zero 502s.
+Closing H9 does not qualify arbitrary N-replica scaling, zero interruption under every network partition, replay of an already-transmitted POST/PATCH after an ambiguous upstream failure, a scaled scheduler, PostgreSQL HA, or Caddy retry on the scanner's direct `http://api:8000` path.
 
-New LAN and WAN runs were **NOT RUN**. Downloading a pre-gate artifact proves both APIs can see the named volume; it does not prove a new run can upload through one replica and be consumed through the other. Remaining live work: one small authorized LAN scan (TAB1 or Nuclei-Pi4) through Caddy, one small authorized WAN scan through `http://api:8000`, download at least one artifact from each new run through Caddy, scheduler still exactly one leader.
+Active `health_uri` checks do not run for `dynamic a` upstreams; do not leave them in the Caddyfile as if they probe API containers. Effective protection is 1s Docker DNS refresh, 500ms `transport http` `dial_timeout` (not `dynamic a` `dial_timeout`, which is the DNS resolver), 2s `lb_try_duration`, and 2s passive `fail_duration`. Dial failure may fail over any method; after a connected round-trip Caddy retries GET only.
 
-The local pytest gate is process-level shared-filesystem semantics. The live gate is Compose `--scale api=2`, the named `scan-artifacts` volume, and Caddy `dynamic a api 8000` with `lb_try_duration` so a dead replica is not a client 502. Do not configure `health_uri` for that proxy: Caddy does not run active health checks on dynamic upstreams. Default Compose still runs one API replica. Do not `--scale scheduler=2`.
+The local pytest gate is process-level shared-filesystem semantics. The live gate is Compose `--scale api=2`, the named `scan-artifacts` volume, and Caddy `dynamic a api 8000` with `lb_try_duration` so a dead replica is not a client 502.
 
 **Replica-safe (shared PostgreSQL / image / request scope):**
 
@@ -269,9 +269,9 @@ The local pytest gate is process-level shared-filesystem semantics. The live gat
 - Every API lifespan runs `apply_schema()` + `seed()`. Concurrent replica start serializes that work with a session-level PostgreSQL advisory lock on a dedicated engine so `apply_schema()`'s `engine.dispose()` cannot drop the lock session. The lock key is not the scheduler leader key.
 - Agent/scanner spools stay on the worker (`AGENT_DATA_DIR`). They are not API-replica state.
 
-The pytest gate starts two uvicorn processes against the test PostgreSQL and shared `RAW_ARTIFACT_DIR`, then exercises login, staff reads/writes, Agent challenge/token, scanner poll, and artifact upload-on-one / download-on-the-other. Compose default remains one API until this gate is accepted live.
+The pytest gate starts two uvicorn processes against the test PostgreSQL and shared `RAW_ARTIFACT_DIR`, then exercises login, staff reads/writes, Agent challenge/token, scanner poll, and artifact upload-on-one / download-on-the-other. Compose default remains one API; `--scale api=2` is the supported two-replica topology.
 
-Do not add `0018`. Agent pin stays `3cdb52c`. Do not reopen S2 / S3A–S3E.
+Do not add `0018`. Agent pin stays `3cdb52c`. Do not reopen S2 / S3A–S3F.
 
 ```bash
 cd backend

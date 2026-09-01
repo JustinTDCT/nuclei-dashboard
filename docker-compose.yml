@@ -14,10 +14,10 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # Default is one API replica. The replica gate is
+  # Default is one API replica. Two replicas are supported:
   # `docker compose up -d --scale api=2` against the same postgres and
-  # scan-artifacts volume. Caddy re-resolves `api`. Do not treat two
-  # replicas as the live operating model until that gate is accepted.
+  # scan-artifacts volume. Caddy re-resolves `api`. Do not
+  # `--scale scheduler=2`.
   api:
     build: ./backend
     pull_policy: build
