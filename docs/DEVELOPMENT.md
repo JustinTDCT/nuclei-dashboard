@@ -238,7 +238,9 @@ pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py t
 
 ### Scale S3F replica-readiness inventory and two-API gate
 
-S3F inventories what is still process-local or filesystem-local, then proves two API processes against the same PostgreSQL and shared artifact storage. It does not declare H9 / horizontal scaling complete. Default Compose still runs one API replica. Do not `--scale scheduler=2`.
+S3F `ab9fa42` is **CODE / PRE-LIVE GATE ACCEPTED**. It is not ACCEPT / FROZEN. H9 stays open. Two API replicas are not the live operating model yet.
+
+It inventories what is still process-local or filesystem-local, then proves two API processes against the same PostgreSQL and shared artifact storage. The local pytest gate is process-level shared-filesystem semantics; the live gate is Compose `--scale api=2`, the named `scan-artifacts` volume, and Caddy `dynamic a api 8000`. Default Compose still runs one API replica. Do not `--scale scheduler=2`.
 
 **Replica-safe (shared PostgreSQL / image / request scope):**
 
