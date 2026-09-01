@@ -122,10 +122,11 @@ Inserted after a clean-room review of commit `312e0d0`. These are production-saf
 
 ### V1 closure sequence
 
-The implementation roadmap in this file ends at Phase 3C plus Scale S1–S3 and Sec H1–H9. There is no Phase 4. Do not invent one until the remaining closure gates exist. V1A product PARTIALs (single-CIDR Networks, site-timezone display, scan cancel/dry-run UI, exclusions UI, guided merge/split, manual finding resolve, treatment-review policy, missing event families) stay in the V1A backlog. Do not fix them in V1B.
+The implementation roadmap in this file ends at Phase 3C plus Scale S1–S3 and Sec H1–H9. There is no Phase 4. Do not invent one until the remaining closure gates exist. V1A product PARTIALs (single-CIDR Networks, site-timezone display, scan cancel/dry-run UI, exclusions UI, guided merge/split, manual finding resolve, treatment-review policy, missing event families) stay in the V1A backlog. Do not fix them in V1C unless that walk explicitly requires it.
 
 - **V1A — Master Plan Closure Audit.** ACCEPT / CLOSED. Baseline audited: `3f702b8`. Audit checkpoint: `a06e455`. Output: `docs/V1A_CLOSURE_AUDIT.md`. Feature-complete for the written roadmap; not V1 release-ready.
-- **V1B — Operational Release Readiness.** Current. No product features, no V1A PARTIAL/MISSING UX fixes, no schema, no `0018`, no Agent pin change, no reopening S1–S3. Gates: CI green on the release-candidate lineage and `main` protection; proven PostgreSQL + `scan-artifacts` restore into isolation; certificate lifecycle exercised; upgrade/rollback playbook; disk/log/health operations; failure-recovery smoke documented from H9/S3F rather than reopened; `docs/V1B_CLOSURE.md` with a binary READY / NOT READY FOR V1C verdict. Runbook: `docs/V1B_OPERATIONS.md`. After V1B: V1C technician/auditor UX walk → V1D soak → V1 release decision → only then a V1.1/V2 roadmap.
+- **V1B — Operational Release Readiness.** ACCEPT / CLOSED. Implementation/ops baseline: `bb63c6b` (PR #1). Acceptance checkpoint: merge of PR #2 (this docs-only record). No product features, no V1A PARTIAL/MISSING UX fixes, no schema, no `0018`, no Agent pin change, no reopening S1–S3. Evidence: `docs/V1B_CLOSURE.md`. Runbook: `docs/V1B_OPERATIONS.md`.
+- **V1C — Technician/auditor UX walk.** READY TO START. After V1C: V1D soak → V1 release decision → only then a V1.1/V2 roadmap.
 
 ---
 
