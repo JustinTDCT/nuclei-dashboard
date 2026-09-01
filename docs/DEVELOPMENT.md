@@ -184,11 +184,22 @@ pytest tests/test_scale_s3a.py
 
 ### Scale S3B scheduler process
 
-S3B moves APScheduler out of the API process into Compose service `scheduler` (`python -m app.scheduler_process`). API `lifespan` only applies schema, `ensure_columns`, and `seed`; it must not start or stop the scheduler. Two API replicas therefore cannot create duplicate scheduler ownership. The scheduler process takes a session-level PostgreSQL advisory lock (`SCHEDULER_LEADER_LOCK_KEY`) before calling `start_scheduler()`. While leading, it re-reads `pg_backend_pid()` on that same connection every two seconds; if the query fails or the backend pid changes, APScheduler is stopped with `wait=True` and the process exits without reacquiring. Graceful SIGTERM also uses `stop_scheduler(wait=True)` and only then releases the advisory lock, so a standby cannot start jobs while the old leader still has a worker in flight. A second scheduler replica waits on the lock and does not start APScheduler. Job ids and intervals stay the S3A catalog (including `discovery-metadata` at 5 minutes). The scheduler mounts `scan-artifacts` so raw-artifact retention can delete bytes. Do not `docker compose up --scale scheduler=2` as the operating model; the lock-plus-session probe is the fail-closed fence. Schema stays `0017_security_h6_h8`. This tranche does not add a second API replica.
+S3B is ACCEPT at implementation `c6ccc7f` plus leader-fencing correction `cca2ea2`. It moves APScheduler out of the API process into Compose service `scheduler` (`python -m app.scheduler_process`). API `lifespan` only applies schema, `ensure_columns`, and `seed`; it must not start or stop the scheduler. Two API replicas therefore cannot create duplicate scheduler ownership. The scheduler process takes a session-level PostgreSQL advisory lock (`SCHEDULER_LEADER_LOCK_KEY`) before calling `start_scheduler()`. While leading, it re-reads `pg_backend_pid()` on that same connection every two seconds; if the query fails or the backend pid changes, APScheduler is stopped with `wait=True` and the process exits without reacquiring. Graceful SIGTERM also uses `stop_scheduler(wait=True)` and only then releases the advisory lock, so a standby cannot start jobs while the old leader still has a worker in flight. A second scheduler replica waits on the lock and does not start APScheduler. Job ids and intervals stay the S3A catalog (including `discovery-metadata` at 5 minutes). The scheduler mounts `scan-artifacts` so raw-artifact retention can delete bytes.
+
+This is a single-active scheduler design, not a claim of zero-overlap HA under every network partition. The intended deployment remains one Compose `scheduler` service; the advisory lock and PID probe are fail-closed protection against accidental duplicate ownership. Do not `docker compose up --scale scheduler=2` as the operating model. Schema stays `0017_security_h6_h8`. This tranche does not add a second API replica.
 
 ```bash
 cd backend
 pytest tests/test_scale_s3a.py tests/test_scale_s3b.py
+```
+
+### Scale S3C EventAlertQueue stale reclaim
+
+S3C reclaims `EventAlertQueue` rows left `processing` after a crash. Claim already used `FOR UPDATE SKIP LOCKED` and `ALERT_ROUTE_BATCH_SIZE`; it only selected `pending` due now, so a committed `processing` row stayed stuck. Reclaim uses existing `updated_at` (set at claim) as the lease clock after `ALERT_QUEUE_LEASE_SECONDS` (120s, same duration as delivery leases). A recently claimed row is not stolen. Max-attempt rules still apply: a stale row whose attempts already reached the cap fails without creating another Alert. Reclaim runs inside the existing `alert-routing` tick; the 12-job catalog and intervals stay frozen. Schema stays `0017_security_h6_h8`; do not add `0018`. Agent pin stays `3cdb52c`. This tranche does not add a second API replica.
+
+```bash
+cd backend
+pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py
 ```
 
 S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. S2D records `finding_index_preloads`, `finding_index_preload_selects`, `finding_index_preload_wall_ms`, and `finding_index_preload_peak_rss_bytes` when Finding/coverage/finalize each build a `FindingRunIndex`. Use medium/large sizes with `--chunk-rows` / `--chunk-bytes` when measuring per-chunk preload cost. If preload RSS dominates, that is evidence for a later request/run-scoped optimization — do not automatically redesign S2C, and do not return to per-report queries.
@@ -426,6 +437,8 @@ Suppression/dedupe is per tenant + event type + logical subject + route identity
 Disposition-change events use the AuditLog row ID as the per-transition identity. Repeating unreviewed → approved after an intervening change is a new event; retrying the same AuditLog remains idempotent.
 
 A delivery left in `processing` after a crash becomes reclaimable after `DELIVERY_LEASE_SECONDS`. A recently claimed row is not stolen. Max-attempt rules still apply.
+
+An `EventAlertQueue` row left in `processing` after a crash becomes reclaimable after `ALERT_QUEUE_LEASE_SECONDS` using `updated_at` (set at claim). A recently claimed row is not stolen. Max-attempt rules still apply. No extra lease column.
 
 Event emission fail-closes on Tenant/Site/Network/Asset/Finding/Agent/ScanJob/Treatment/Policy mismatches. Scan and finding events persist trusted Site/Network from the run snapshot or that run's observation; Network is not inferred from an IP.
 

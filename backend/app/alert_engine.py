@@ -30,6 +30,7 @@ from app.models import (
     ALERT_EMAIL_OFF,
     ALERT_EMAIL_STAFF,
     ALERT_QUEUE_FAILED,
+    ALERT_QUEUE_LEASE_SECONDS,
     ALERT_QUEUE_PENDING,
     ALERT_QUEUE_PROCESSED,
     ALERT_QUEUE_PROCESSING,
@@ -310,11 +311,20 @@ def _body_for(event: DomainEvent) -> str:
 
 def _claim_queue(db: Session, *, limit: int) -> list[EventAlertQueue]:
     now = utcnow()
+    lease_cutoff = now - timedelta(seconds=ALERT_QUEUE_LEASE_SECONDS)
     candidate_ids = (
         select(EventAlertQueue.id)
         .where(
-            EventAlertQueue.status == ALERT_QUEUE_PENDING,
-            EventAlertQueue.next_attempt_at <= now,
+            or_(
+                and_(
+                    EventAlertQueue.status == ALERT_QUEUE_PENDING,
+                    EventAlertQueue.next_attempt_at <= now,
+                ),
+                and_(
+                    EventAlertQueue.status == ALERT_QUEUE_PROCESSING,
+                    EventAlertQueue.updated_at <= lease_cutoff,
+                ),
+            )
         )
         .order_by(EventAlertQueue.id.asc())
         .limit(limit)
@@ -479,6 +489,11 @@ def route_pending_events(
         event = item.domain_event
         now = utcnow()
         try:
+            if item.attempts > MAX_DELIVERY_ATTEMPTS:
+                item.status = ALERT_QUEUE_FAILED
+                item.last_error = "max routing attempts exceeded"
+                item.updated_at = now
+                continue
             if event is None:
                 item.status = ALERT_QUEUE_FAILED
                 item.last_error = "missing domain event"
