@@ -3,11 +3,12 @@
 **Tranche:** V1B — Operational Release Readiness  
 **Status:** IN PROGRESS  
 **V1A:** ACCEPT / CLOSED (`a06e455` on audited baseline `3f702b8`)  
+**Candidate SHA:** `7f5b4af121cc8d1a7269ec6dc28fd3878c341c99`  
 **Schema:** `0017_security_h6_h8` · **`0018` not created**  
 **Agent pin:** `3cdb52c42a87552db98e609e9ec7c1c01e86b23b`  
-**Verdict:** **NOT READY FOR V1C** — restore and isolated certificate replacement are proven; CI is still red on `main`; branch protection is not enabled.
+**Verdict:** **NOT READY FOR V1C** until PR #1 is on protected `main` and currently deployed site Agents have the 10m × 5 json-file ceiling.
 
-This file records evidence. The runbook is `docs/V1B_OPERATIONS.md`. V1A product PARTIALs are not in scope.
+This file records evidence. The runbook is `docs/V1B_OPERATIONS.md`. V1A product PARTIALs are not in scope. Restore was not repeated.
 
 ---
 
@@ -15,21 +16,24 @@ This file records evidence. The runbook is `docs/V1B_OPERATIONS.md`. V1A product
 
 | Gate | Status | Evidence |
 |---|---|---|
-| CI green on release-candidate lineage | OPEN | Frontend job on Node 20 fails: `webidl.util.markAsUncloneable is not a function` (jsdom 30). Node 22 pin is in `.github/workflows/ci.yml` and `frontend/package.json` `engines`. Local `npm test` on Node v22.23.2: 3 files / 3 tests passed (`api`, `auth`, `AssetsPanel`). Not green on GitHub until that change is on `main`. Run `33521948577` on `a06e455` failed frontend. |
-| `main` branch protection | OPEN | `gh api .../branches/main/protection` → HTTP 404 (2026-09-01). **Not enabled while CI is red.** Intended policy: required checks `backend` + `frontend`, PRs required, `enforce_admins`, no force-push, no deletion, no standing bypass. Direct pushes become **prohibited**. |
-| PostgreSQL + `scan-artifacts` backup | CLOSED | secdock `20260901T150552Z`: `nuclei.dump` 414K (`pg_dump -Fc`), `scan-artifacts.tar.gz` 70K. Live volumes `nuclei-dashboard_postgres-data` 71.5M, `nuclei-dashboard_scan-artifacts` 196K. |
-| Restore proven in isolation | CLOSED | Compose project `nuclei-v1b-restore`, Caddy **18118** (`ports: !override`). No scheduler/scanner. Counts matched live: alembic `0017_security_h6_h8`, tenants 2, assets 239, findings 0, scan_jobs 11, scan_artifacts 23. Staff login OK. Artifact **23** (job 10) SHA-256 `c121037044dff601500121e8287972037b8f08fc0e97e333fab6abea44395f29` (566 bytes) matched after download through isolated Caddy. Production `:8118` stayed `{"ok":true}`. Restore then `down -v` **only** that project; live two-API stack unchanged. Repeat: `ops/v1b-restore-proof.sh`. |
-| Certificate lifecycle exercised | CLOSED for isolated replacement | Production TLS is **self-signed** host files `certs/cert.pem` + `certs/key.pem`. Caddy does not auto-issue. SAN `DNS:scanner.thedubes.net, IP:10.150.125.70`. CN `nuclei-scanner.thedubes.net`. `notAfter=Nov 21 19:32:12 2028 GMT`. SHA-256 fingerprint `FB:D5:51:9D:4E:53:17:BB:81:97:AA:D8:66:FB:7F:19:A0:97:BC:09:4E:2C:1D:1A:DF:AD:07:E2:B3:F7:0F:2C`. Isolated Caddy was recreated on a **separate** cert dir (fingerprint `BF:75:FA:3F:96:4C:BD:7A:30:38:17:BE:51:85:F2:EC:35:53:34:00:5B:86:2D:5C:68:A6:F3:90:CE:8D:7C:43`); `NEW_CERT_HEALTH={"ok":true}` while production `:8118` still verified with the original cert. **Did not rotate the live Agent trust anchor.** |
-| Upgrade / rollback playbook | PARTIAL | `docs/V1B_OPERATIONS.md` §5 written (no `down -v`; Alembic forward-only; restore after migrations). Not walked on a dummy SHA. |
-| Disk / log / health | OPEN | Host `/` was 59% of 98 GB during the proof. Compose still has no `json-file` `max-size`; log growth can fill the host until that is deployed. |
-| Failure recovery smoke | PARTIAL | S3F/H9 remains the two-API GET failover evidence. Live topology is still `--scale api=2`. V1B did not reopen S3F and did not recycle production scheduler/scanner/postgres. |
-| V1C verdict | **NOT READY** | |
+| V1A closure | CLOSED | `a06e455` on `3f702b8` |
+| PostgreSQL + artifacts backup | CLOSED | secdock `20260901T150552Z` |
+| Isolated restore | CLOSED | `nuclei-v1b-restore` / port 18118; not repeated |
+| Artifact integrity after restore | CLOSED | Artifact 23 SHA-256 matched |
+| Isolated certificate replacement | CLOSED | Throwaway cert on 18118; live trust anchor untouched |
+| Frontend CI / Node 22 | CLOSED | Run [33524201425](https://github.com/JustinTDCT/nuclei-dashboard/actions/runs/33524201425) on `7f5b4af`: frontend 27s success |
+| Backend CI on candidate | CLOSED | Same run: backend 20m28s success. Check names `backend` and `frontend`. |
+| `main` protection | CLOSED | Ruleset **V1B main protection** id `22025478`, enforcement `active`, `bypass_actors: []`, `current_user_can_bypass: never`. PR required (0 approving reviews), required checks `backend` + `frontend` (strict / up to date), deletion forbidden, force-push (`non_fast_forward`) forbidden. Classic “branch protection” API still 404; the ruleset is the control. [html](https://github.com/JustinTDCT/nuclei-dashboard/rules/22025478) |
+| Upgrade/rollback walk | CLOSED | Isolated project `nuclei-v1b-rollback` on 2026-09-01 (rerun 16:02Z): `nuclei-dashboard-api:v1b-7f5b4af` (`sha256:4cfcb8bad969fc261c8105d7a971960df813003914ea95ed42ae34e85c17904f`) → `nuclei-dashboard-api:v1b-d161490` (`sha256:5b9b58c621eb57e22db9645b087c08192e9fe050bc9d6a864118ccc465b8183e`) → exact known-good image ID. IDs were distinct. `/api/health` succeeded after every transition. Alembic stayed `0017_security_h6_h8`. Postgres volume mountpoint/CreatedAt unchanged. `alembic downgrade 0016` raised `Refusing to downgrade 0017_security_h6_h8: 50 challenge, throttle, or deadline/cancel row(s) exist`. Then `down -v` **only** that project. Production `nuclei-dashboard-api:latest` stayed `1cd4014153d8`. Repeat: `ops/v1b-rollback-walk.sh` (builds those tags from git archive if missing; never retags `:latest`; fails closed on health/readiness and if image IDs are not distinct). |
+| Log/disk controls | PARTIAL | **Live secdock (central) deployed:** every running service `json-file` `max-size=10m` `max-file=5` (~50 MB/container). Two APIs healthy, scheduler advisory lock `91304701` granted, `/api/health` `{"ok":true}`. **Generated remote Agent compose** (`agent_compose()`, `agent/docker-compose.yml`, template) uses the same ceiling; this is deployment config only (no Agent pin bump). Existing site Agents stay unbounded until their local compose is replaced and the container is recreated. **GitHub `main` does not yet contain the Compose change** (protection is on; land via PR). Disk thresholds remain documented, not a monitoring product. |
+| Failure-recovery smoke | CLOSED | S3F/H9 unchanged. Logging deploy recreated postgres (same volume), api-1, api-2, web, caddy, scanner, and scheduler without `down -v`. Scheduler started and ran `route_pending_events_job` / `process_pending_deliveries_job`. |
+| V1C admission | **NOT READY** | Open: merge PR #1 onto protected `main`; then replace currently deployed site Agent compose files and recreate with `--env-file agent.env`, verifying Docker `LogConfig` is `10m` × `5`. |
 
 ---
 
-## Direct-push policy
+## Direct-push policy (now enforced)
 
-**Prohibited** on `main` once protection is enabled (including repository admins). Workflow: branch → PR → `backend` and `frontend` green → merge. Enable only after a green run on the Node 22 pin.
+Direct pushes to `main` are **prohibited**, including for repository admins. Branch → PR → `backend` and `frontend` green → merge. No standing bypass list.
 
 ---
 
@@ -39,4 +43,4 @@ This file records evidence. The runbook is `docs/V1B_OPERATIONS.md`. V1A product
 - Not permission to add `0018` or bump the Agent pin.
 - Not a fix for V1A product gaps.
 - Not a V1 release tag.
-- Not a live production certificate rotation (Agents pin the self-signed public cert).
+- Not a live production certificate rotation.

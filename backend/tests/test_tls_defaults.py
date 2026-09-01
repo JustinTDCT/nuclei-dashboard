@@ -55,6 +55,32 @@ def test_generated_env_can_omit_enrollment_secret(monkeypatch):
     assert "ENROLLMENT_SECRET" not in env
 
 
+def _assert_json_file_log_ceiling(compose: str) -> None:
+    assert "driver: json-file" in compose
+    assert 'max-size: "10m"' in compose
+    assert 'max-file: "5"' in compose
+
+
+def test_generated_agent_compose_bounds_json_file_logs():
+    agent = Agent(
+        id=1,
+        tenant_id=1,
+        name="Edge",
+        uuid="11111111-2222-3333-4444-555555555555",
+        enrollment_secret="secret-value",
+        status="pending_enrollment",
+    )
+    generated = agent_compose(agent, "https://dashboard.example.com:8118")
+    _assert_json_file_log_ceiling(generated)
+    assert "    logging:\n      driver: json-file" in generated
+    for path in (
+        ROOT / "docker-compose.yml",
+        ROOT / "agent" / "docker-compose.yml",
+        ROOT / "agent" / "docker-compose.template.yml",
+    ):
+        _assert_json_file_log_ceiling(path.read_text())
+
+
 def test_compose_files_default_tls_verify_on():
     root_compose = (ROOT / "docker-compose.yml").read_text()
     agent_compose_file = (ROOT / "agent" / "docker-compose.yml").read_text()

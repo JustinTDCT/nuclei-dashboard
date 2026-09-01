@@ -29,6 +29,11 @@ services:
       context: https://github.com/JustinTDCT/nuclei-dashboard.git#3cdb52c42a87552db98e609e9ec7c1c01e86b23b:scan_runtime
     command: ["python", "agent_main.py"]
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     network_mode: host
     user: "1000:1000"
     cap_drop:

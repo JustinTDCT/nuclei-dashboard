@@ -176,6 +176,18 @@ API startup runs `alembic upgrade head`. That is forward-only for this schema.
 - Any Alembic revision that has been applied. Downgrade from `0002`–`0017` is refused when data exists (`docs/DEVELOPMENT.md`). There is no safe `alembic downgrade` of production data.
 - After a future migration lands, rollback of **code** to a pre-migration SHA while leaving the upgraded database is undefined. Restore from the pre-upgrade dump instead.
 
+**Walked 2026-09-01** on isolated Compose project `nuclei-v1b-rollback` (not production). Rerun 16:02Z used two distinct immutable API images, not a label-only recreation:
+
+- known-good: `nuclei-dashboard-api:v1b-7f5b4af` (`sha256:4cfcb8ba…17904f`) booted against the restored DB
+- later: `nuclei-dashboard-api:v1b-d161490` (`sha256:5b9b58c6…b8183e`) booted
+- return: the running container image ID equaled the original known-good ID
+- `/api/health` succeeded after every transition; Alembic stayed `0017_security_h6_h8`; postgres volume identity did not change
+- `alembic downgrade 0016` refused (`50` history rows) and left the schema at 0017
+- then `down -v` only on that project
+- production `nuclei-dashboard-api:latest` remained `1cd4014153d8`
+
+Repeat: `ops/v1b-rollback-walk.sh` (run with docker sudo). It builds the two tags from `git archive` of those SHAs if they are missing; it does not retag `:latest`. It fails closed if postgres or `/api/health` never becomes ready, if the two image IDs are identical, or if the final container is not the original known-good image.
+
 **Forbidden**
 
 ```bash
@@ -196,17 +208,9 @@ docker compose down -v   # deletes postgres-data, scan-artifacts, scanner-data, 
 | Certificate | `openssl x509 -enddate` | 30 days |
 | Logs | Docker `json-file` | Must have `max-size` / `max-file` so logs cannot fill the disk |
 
-Compose in this repository does not yet set `json-file` rotation. V1B must add and deploy:
+Compose sets a shared `json-file` ceiling on every long-lived central service (`x-logging: &default-logging`, `max-size: 10m`, `max-file: 5`, about 50 MB per container). Recreate containers **without** `-v` after changing it. Live secdock applied this on 2026-09-01 (`--scale api=2 --no-build`); inspect with `docker inspect <container> --format '{{json .HostConfig.LogConfig}}'`.
 
-```yaml
-logging:
-  driver: json-file
-  options:
-    max-size: "20m"
-    max-file: "5"
-```
-
-on every service, then recreate containers **without** `-v`. Until that is deployed, `docker compose logs` can grow without bound.
+Generated site Agent compose (`agent_compose()`, plus `agent/docker-compose.yml` and the reference template) uses the same `json-file` 10m × 5 ceiling. That is deployment configuration only; it does not change scan runtime and does not require an Agent pin bump. Existing Agent hosts still running an older compose file remain unbounded until that file is replaced and the container is recreated (`docker compose --env-file agent.env up -d`).
 
 ---
 
@@ -224,6 +228,8 @@ Do not reopen S3F. Document and, where safe, re-run **restart** (not replica top
 | PostgreSQL | Recreate `postgres` on the **same** `postgres-data` volume; wait for healthy; API reconnects | New volume, `down -v`, or `pg_restore` onto live |
 
 WAN scanner talks to `http://api:8000` (no Caddy retry). A brief API recreate can 502 in-flight scanner POSTs; that is accepted H9 non-claim.
+
+**Walked 2026-09-01** as part of log-rotation deploy: `docker compose up -d --no-build --scale api=2` recreated postgres (same volume), both API replicas, web, Caddy, scanner, and scheduler. Health `{"ok":true}`; scheduler lock `91304701` granted; APScheduler started. Did not reopen S3F.
 
 ---
 
