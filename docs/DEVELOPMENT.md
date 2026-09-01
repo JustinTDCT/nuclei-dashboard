@@ -206,19 +206,32 @@ pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py
 
 ### Scale S3D true API pagination
 
-S3D pages the staff collection GETs that grow with inventory and scan volume. It is not a broad router rewrite.
+S3D is ACCEPT at implementation `782f072` plus UI correction `fcc47e5`. It pages the staff collection GETs that grow with inventory and scan volume. It is not a broad router rewrite.
 
 Classification at the start of this tranche:
 
-- **Already bounded:** Agent/scanner job poll (`limit` 5 / first claimable), dashboard recent rows (`limit` 8), ingest POSTs (S2D row/byte caps), `alert-routing` / `alert-delivery` claim batches, S3A discovery-metadata keyset page. Asset history endpoints (`/assets/{id}/observations|events|identifiers|addresses|services|correlation`) and `/audit-history` / `/domain-events` already return `HistoryPage` with `limit`/`offset`/`total`. Report preview already has `page`/`page_size` (keyset export is the next tranche).
+- **Already bounded:** Agent/scanner job poll (`limit` 5 / first claimable), dashboard recent rows (`limit` 8), ingest POSTs (S2D row/byte caps), `alert-routing` / `alert-delivery` claim batches, S3A discovery-metadata keyset page. Asset history endpoints (`/assets/{id}/observations|events|identifiers|addresses|services|correlation`) and `/audit-history` / `/domain-events` already return `HistoryPage` with `limit`/`offset`/`total`. Report preview already has `page`/`page_size`.
 - **Nominally capped, not pageable:** these returned a JSON array with a silent `.limit(N)` and no way to fetch the rest. Highest production risk, changed this tranche: `GET /tenants/{id}/asset-findings` (was 2000), `GET /tenants/{id}/findings` (was 2000), `GET /tenants/{id}/assets` (was 1000), `GET /tenants/{id}/devices` (was 1000), `GET /alerts` (was 500), `GET /tenants/{id}/jobs` (was 100), `GET /jobs` (was 50). They now return `HistoryPage` (`items`, `total`, `limit`, `offset`), default 50, max 200. Filters still apply before the limit.
-- **Fully unbounded / deferred:** CSV compatibility exports (`/assets/export`, `/findings/export`, `/devices/export`) still stream the filtered set. Device detail still embeds up to 2000 findings. Per-parent evidence/history/treatments/control-references load that subject's rows. Config lists (tenants, users, sites, networks, agents, scans, policies, tags, exclusions, WAN targets, subnets, compliance frameworks/controls) stay unpaged; they are not inventory-scale. Report export iteration is S3E.
+- **Fully unbounded / deferred to S3E:** CSV compatibility exports (`/assets/export`, `/findings/export`, `/devices/export`) and report CSV/PDF export iteration. Device detail still embeds up to 2000 findings. Per-parent evidence/history/treatments/control-references load that subject's rows. Config lists (tenants, users, sites, networks, agents, scans, policies, tags, exclusions, WAN targets, subnets, compliance frameworks/controls) stay unpaged; they are not inventory-scale.
 
-Do not change Agent/scanner poll contracts. Do not add `0018`. Agent pin stays `3cdb52c`. This tranche does not add a second API replica.
+Assets search Enter resets to offset 0, matching the Search button. Do not change Agent/scanner poll contracts. Do not add `0018`. Agent pin stays `3cdb52c`. This tranche does not add a second API replica.
 
 ```bash
 cd backend
 pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py tests/test_scale_s3d.py
+```
+
+### Scale S3E keyset report/export iteration
+
+S3E streams report CSV/PDF exports and the three compatibility CSV exports so a large inventory cannot force the API to hold the full result set in Python memory. Full-result semantics stay: same columns, same filters, same deterministic order, every matching row. Preview and staff list GETs stay on the S3D `HistoryPage` / `page`/`page_size` offset contract.
+
+Do not use `OFFSET n` or `query.all()` for export iteration. Walk keyset batches (`(sort keys, id)` seek, default 200 rows, `REPORT_EXPORT_BATCH_SIZE`) and drop the batch from the Session after it is serialized. Equivalence is first row, last row, and total row count against the former full-load exporter. Peak RSS must not grow linearly with row count; SELECT count may grow with batch count.
+
+Do not add `0018`. Agent pin stays `3cdb52c`. This tranche does not add a second API replica.
+
+```bash
+cd backend
+pytest tests/test_scale_s3a.py tests/test_scale_s3b.py tests/test_scale_s3c.py tests/test_scale_s3d.py tests/test_scale_s3e.py
 ```
 
 S2B tenant-wide prefetch row counts are recorded on ingest metrics (`prefetch_identifier_rows`, `prefetch_address_rows`, `prefetch_device_rows`) plus Device-stage wall time, SELECT count, and peak API RSS. S2D records `finding_index_preloads`, `finding_index_preload_selects`, `finding_index_preload_wall_ms`, and `finding_index_preload_peak_rss_bytes` when Finding/coverage/finalize each build a `FindingRunIndex`. Use medium/large sizes with `--chunk-rows` / `--chunk-bytes` when measuring per-chunk preload cost. If preload RSS dominates, that is evidence for a later request/run-scoped optimization — do not automatically redesign S2C, and do not return to per-report queries.

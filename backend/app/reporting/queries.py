@@ -43,6 +43,7 @@ from app.models import (
     Vulnerability,
     VulnerabilityIntelligence,
 )
+from app.reporting.keyset import KeyCol, export_batch_size, map_keyset
 from app.reporting.scope import ReportContext
 from app.scan_dispatch import is_agent_healthy
 from app.treatments import display_status
@@ -207,21 +208,29 @@ def asset_inventory_rows(ctx: ReportContext, *, offset: int | None = None, limit
     return [serialize_asset_row(asset, counts.get(asset.id, 0)) for asset in assets]
 
 
+def asset_inventory_keys():
+    return (KeyCol(Asset.display_name), KeyCol(Asset.id))
+
+
 def asset_inventory_iter(ctx: ReportContext):
-    offset = 0
-    while True:
-        batch = asset_inventory_query(ctx).offset(offset).limit(200).all()
-        if not batch:
-            return
+    def pack(batch: list[Asset]):
         counts = _open_finding_counts(ctx.db, [item.id for item in batch])
-        for item in batch:
-            yield serialize_asset_row(item, counts.get(item.id, 0))
-        if len(batch) < 200:
-            return
-        offset += 200
+        return [serialize_asset_row(item, counts.get(item.id, 0)) for item in batch]
+
+    yield from map_keyset(
+        asset_inventory_query(ctx),
+        asset_inventory_keys(),
+        session=ctx.db,
+        serialize_batch=pack,
+    )
 
 
 def _finding_query(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
+    query, _keys = _finding_query_and_keys(ctx, technical_state=technical_state, require_cve=require_cve)
+    return query
+
+
+def _finding_query_and_keys(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
     query = (
         ctx.db.query(AssetFinding)
         .join(Asset, Asset.id == AssetFinding.asset_id)
@@ -260,8 +269,13 @@ def _finding_query(ctx: ReportContext, *, technical_state: str | None, require_c
     if ctx.filters.get("kev") is False:
         query = query.filter(or_(VulnerabilityIntelligence.kev.is_(False), VulnerabilityIntelligence.kev.is_(None)))
     if technical_state == TECHNICAL_RESOLVED:
-        return query.order_by(time_column.asc().nulls_last(), AssetFinding.id.asc())
-    return query.order_by(AssetFinding.first_seen.asc(), AssetFinding.id.asc())
+        keys = (
+            KeyCol(time_column, value=lambda row: row.resolved_at or row.first_seen),
+            KeyCol(AssetFinding.id),
+        )
+        return query.order_by(time_column.asc().nulls_last(), AssetFinding.id.asc()), keys
+    keys = (KeyCol(AssetFinding.first_seen), KeyCol(AssetFinding.id))
+    return query.order_by(AssetFinding.first_seen.asc(), AssetFinding.id.asc()), keys
 
 
 def _active_treatments(db: Session, finding_ids: list[int]) -> dict[int, FindingTreatment]:
@@ -353,20 +367,19 @@ def finding_rows(ctx: ReportContext, *, technical_state: str | None, require_cve
 
 
 def finding_iter(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
-    offset = 0
-    while True:
-        batch = (
-            _finding_query(ctx, technical_state=technical_state, require_cve=require_cve)
-            .offset(offset)
-            .limit(200)
-            .all()
-        )
-        if not batch:
-            return
-        yield from _pack_findings(ctx, batch)
-        if len(batch) < 200:
-            return
-        offset += 200
+    def pack(batch: list[AssetFinding]):
+        packed = list(_pack_findings(ctx, batch))
+        if technical_state == TECHNICAL_RESOLVED:
+            return resolved_extra(ctx, packed)
+        return packed
+
+    query, keys = _finding_query_and_keys(ctx, technical_state=technical_state, require_cve=require_cve)
+    yield from map_keyset(
+        query,
+        keys,
+        session=ctx.db,
+        serialize_batch=pack,
+    )
 
 
 def _pack_findings(ctx: ReportContext, rows: list[AssetFinding]):
@@ -584,16 +597,33 @@ def executive_rows(ctx: ReportContext, *, offset=None, limit=None):
     return [serialize_asset_row(asset, counts.get(asset.id, 0)) for asset in assets]
 
 
-def executive_iter(ctx: ReportContext, *, chunk: int = 200):
-    offset = 0
-    while True:
-        batch = executive_rows(ctx, offset=offset, limit=chunk)
-        if not batch:
-            return
-        yield from batch
-        if len(batch) < chunk:
-            return
-        offset += chunk
+def executive_keys():
+    return (
+        KeyCol(Asset.criticality, descending=True),
+        KeyCol(Asset.display_name),
+        KeyCol(Asset.id),
+    )
+
+
+def executive_iter(ctx: ReportContext, *, chunk: int | None = None):
+    def pack(batch: list[Asset]):
+        counts = _open_finding_counts(ctx.db, [asset.id for asset in batch])
+        return [serialize_asset_row(asset, counts.get(asset.id, 0)) for asset in batch]
+
+    query = _executive_assets(ctx).options(
+        selectinload(Asset.site),
+        selectinload(Asset.tenant),
+        selectinload(Asset.tags),
+        selectinload(Asset.addresses),
+        selectinload(Asset.identifiers),
+    ).order_by(Asset.criticality.desc(), Asset.display_name, Asset.id)
+    yield from map_keyset(
+        query,
+        executive_keys(),
+        session=ctx.db,
+        serialize_batch=pack,
+        batch_size=chunk,
+    )
 
 
 def _asset_change_event_query(ctx: ReportContext):
@@ -673,16 +703,27 @@ def asset_change_rows(ctx: ReportContext, *, offset=None, limit=None) -> tuple[i
     return total, [_serialize_asset_change(row) for row in query.all()]
 
 
-def asset_change_iter(ctx: ReportContext, *, chunk: int = 200):
-    offset = 0
-    while True:
-        _total, rows = asset_change_rows(ctx, offset=offset, limit=chunk)
-        if not rows:
-            return
-        yield from rows
-        if len(rows) < chunk:
-            return
-        offset += chunk
+def asset_change_keys(stmt):
+    return (
+        KeyCol(stmt.c.sort_at, descending=True, value=lambda row: row.sort_at),
+        KeyCol(stmt.c.sort_id, descending=True, value=lambda row: row.sort_id),
+    )
+
+
+def asset_change_iter(ctx: ReportContext, *, chunk: int | None = None):
+    stmt = _asset_change_subquery(ctx)
+    query = ctx.db.query(stmt).order_by(stmt.c.sort_at.desc(), stmt.c.sort_id.desc())
+
+    def pack(batch):
+        return [_serialize_asset_change(row) for row in batch]
+
+    yield from map_keyset(
+        query,
+        asset_change_keys(stmt),
+        session=ctx.db,
+        serialize_batch=pack,
+        batch_size=chunk,
+    )
 
 
 def treatment_query(ctx: ReportContext):
@@ -708,6 +749,13 @@ def treatment_query(ctx: ReportContext):
     if status:
         query = query.filter(FindingTreatment.status == status)
     return query.order_by(FindingTreatment.created_at.desc(), FindingTreatment.id.desc())
+
+
+def treatment_keys():
+    return (
+        KeyCol(FindingTreatment.created_at, descending=True),
+        KeyCol(FindingTreatment.id, descending=True),
+    )
 
 
 def serialize_treatment_row(row: FindingTreatment, names: dict[int, str]) -> dict[str, Any]:
@@ -752,6 +800,24 @@ def treatment_rows(ctx: ReportContext, *, offset=None, limit=None):
     return [serialize_treatment_row(row, names) for row in rows]
 
 
+def treatment_iter(ctx: ReportContext):
+    from app.usernames import load_usernames
+
+    def pack(batch: list[FindingTreatment]):
+        names = load_usernames(
+            ctx.db,
+            [row.created_by_user_id for row in batch] + [row.reviewed_by_user_id for row in batch],
+        )
+        return [serialize_treatment_row(row, names) for row in batch]
+
+    yield from map_keyset(
+        treatment_query(ctx),
+        treatment_keys(),
+        session=ctx.db,
+        serialize_batch=pack,
+    )
+
+
 def _provenance(job: ScanJob, key: str) -> str:
     from app.scanner_versions import provenance_version
 
@@ -794,6 +860,13 @@ def scan_history_query(ctx: ReportContext):
             )
         )
     return query.order_by(ScanJob.created_at.desc(), ScanJob.id.desc())
+
+
+def scan_history_keys():
+    return (
+        KeyCol(ScanJob.created_at, descending=True),
+        KeyCol(ScanJob.id, descending=True),
+    )
 
 
 def serialize_scan_row(ctx: ReportContext, job: ScanJob, tenants: dict[int, str]) -> dict[str, Any]:
@@ -841,10 +914,28 @@ def scan_history_rows(ctx: ReportContext, *, offset=None, limit=None):
     return [serialize_scan_row(ctx, job, tenants) for job in jobs]
 
 
+def scan_history_iter(ctx: ReportContext):
+    def pack(batch: list[ScanJob]):
+        tenant_ids = {job.tenant_id for job in batch}
+        tenants = {row.id: row.name for row in ctx.db.query(Tenant).filter(Tenant.id.in_(tenant_ids or {0})).all()}
+        return [serialize_scan_row(ctx, job, tenants) for job in batch]
+
+    yield from map_keyset(
+        scan_history_query(ctx),
+        scan_history_keys(),
+        session=ctx.db,
+        serialize_batch=pack,
+    )
+
+
 def agent_health_query(ctx: ReportContext):
     query = ctx.db.query(Agent).options(selectinload(Agent.site), selectinload(Agent.tenant))
     query = apply_common(query, ctx, Agent.tenant_id, Agent.site_id)
     return query.order_by(Agent.name, Agent.id)
+
+
+def agent_health_keys():
+    return (KeyCol(Agent.name), KeyCol(Agent.id))
 
 
 def serialize_agent_row(agent: Agent, approved: dict[str, str] | None = None) -> dict[str, Any]:
@@ -888,6 +979,23 @@ def agent_health_rows(ctx: ReportContext, *, offset=None, limit=None):
         query = query.limit(limit)
     approved = approved_versions_from_settings(get_settings(ctx.db))
     return [serialize_agent_row(agent, approved) for agent in query.all()]
+
+
+def agent_health_iter(ctx: ReportContext):
+    from app.scanner_versions import approved_versions_from_settings
+    from app.settings_store import get_settings
+
+    approved = approved_versions_from_settings(get_settings(ctx.db))
+
+    def pack(batch: list[Agent]):
+        return [serialize_agent_row(agent, approved) for agent in batch]
+
+    yield from map_keyset(
+        agent_health_query(ctx),
+        agent_health_keys(),
+        session=ctx.db,
+        serialize_batch=pack,
+    )
 
 
 def control_evidence_controls(ctx: ReportContext) -> list[ComplianceControl]:
@@ -1068,20 +1176,35 @@ def control_evidence_rows(ctx: ReportContext, *, offset=None, limit=None) -> tup
     return rows, summary, total
 
 
-def control_evidence_iter(ctx: ReportContext, *, chunk: int = 200):
+def control_evidence_iter(ctx: ReportContext, *, chunk: int | None = None):
     _summary, controls, counts, _total = control_evidence_summary(ctx)
+    size = chunk if chunk is not None else export_batch_size()
+    from app.usernames import load_usernames
+
     for control in controls:
         mapped_count = counts.get(control.id, 0)
         if not mapped_count:
             yield _control_placeholder(control)
             continue
-        offset = 0
+        cursor_id = 0
         while True:
-            refs, names, lookups = _control_ref_page(ctx, control.id, offset=offset, limit=chunk)
+            refs = (
+                _control_ref_query(ctx)
+                .filter(
+                    ComplianceControlReference.control_id == control.id,
+                    ComplianceControlReference.id > cursor_id,
+                )
+                .order_by(ComplianceControlReference.id)
+                .limit(size)
+                .all()
+            )
             if not refs:
                 break
+            names = load_usernames(ctx.db, [row.created_by_user_id for row in refs])
+            lookups = _subject_lookups(ctx.db, refs)
             for ref in refs:
                 yield _serialize_control_ref(control, ref, mapped_count, names, lookups)
-            if len(refs) < chunk:
+                ctx.db.expunge(ref)
+            if len(refs) < size:
                 break
-            offset += chunk
+            cursor_id = refs[-1].id

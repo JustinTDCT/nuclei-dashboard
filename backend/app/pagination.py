@@ -1,7 +1,7 @@
 """Offset pagination for staff collection GETs.
 
 S3D uses the existing HistoryPage envelope. This is not keyset iteration;
-report exports stay on their own later tranche.
+report and compatibility CSV exports use app.reporting.keyset.
 """
 
 from __future__ import annotations

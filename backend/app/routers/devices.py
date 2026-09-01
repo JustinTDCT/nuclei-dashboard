@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from app.access import require_object_tenant, require_visible_tenant
 from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
 from app.reporting.csv_export import csv_streaming_response
+from app.reporting.keyset import KeyCol, map_keyset
 from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -154,6 +155,35 @@ def update_device(
     return _with_counts(db, [device])[0]
 
 
+def serialize_device_export_row(device: Device) -> list:
+    return [
+        device.hostname,
+        device.ip,
+        device.scope,
+        device.status,
+        device.classification,
+        device.description,
+        device.auto_label,
+        device.title,
+        ";".join(str(p) for p in (device.ports or [])),
+        device.first_seen.isoformat() if device.first_seen else "",
+        device.last_seen.isoformat() if device.last_seen else "",
+    ]
+
+
+def device_export_query(db: Session, tenant_id: int):
+    return db.query(Device).filter(Device.tenant_id == tenant_id).order_by(Device.hostname, Device.ip, Device.id)
+
+
+def iter_device_export_rows(db: Session, tenant_id: int):
+    yield from map_keyset(
+        device_export_query(db, tenant_id),
+        (KeyCol(Device.hostname), KeyCol(Device.ip), KeyCol(Device.id)),
+        session=db,
+        serialize_batch=lambda batch: [serialize_device_export_row(device) for device in batch],
+    )
+
+
 @router.get("/tenants/{tenant_id}/devices/export")
 def export_devices(
     tenant_id: int,
@@ -161,7 +191,6 @@ def export_devices(
     db: Session = Depends(get_db),
 ):
     _tenant(db, tenant_id, user)
-    rows = db.query(Device).filter(Device.tenant_id == tenant_id).order_by(Device.hostname, Device.ip).all()
     headers = [
         "hostname",
         "ip",
@@ -175,20 +204,4 @@ def export_devices(
         "first_seen",
         "last_seen",
     ]
-    exported = (
-        [
-            d.hostname,
-            d.ip,
-            d.scope,
-            d.status,
-            d.classification,
-            d.description,
-            d.auto_label,
-            d.title,
-            ";".join(str(p) for p in (d.ports or [])),
-            d.first_seen.isoformat() if d.first_seen else "",
-            d.last_seen.isoformat() if d.last_seen else "",
-        ]
-        for d in rows
-    )
-    return csv_streaming_response(f"tenant-{tenant_id}-devices", headers, exported)
+    return csv_streaming_response(f"tenant-{tenant_id}-devices", headers, iter_device_export_rows(db, tenant_id))

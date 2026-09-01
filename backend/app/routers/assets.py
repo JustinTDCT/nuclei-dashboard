@@ -19,6 +19,7 @@ from app.assets import (
 from app.access import require_tenant_access, require_visible_tenant
 from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
 from app.reporting.csv_export import csv_streaming_response
+from app.reporting.keyset import KeyCol, map_keyset
 from app.audit import record_audit
 from app.auth import require_any, require_user
 from app.database import get_db
@@ -245,16 +246,44 @@ def list_assets(
     )
 
 
-@router.get("/tenants/{tenant_id}/assets/export")
-def export_assets(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
-    require_visible_tenant(db, user, tenant_id)
-    assets = (
+def serialize_asset_export_row(asset: Asset) -> list:
+    return [
+        asset.id,
+        asset.display_name,
+        asset.site.name if asset.site else "",
+        ";".join(_current_addresses(asset)),
+        asset.classification,
+        asset.lifecycle_state or "",
+        asset.disposition,
+        asset.criticality,
+        "yes" if asset.is_expected and asset.first_seen is None else "no",
+        asset.first_seen.isoformat() if asset.first_seen else "",
+        asset.last_seen.isoformat() if asset.last_seen else "",
+        ";".join(tag.name for tag in asset.tags),
+    ]
+
+
+def asset_export_query(db: Session, tenant_id: int):
+    return (
         db.query(Asset)
         .options(selectinload(Asset.site), selectinload(Asset.tags), selectinload(Asset.addresses))
         .filter(Asset.tenant_id == tenant_id)
         .order_by(Asset.display_name, Asset.id)
-        .all()
     )
+
+
+def iter_asset_export_rows(db: Session, tenant_id: int):
+    yield from map_keyset(
+        asset_export_query(db, tenant_id),
+        (KeyCol(Asset.display_name), KeyCol(Asset.id)),
+        session=db,
+        serialize_batch=lambda batch: [serialize_asset_export_row(asset) for asset in batch],
+    )
+
+
+@router.get("/tenants/{tenant_id}/assets/export")
+def export_assets(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    require_visible_tenant(db, user, tenant_id)
     headers = [
         "id",
         "display_name",
@@ -269,24 +298,7 @@ def export_assets(tenant_id: int, user: User = Depends(require_any), db: Session
         "last_seen",
         "tags",
     ]
-    rows = (
-        [
-            asset.id,
-            asset.display_name,
-            asset.site.name if asset.site else "",
-            ";".join(_current_addresses(asset)),
-            asset.classification,
-            asset.lifecycle_state or "",
-            asset.disposition,
-            asset.criticality,
-            "yes" if asset.is_expected and asset.first_seen is None else "no",
-            asset.first_seen.isoformat() if asset.first_seen else "",
-            asset.last_seen.isoformat() if asset.last_seen else "",
-            ";".join(tag.name for tag in asset.tags),
-        ]
-        for asset in assets
-    )
-    return csv_streaming_response(f"tenant-{tenant_id}-assets", headers, rows)
+    return csv_streaming_response(f"tenant-{tenant_id}-assets", headers, iter_asset_export_rows(db, tenant_id))
 
 
 @router.post("/tenants/{tenant_id}/assets", response_model=AssetDetail)

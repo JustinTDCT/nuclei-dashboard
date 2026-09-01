@@ -9,6 +9,7 @@ from app.reporting.catalog import catalog, get_spec, scoped_filters, supported_f
 from app.reporting.csv_export import csv_response_from_spool, spool_csv
 from app.reporting.pdf_export import pdf_response, render_pdf
 from app.reporting.queries import (
+    agent_health_iter,
     agent_health_query,
     agent_health_rows,
     asset_change_iter,
@@ -27,18 +28,15 @@ from app.reporting.queries import (
     finding_iter,
     finding_rows,
     resolved_extra,
+    scan_history_iter,
     scan_history_query,
     scan_history_rows,
-    serialize_agent_row,
-    serialize_scan_row,
-    serialize_treatment_row,
+    treatment_iter,
     treatment_query,
     treatment_rows,
 )
 from app.reporting.scope import ReportContext
 from app.models import Tenant
-from app.treatments import display_status
-from app.usernames import load_usernames
 
 COLUMNS = {
     "executive": [
@@ -352,63 +350,20 @@ def _iter_rows(ctx: ReportContext, report_key: str):
         yield from finding_iter(ctx, technical_state="open")
         return
     if report_key == "resolved_findings":
-        offset = 0
-        while True:
-            batch = finding_rows(ctx, technical_state="resolved", offset=offset, limit=200)
-            if not batch:
-                return
-            yield from resolved_extra(ctx, batch)
-            if len(batch) < 200:
-                return
-            offset += 200
+        yield from finding_iter(ctx, technical_state="resolved")
+        return
     if report_key == "treatments":
-        offset = 0
-        while True:
-            batch = treatment_query(ctx).offset(offset).limit(200).all()
-            if not batch:
-                return
-            names = load_usernames(
-                ctx.db,
-                [item.created_by_user_id for item in batch] + [item.reviewed_by_user_id for item in batch],
-            )
-            for item in batch:
-                yield serialize_treatment_row(item, names)
-            if len(batch) < 200:
-                return
-            offset += 200
+        yield from treatment_iter(ctx)
+        return
     if report_key == "cve_aging":
         yield from finding_iter(ctx, technical_state="open", require_cve=True)
         return
     if report_key == "scan_history":
-        offset = 0
-        while True:
-            batch = scan_history_query(ctx).offset(offset).limit(200).all()
-            if not batch:
-                return
-            tenant_ids = {item.tenant_id for item in batch}
-            tenants = {row.id: row.name for row in ctx.db.query(Tenant).filter(Tenant.id.in_(tenant_ids)).all()}
-            for item in batch:
-                yield serialize_scan_row(ctx, item, tenants)
-            if len(batch) < 200:
-                return
-            offset += 200
+        yield from scan_history_iter(ctx)
+        return
     if report_key == "agent_health":
-        offset = 0
-        while True:
-            batch = agent_health_query(ctx).offset(offset).limit(200).all()
-            if not batch:
-                return
-            approved = None
-            if batch:
-                from app.scanner_versions import approved_versions_from_settings
-                from app.settings_store import get_settings
-
-                approved = approved_versions_from_settings(get_settings(ctx.db))
-            for agent in batch:
-                yield serialize_agent_row(agent, approved)
-            if len(batch) < 200:
-                return
-            offset += 200
+        yield from agent_health_iter(ctx)
+        return
     if report_key == "control_evidence":
         yield from control_evidence_iter(ctx)
         return

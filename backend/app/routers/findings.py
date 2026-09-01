@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.access import require_visible_tenant
 from app.pagination import LIST_PAGE_DEFAULT, LIST_PAGE_MAX, as_page, paginate_query
 from app.reporting.csv_export import csv_streaming_response
+from app.reporting.keyset import KeyCol, map_keyset
 from app.auth import require_any
 from app.compliance import COMPLIANCE_MAPPING_DISCLAIMER, list_asset_finding_control_references
 from app.database import get_db
@@ -197,34 +198,44 @@ def list_findings(
     return as_page(rows, total=total, limit=limit, offset=offset, serialize=_finding_out)
 
 
-@router.get("/tenants/{tenant_id}/findings/export")
-def export_findings(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
-    _require_tenant(db, tenant_id, user)
-    rows = (
+def serialize_finding_export_row(finding: Finding) -> list:
+    item = _finding_out(finding)
+    return [
+        finding.found_at.isoformat() if finding.found_at else "",
+        finding.severity,
+        item.hostname,
+        item.ip,
+        finding.template_id,
+        finding.name,
+        finding.host,
+        finding.matched_at,
+        finding.tags,
+    ]
+
+
+def finding_export_query(db: Session, tenant_id: int):
+    return (
         db.query(Finding)
         .options(joinedload(Finding.device))
         .filter(Finding.tenant_id == tenant_id)
-        .order_by(Finding.found_at.desc())
-        .all()
+        .order_by(Finding.found_at.desc(), Finding.id.desc())
     )
+
+
+def iter_finding_export_rows(db: Session, tenant_id: int):
+    yield from map_keyset(
+        finding_export_query(db, tenant_id),
+        (KeyCol(Finding.found_at, descending=True), KeyCol(Finding.id, descending=True)),
+        session=db,
+        serialize_batch=lambda batch: [serialize_finding_export_row(row) for row in batch],
+    )
+
+
+@router.get("/tenants/{tenant_id}/findings/export")
+def export_findings(tenant_id: int, user: User = Depends(require_any), db: Session = Depends(get_db)):
+    _require_tenant(db, tenant_id, user)
     headers = ["found_at", "severity", "hostname", "ip", "template_id", "name", "host", "matched_at", "tags"]
-    exported = []
-    for f in rows:
-        item = _finding_out(f)
-        exported.append(
-            [
-                f.found_at.isoformat() if f.found_at else "",
-                f.severity,
-                item.hostname,
-                item.ip,
-                f.template_id,
-                f.name,
-                f.host,
-                f.matched_at,
-                f.tags,
-            ]
-        )
-    return csv_streaming_response(f"tenant-{tenant_id}-findings", headers, exported)
+    return csv_streaming_response(f"tenant-{tenant_id}-findings", headers, iter_finding_export_rows(db, tenant_id))
 
 
 @router.get("/tenants/{tenant_id}/asset-findings", response_model=HistoryPage)
