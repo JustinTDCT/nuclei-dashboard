@@ -1,7 +1,7 @@
 # V1B — Operational Release Readiness
 
 **Tranche:** V1B — Operational Release Readiness  
-**Status:** ACCEPT / CLOSED (`bb63c6b`). V1C is READY TO START.  
+**Status:** ACCEPT / CLOSED. Implementation/ops baseline `bb63c6b` (PR #1). V1B acceptance checkpoint is the merge commit of PR #2. V1C is READY TO START.  
 **Does not change:** schema (`0017`), Agent pin `3cdb52c`, Scale S1–S3, Sec H1–H9, V1A product PARTIAL/MISSING items.
 
 This file is the operator runbook. Evidence of what was actually exercised lives in `docs/V1B_CLOSURE.md`. Instructions without a matching closure row are not a passed gate.

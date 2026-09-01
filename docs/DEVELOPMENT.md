@@ -2,7 +2,7 @@
 
 `MASTER_PLAN.md` is the canonical architecture and phase contract. Do not implement later phases from it unless the current task says so.
 
-The defined implementation roadmap is complete through Phase 3C, Scale S3, and Sec H9 (`3f702b8`). **V1A** is ACCEPT / CLOSED (`a06e455` on audited baseline `3f702b8`). **V1B** is ACCEPT / CLOSED (`bb63c6b`, `docs/V1B_CLOSURE.md`). Current tranche is **V1C — technician/auditor UX walk**. Do not add `0018`, bump the Agent pin, or fix V1A PARTIALs unless V1C explicitly requires it.
+The defined implementation roadmap is complete through Phase 3C, Scale S3, and Sec H9 (`3f702b8`). **V1A** is ACCEPT / CLOSED (`a06e455` on audited baseline `3f702b8`). **V1B** is ACCEPT / CLOSED: implementation/ops baseline `bb63c6b` (PR #1); acceptance checkpoint is the merge of PR #2 (`docs/V1B_CLOSURE.md`). Current tranche is **V1C — technician/auditor UX walk**. Do not add `0018`, bump the Agent pin, or fix V1A PARTIALs unless V1C explicitly requires it.
 
 ## Database migrations (Alembic)
 
