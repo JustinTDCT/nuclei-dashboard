@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Integer, and_, cast, func, literal, or_
+from sqlalchemy import Integer, and_, case, cast, func, literal, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.access import tenant_scope_clause
@@ -225,12 +225,7 @@ def asset_inventory_iter(ctx: ReportContext):
     )
 
 
-def _finding_query(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
-    query, _keys = _finding_query_and_keys(ctx, technical_state=technical_state, require_cve=require_cve)
-    return query
-
-
-def _finding_query_and_keys(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
+def _finding_base_query(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
     query = (
         ctx.db.query(AssetFinding)
         .join(Asset, Asset.id == AssetFinding.asset_id)
@@ -268,12 +263,26 @@ def _finding_query_and_keys(ctx: ReportContext, *, technical_state: str | None, 
         query = query.filter(VulnerabilityIntelligence.kev.is_(True))
     if ctx.filters.get("kev") is False:
         query = query.filter(or_(VulnerabilityIntelligence.kev.is_(False), VulnerabilityIntelligence.kev.is_(None)))
+    return query, time_column
+
+
+def _finding_query(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
+    query, time_column = _finding_base_query(ctx, technical_state=technical_state, require_cve=require_cve)
     if technical_state == TECHNICAL_RESOLVED:
+        return query.order_by(time_column.asc().nulls_last(), AssetFinding.id.asc())
+    return query.order_by(AssetFinding.first_seen.asc(), AssetFinding.id.asc())
+
+
+def _finding_export_query_and_keys(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
+    query, time_column = _finding_base_query(ctx, technical_state=technical_state, require_cve=require_cve)
+    if technical_state == TECHNICAL_RESOLVED:
+        sort_at = time_column.label("sort_at")
+        ordered = query.add_columns(sort_at).order_by(sort_at.asc().nulls_last(), AssetFinding.id.asc())
         keys = (
-            KeyCol(time_column, value=lambda row: row.resolved_at or row.first_seen),
-            KeyCol(AssetFinding.id),
+            KeyCol(time_column, value=lambda row: row.sort_at),
+            KeyCol(AssetFinding.id, value=lambda row: row[0].id),
         )
-        return query.order_by(time_column.asc().nulls_last(), AssetFinding.id.asc()), keys
+        return ordered, keys
     keys = (KeyCol(AssetFinding.first_seen), KeyCol(AssetFinding.id))
     return query.order_by(AssetFinding.first_seen.asc(), AssetFinding.id.asc()), keys
 
@@ -367,13 +376,14 @@ def finding_rows(ctx: ReportContext, *, technical_state: str | None, require_cve
 
 
 def finding_iter(ctx: ReportContext, *, technical_state: str | None, require_cve: bool = False):
-    def pack(batch: list[AssetFinding]):
-        packed = list(_pack_findings(ctx, batch))
+    def pack(batch):
+        findings = [row[0] for row in batch] if technical_state == TECHNICAL_RESOLVED else list(batch)
+        packed = list(_pack_findings(ctx, findings))
         if technical_state == TECHNICAL_RESOLVED:
             return resolved_extra(ctx, packed)
         return packed
 
-    query, keys = _finding_query_and_keys(ctx, technical_state=technical_state, require_cve=require_cve)
+    query, keys = _finding_export_query_and_keys(ctx, technical_state=technical_state, require_cve=require_cve)
     yield from map_keyset(
         query,
         keys,
@@ -418,6 +428,41 @@ def resolved_extra(ctx: ReportContext, rows: list[dict[str, Any]]) -> list[dict[
         row["resolution_threshold"] = (details or {}).get("required_clean_scans") or (details or {}).get("threshold") or ""
         row["resolution_policy"] = (details or {}).get("policy") or (details or {}).get("source") or ""
     return rows
+
+
+def _open_age_buckets(ctx: ReportContext) -> dict[str, int]:
+    generated_at = ctx.generated_at
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    age_days = func.greatest(
+        0,
+        func.floor(func.extract("epoch", generated_at - AssetFinding.first_seen) / 86400.0),
+    )
+    bucket = case(
+        (age_days <= 30, literal("0-30")),
+        (age_days <= 60, literal("31-60")),
+        (age_days <= 90, literal("61-90")),
+        (age_days <= 180, literal("91-180")),
+        (age_days <= 365, literal("181-365")),
+        else_=literal("365+"),
+    )
+    labeled = bucket.label("age_bucket")
+    rows = (
+        apply_common(
+            ctx.db.query(labeled, func.count(AssetFinding.id)).join(Asset, Asset.id == AssetFinding.asset_id),
+            ctx,
+            AssetFinding.tenant_id,
+            Asset.site_id,
+        )
+        .filter(AssetFinding.technical_state == TECHNICAL_OPEN, AssetFinding.first_seen.isnot(None))
+        .group_by(labeled)
+        .all()
+    )
+    buckets = {label: 0 for label, _low, _high in AGE_BUCKETS}
+    for name, count in rows:
+        if name in buckets:
+            buckets[name] = int(count)
+    return buckets
 
 
 def executive_summary(ctx: ReportContext) -> dict[str, Any]:
@@ -486,21 +531,7 @@ def executive_summary(ctx: ReportContext) -> dict[str, Any]:
         .group_by(AssetFinding.treatment_state)
         .all()
     )
-    age_rows = (
-        apply_common(
-            ctx.db.query(AssetFinding.first_seen).join(Asset, Asset.id == AssetFinding.asset_id),
-            ctx,
-            AssetFinding.tenant_id,
-            Asset.site_id,
-        )
-        .filter(AssetFinding.technical_state == TECHNICAL_OPEN)
-        .all()
-    )
-    buckets = {label: 0 for label, _a, _b in AGE_BUCKETS}
-    for (first_seen,) in age_rows:
-        label = age_bucket(_age_days(first_seen, ctx.generated_at))
-        if label:
-            buckets[label] += 1
+    buckets = _open_age_buckets(ctx)
     critical_assets = (
         apply_common(
             ctx.db.query(func.count(func.distinct(Asset.id)))

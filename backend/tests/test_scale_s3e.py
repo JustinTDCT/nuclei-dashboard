@@ -80,6 +80,13 @@ def test_export_iters_are_keyset_not_offset():
     assert "map_keyset" in inspect.getsource(assets.iter_asset_export_rows)
     assert "Finding.id.desc()" in inspect.getsource(findings.finding_export_query)
     assert "Device.id" in inspect.getsource(devices.device_export_query)
+    summary_src = inspect.getsource(queries.executive_summary)
+    bucket_src = inspect.getsource(queries._open_age_buckets)
+    assert "query(AssetFinding.first_seen)" not in (summary_src + bucket_src).replace(" ", "")
+    assert "group_by" in bucket_src
+    export_src = inspect.getsource(queries._finding_export_query_and_keys)
+    assert "sort_at" in export_src
+    assert "resolved_at or row.first_seen" not in export_src
 
 
 def test_scheduler_catalog_unchanged():
@@ -372,6 +379,274 @@ def test_export_peak_rss_is_bounded_not_linear_with_row_count(reset_db):
     apply_schema()
     small = _rss_bytes_for_asset_export(80)
     large = _rss_bytes_for_asset_export(800)
+    assert small > 0
+    assert large > 0
+    assert large <= max(small * 25 // 10, small + 24 * 1024 * 1024)
+
+
+def _add_open_finding(db, *, tenant_id: int, asset_id: int, key: str, first_seen: datetime):
+    from app.models import TECHNICAL_OPEN, AssetFinding, Vulnerability
+
+    vuln = Vulnerability(canonical_key=key, cve_id=None, title=key)
+    db.add(vuln)
+    db.flush()
+    row = AssetFinding(
+        tenant_id=tenant_id,
+        asset_id=asset_id,
+        vulnerability_id=vuln.id,
+        technical_state=TECHNICAL_OPEN,
+        first_seen=first_seen,
+        last_seen=first_seen,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _add_resolved_finding(
+    db,
+    *,
+    tenant_id: int,
+    asset_id: int,
+    key: str,
+    first_seen: datetime,
+    resolved_at: datetime | None,
+    history_at: datetime,
+):
+    from app.models import HISTORY_RESOLVED, TECHNICAL_OPEN, TECHNICAL_RESOLVED, AssetFinding, AssetFindingHistory, Vulnerability
+
+    vuln = Vulnerability(canonical_key=key, cve_id=None, title=key)
+    db.add(vuln)
+    db.flush()
+    row = AssetFinding(
+        tenant_id=tenant_id,
+        asset_id=asset_id,
+        vulnerability_id=vuln.id,
+        technical_state=TECHNICAL_RESOLVED,
+        first_seen=first_seen,
+        last_seen=history_at,
+        resolved_at=resolved_at,
+    )
+    db.add(row)
+    db.flush()
+    db.add(
+        AssetFindingHistory(
+            asset_finding_id=row.id,
+            tenant_id=tenant_id,
+            transition_type=HISTORY_RESOLVED,
+            previous_technical_state=TECHNICAL_OPEN,
+            new_technical_state=TECHNICAL_RESOLVED,
+            occurred_at=history_at,
+            details={"source": "s3e-test"},
+            idempotence_key=f"s3e-resolved-{key}",
+        )
+    )
+    db.flush()
+    return row
+
+
+@requires_postgres
+def test_resolved_keyset_matches_sql_sort_when_resolved_at_is_null(reset_db, monkeypatch):
+    from app.database import SessionLocal
+    from app.migrate import apply_schema
+    from app.models import Asset, User
+    from app.reporting.queries import finding_iter, finding_rows, resolved_extra
+    from app.reporting.scope import build_context
+    from app.seed import seed
+
+    monkeypatch.setenv("REPORT_EXPORT_BATCH_SIZE", "1")
+    apply_schema()
+    db = SessionLocal()
+    try:
+        seed(db)
+        tenant = _seed_assets(db, count=1, label="resolved-cursor")
+        now = datetime.now(timezone.utc)
+        asset = db.query(Asset).filter(Asset.tenant_id == tenant.id).one()
+        late_history = _add_resolved_finding(
+            db,
+            tenant_id=tenant.id,
+            asset_id=asset.id,
+            key="s3e:resolved-null-late",
+            first_seen=now - timedelta(days=90),
+            resolved_at=None,
+            history_at=now - timedelta(days=10),
+        )
+        early_column = _add_resolved_finding(
+            db,
+            tenant_id=tenant.id,
+            asset_id=asset.id,
+            key="s3e:resolved-column",
+            first_seen=now - timedelta(days=80),
+            resolved_at=now - timedelta(days=40),
+            history_at=now - timedelta(days=40),
+        )
+        mid_history = _add_resolved_finding(
+            db,
+            tenant_id=tenant.id,
+            asset_id=asset.id,
+            key="s3e:resolved-null-mid",
+            first_seen=now - timedelta(days=200),
+            resolved_at=None,
+            history_at=now - timedelta(days=25),
+        )
+        db.commit()
+        admin = db.query(User).filter(User.username == "admin").one()
+        ctx = build_context(db, admin, tenant_id=tenant.id)
+        legacy = resolved_extra(ctx, finding_rows(ctx, technical_state="resolved"))
+        db.expunge_all()
+        ctx = build_context(db, admin, tenant_id=tenant.id)
+        streamed = list(finding_iter(ctx, technical_state="resolved"))
+        legacy_ids = [row["asset_finding_id"] for row in legacy]
+        streamed_ids = [row["asset_finding_id"] for row in streamed]
+        assert streamed_ids == legacy_ids
+        assert len(streamed_ids) == 3
+        assert len(set(streamed_ids)) == 3
+        assert streamed_ids == [early_column.id, mid_history.id, late_history.id]
+        assert streamed == legacy
+    finally:
+        db.close()
+
+
+@requires_postgres
+def test_executive_age_buckets_are_sql_grouped(reset_db):
+    from app.database import SessionLocal
+    from app.migrate import apply_schema
+    from app.models import Asset, User
+    from app.reporting.queries import AGE_BUCKETS, executive_summary
+    from app.reporting.scope import build_context
+    from app.seed import seed
+
+    apply_schema()
+    db = SessionLocal()
+    try:
+        seed(db)
+        tenant = _seed_assets(db, count=1, label="age-sql")
+        asset = db.query(Asset).filter(Asset.tenant_id == tenant.id).one()
+        generated_at = datetime.now(timezone.utc)
+        offsets = {
+            "0-30": 10,
+            "31-60": 40,
+            "61-90": 70,
+            "91-180": 120,
+            "181-365": 200,
+            "365+": 400,
+        }
+        for label, days in offsets.items():
+            _add_open_finding(
+                db,
+                tenant_id=tenant.id,
+                asset_id=asset.id,
+                key=f"s3e:age-{label}",
+                first_seen=generated_at - timedelta(days=days),
+            )
+        _add_open_finding(
+            db,
+            tenant_id=tenant.id,
+            asset_id=asset.id,
+            key="s3e:age-0-30-b",
+            first_seen=generated_at - timedelta(days=5),
+        )
+        db.commit()
+        admin = db.query(User).filter(User.username == "admin").one()
+        ctx = build_context(db, admin, tenant_id=tenant.id)
+        ctx.generated_at = generated_at
+        buckets = executive_summary(ctx)["open_age_buckets"]
+        assert set(buckets) == {label for label, _a, _b in AGE_BUCKETS}
+        assert buckets["0-30"] == 2
+        assert buckets["31-60"] == 1
+        assert buckets["61-90"] == 1
+        assert buckets["91-180"] == 1
+        assert buckets["181-365"] == 1
+        assert buckets["365+"] == 1
+    finally:
+        db.close()
+
+
+def _rss_bytes_for_executive_summary(count: int) -> int:
+    script = r"""
+import os
+import resource
+import sys
+from datetime import datetime, timedelta, timezone
+
+count = int(sys.argv[1])
+from app.database import SessionLocal
+from app.models import TECHNICAL_OPEN, Asset, AssetFinding, Site, Tenant, User, Vulnerability
+from app.reporting.queries import executive_summary
+from app.reporting.scope import ReportContext
+
+db = SessionLocal()
+now = datetime.now(timezone.utc)
+tenant = Tenant(name="s3e-exec-rss-%s" % count, notes="")
+db.add(tenant)
+db.flush()
+site = Site(tenant_id=tenant.id, name="HQ", timezone="UTC")
+db.add(site)
+db.flush()
+asset = Asset(
+    tenant_id=tenant.id,
+    site_id=site.id,
+    display_name="exec-rss",
+    classification="Unknown",
+    first_seen=now,
+    last_seen=now,
+)
+db.add(asset)
+db.flush()
+vulns = [
+    Vulnerability(canonical_key="s3e:exec-rss-%s-%s" % (count, index), title="rss")
+    for index in range(count)
+]
+db.add_all(vulns)
+db.flush()
+db.add_all(
+    [
+        AssetFinding(
+            tenant_id=tenant.id,
+            asset_id=asset.id,
+            vulnerability_id=vuln.id,
+            technical_state=TECHNICAL_OPEN,
+            first_seen=now - timedelta(days=(index % 400) + 1),
+            last_seen=now,
+        )
+        for index, vuln in enumerate(vulns)
+    ]
+)
+db.commit()
+actor = User(username="rss-%s" % count, email="rss-%s@example.com" % count, password_hash="x", role="admin")
+ctx = ReportContext(
+    db=db,
+    actor=actor,
+    generated_at=now,
+    display_timezone="UTC",
+    requested_tenant_id=tenant.id,
+)
+summary = executive_summary(ctx)
+assert summary["open_asset_findings"] == count
+assert sum(summary["open_age_buckets"].values()) == count
+db.close()
+usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(usage if sys.platform == "darwin" else int(usage) * 1024)
+"""
+    env = os.environ.copy()
+    proc = subprocess.run(
+        [sys.executable, "-c", script, str(count)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(BACKEND_ROOT),
+    )
+    return int(proc.stdout.strip().splitlines()[-1])
+
+
+@requires_postgres
+def test_executive_summary_peak_rss_is_bounded_not_linear_with_open_findings(reset_db):
+    from app.migrate import apply_schema
+
+    apply_schema()
+    small = _rss_bytes_for_executive_summary(80)
+    large = _rss_bytes_for_executive_summary(800)
     assert small > 0
     assert large > 0
     assert large <= max(small * 25 // 10, small + 24 * 1024 * 1024)
