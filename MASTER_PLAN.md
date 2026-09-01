@@ -120,6 +120,12 @@ Inserted after a clean-room review of commit `312e0d0`. These are production-saf
 - **Sec H8 — Auth edge and challenge DoS.** Login is rate-limited and lockout-backed in PostgreSQL with an atomic UPSERT plus `SELECT ... FOR UPDATE`; lockout is committed before 429. The API and Caddy emit CSP/HSTS/frame/nosniff headers. Staff bearer tokens live in `sessionStorage`, not `localStorage`. Agent challenges are durable multi-record, single-use, expiring rows with creation rate limits. MFA remains deferred.
 - **Sec H9 — Two API replicas.** Closed. Challenge nonces and login lockouts live in PostgreSQL. APScheduler ownership is the dedicated scheduler process (S3B). S3F live-gated two API replicas against shared PostgreSQL and `scan-artifacts` with Caddy dynamic discovery and GET failover. That is the supported operating model: Caddy in front of one or two API replicas, exactly one active scheduler, exactly one current central scanner. Closing H9 does not claim arbitrary N-replica scaling, zero interruption under every network partition, safe replay of an already-transmitted POST/PATCH after an ambiguous upstream failure, a horizontally scaled scheduler, PostgreSQL HA, or Caddy retry semantics on the direct WAN scanner path (`http://api:8000`). Do not `--scale scheduler=2`.
 
+### V1 closure sequence
+
+The implementation roadmap in this file ends at Phase 3C plus Scale S1–S3 and Sec H1–H9. There is no Phase 4. Do not invent one until the closure audit and operational/UX gates exist.
+
+- **V1A — Master Plan Closure Audit.** Current. No production code, no schema, no `0018`, no Agent pin change, no reopening S1–S3. Walk live HEAD against every Phase 0–3C requirement, every locked contract, and every deferred item. Output: `docs/V1A_CLOSURE_AUDIT.md`. The audit answers whether the software is the product described by plan v1.0.0, not whether a later feature tranche should start.
+
 ---
 
 # 4. Current High-Level Architecture

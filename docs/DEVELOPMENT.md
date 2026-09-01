@@ -2,6 +2,8 @@
 
 `MASTER_PLAN.md` is the canonical architecture and phase contract. Do not implement later phases from it unless the current task says so.
 
+The defined implementation roadmap is complete through Phase 3C, Scale S3, and Sec H9 (`3f702b8`). Current tranche is **V1A — Master Plan Closure Audit** (`docs/V1A_CLOSURE_AUDIT.md`): no production code, no `0018`, no Agent pin change.
+
 ## Database migrations (Alembic)
 
 Schema changes belong in versioned Alembic revisions under `backend/alembic/versions/`. Do not add new `ALTER TABLE` statements to application startup.
