@@ -1,7 +1,7 @@
 # V1B — Operational Release Readiness
 
 **Tranche:** V1B — Operational Release Readiness  
-**Status:** Current (not closed)  
+**Status:** ACCEPT / CLOSED (`bb63c6b`). V1C is READY TO START.  
 **Does not change:** schema (`0017`), Agent pin `3cdb52c`, Scale S1–S3, Sec H1–H9, V1A product PARTIAL/MISSING items.
 
 This file is the operator runbook. Evidence of what was actually exercised lives in `docs/V1B_CLOSURE.md`. Instructions without a matching closure row are not a passed gate.
@@ -210,7 +210,9 @@ docker compose down -v   # deletes postgres-data, scan-artifacts, scanner-data, 
 
 Compose sets a shared `json-file` ceiling on every long-lived central service (`x-logging: &default-logging`, `max-size: 10m`, `max-file: 5`, about 50 MB per container). Recreate containers **without** `-v` after changing it. Live secdock applied this on 2026-09-01 (`--scale api=2 --no-build`); inspect with `docker inspect <container> --format '{{json .HostConfig.LogConfig}}'`.
 
-Generated site Agent compose (`agent_compose()`, plus `agent/docker-compose.yml` and the reference template) uses the same `json-file` 10m × 5 ceiling. That is deployment configuration only; it does not change scan runtime and does not require an Agent pin bump. Existing Agent hosts still running an older compose file remain unbounded until that file is replaced and the container is recreated (`docker compose --env-file agent.env up -d`).
+Generated site Agent compose (`agent_compose()`, plus `agent/docker-compose.yml` and the reference template) uses the same `json-file` 10m × 5 ceiling. That is deployment configuration only; it does not change scan runtime and does not require an Agent pin bump. Existing Agent hosts must have their local compose updated and the container recreated with `--env-file` (do not omit it, or `TLS_CA_FILE` will not interpolate).
+
+**Rolled 2026-09-01.** Nuclei-Pi4 on NUCLEI-AGENT: `--env-file agent.env --no-build --force-recreate`; LogConfig `max-size=10m` `max-file=5`; heartbeat current. TAB1 on docker01: same ceiling on `agent-4ff50012-630a-45f6-b2de-ba1817d24256.yml` with its matching `--env-file`; inspect `{"Type":"json-file","Config":{"max-file":"5","max-size":"10m"}}`; heartbeat current.
 
 ---
 
@@ -233,9 +235,10 @@ WAN scanner talks to `http://api:8000` (no Caddy retry). A brief API recreate ca
 
 ---
 
-## 8. Out of scope for V1B
+## 8. Out of scope for V1B (historical)
+
+These stayed out of V1B. V1C is the technician/auditor walk.
 
 - V1A product gaps (single CIDR, timezone lists, cancel/dry-run UI, exclusions UI, merge wizard, manual resolve, treatment-review policy, extra event types).
-- V1C technician/auditor walk.
 - V1D soak and any speculative `0018`.
 - Phase 4 / V1.1 feature roadmap.
