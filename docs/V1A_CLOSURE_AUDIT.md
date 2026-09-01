@@ -220,10 +220,10 @@ That is not the same as “a new MSP technician never sees internals.”
 | Home still says “New devices” | Asset is canonical | Copy: New assets |
 | No dedicated Devices page (correct) | Compatibility Device rows remain | Keep Device as projection; don’t revive a Device-first UI |
 | Empty states exist but are thin | First-run guidance | Checklist: create site → network → agent → scan |
-| Viewer UX not walked end-to-end | §3C auditor experience | V1C auditor script |
+| Viewer UX not walked end-to-end | §3C auditor experience | **Closed in V1C** (operator walk; `docs/V1C_CLOSURE.md`). Remaining viewer polish stays with the other §8 items |
 | Agent compose still requires Docker literacy | Unavoidable for V1 field deploy | README is the mitigation; do not hide Docker |
 
-This list is a **prioritized UX backlog**, not random polish. It is not a live technician walk-through; that walk is the next recommended tranche.
+This list is a **prioritized UX backlog**, not random polish. V1C walked the happy path and the viewer/auditor role; it did not promote these PARTIALs into V1 blockers.
 
 ---
 
@@ -265,19 +265,18 @@ Do not reopen H1–H9. Do not treat H9 non-claims as unfinished H9.
 
 Do **not** name Phase 4A yet. Use closure-style tranches until a new immutable roadmap is written.
 
-1. **V1B — Production / operational readiness (no product features).** Verify CI on this baseline; enable `main` protection requiring those checks; write and **perform** a restore of PostgreSQL + `scan-artifacts`; document cert renewal, update/rollback, disk and log retention; one-page recovery for API / scheduler / scanner failure. Still no `0018`.
-2. **V1C — Technician and auditor UX walk.** Execute the MSP script (tenant → site → network → agent → approve → scan → assets → triage → treat → map control → report) and the viewer script. File every confusing click. Turn §8 into an accepted backlog with severity. Implement only after the walk, in a named UX tranche.
-3. **V1D — Operational scale soak.** Several tenants/sites, simultaneous LAN/WAN, schedules, alerts, reports, artifact growth, Agent disconnect, one API recycle. Watch connections, RSS, scheduler duration, spool, disk, slow queries. Create `0018` only if that soak proves it.
-4. **Then write V1.1 / V2 roadmap.** Decide which §27 items (MFA/SSO, Teams, auto-update, blackouts, authenticated scans, TPM, subdomain discovery) belong, plus UX/ops leftovers from V1B–V1D.
-5. **Release checkpoint.** Tag the SHA that survives V1B–V1D (and any accepted UX fixes) as production V1. New features start from that tag.
+1. **V1B — Production / operational readiness (no product features).** ACCEPT / CLOSED. Checkpoint `39f463c0`. Still no `0018`.
+2. **V1C — Technician and auditor UX walk.** ACCEPT / CLOSED. MSP script (tenant → site → network → agent → approve → scan → assets → triage → treat → map control → report) and viewer script. No V1C blockers. §8 remains the accepted V1A backlog. Evidence: `docs/V1C_CLOSURE.md`.
+3. **V1D — Operational scale soak.** READY TO START. Several tenants/sites, simultaneous LAN/WAN, schedules, alerts, reports, artifact growth, Agent disconnect, two-API operation. Watch connections, RSS, scheduler duration, spool, disk, slow queries. Create `0018` only if that soak proves it. Runbook: `docs/V1D_OPERATIONS.md`.
+4. **Then a V1 Release Decision, then a V1 tag, then a V1.1 / V2 roadmap.** Decide which §27 items (MFA/SSO, Teams, auto-update, blackouts, authenticated scans, TPM, subdomain discovery) belong, plus UX/ops leftovers from V1B–V1D. Do not tag V1 before V1D.
 
 ---
 
 ## 12. What this audit is not
 
-- Not a live technician walk (no browser script was executed for V1A).
-- Not a proven restore or soak.
-- Not a GitHub branch-protection verification (`gh` unauthenticated here).
+- Not a live technician walk (V1A itself executed none; V1C later walked the UI — `docs/V1C_CLOSURE.md`).
+- Not a proven soak (that is V1D).
+- Not a GitHub branch-protection verification at audit time (`gh` unauthenticated then; V1B later enabled ruleset `22025478`).
 - Not a reopen of S1–S3 or H1–H9.
 - Not permission to add `0018`, bump the Agent pin, or start Phase 4.
 

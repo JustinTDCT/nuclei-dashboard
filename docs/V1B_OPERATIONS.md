@@ -1,7 +1,7 @@
 # V1B — Operational Release Readiness
 
 **Tranche:** V1B — Operational Release Readiness  
-**Status:** ACCEPT / CLOSED. Implementation/ops baseline `bb63c6b` (PR #1). V1B acceptance checkpoint is the merge commit of PR #2. V1C is READY TO START.  
+**Status:** ACCEPT / CLOSED. Implementation/ops baseline `bb63c6b` (PR #1). V1B acceptance checkpoint `39f463c0` (PR #2). V1C is ACCEPT / CLOSED. V1D is READY TO START (`docs/V1D_OPERATIONS.md`).  
 **Does not change:** schema (`0017`), Agent pin `3cdb52c`, Scale S1–S3, Sec H1–H9, V1A product PARTIAL/MISSING items.
 
 This file is the operator runbook. Evidence of what was actually exercised lives in `docs/V1B_CLOSURE.md`. Instructions without a matching closure row are not a passed gate.
@@ -237,8 +237,9 @@ WAN scanner talks to `http://api:8000` (no Caddy retry). A brief API recreate ca
 
 ## 8. Out of scope for V1B (historical)
 
-These stayed out of V1B. V1C is the technician/auditor walk.
+These stayed out of V1B.
 
 - V1A product gaps (single CIDR, timezone lists, cancel/dry-run UI, exclusions UI, merge wizard, manual resolve, treatment-review policy, extra event types).
-- V1D soak and any speculative `0018`.
+- V1C technician/auditor walk (closed; `docs/V1C_CLOSURE.md`).
+- V1D soak (`docs/V1D_OPERATIONS.md`) and any speculative `0018`.
 - Phase 4 / V1.1 feature roadmap.
