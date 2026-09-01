@@ -120,8 +120,11 @@ def test_caddy_resolves_api_replicas_and_hides_internal():
     assert "dynamic a api 8000" in caddy
     assert "lb_policy round_robin" in caddy
     assert "lb_try_duration" in caddy
-    assert "health_uri /api/health" in caddy
     assert "fail_duration" in caddy
+    assert "transport http" in caddy
+    assert "dial_timeout 500ms" in caddy
+    assert "health_uri" not in caddy
+    assert "health_interval" not in caddy
     assert "reverse_proxy api:8000" not in caddy
 
 
