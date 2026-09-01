@@ -56,6 +56,7 @@ Sample at soak start, at least twice per day, and at soak end. Prefer `docker co
 | Scheduler | One Compose `scheduler`; advisory lock `91304701` granted once; job duration in scheduler logs | Two APSchedulers; lock held by two backends; jobs that never finish |
 | Scan job queue | `scan_jobs.status` counts | Permanently stuck `queued` / `running` / `waiting_for_agent` that never miss, fail, or complete |
 | Event/alert queue | `event_alert_queue.status` counts | Permanently `pending`/`processing` growth; duplicate open alerts for the same subject caused by two APIs |
+| Alert deliveries | `alert_deliveries.status` counts | Routing finished (`event_alert_queue` processed) while email/webhook rows stay `pending`/`processing`; delivery worker stuck |
 | Duplicate processing | Compare job ids, domain events, alert deliveries | Duplicate jobs/events/alerts attributable to two API replicas (scheduler must stay single-active) |
 | Agent / scanner spool | Agent `/data/spool`, WAN `scanner-data` | Unbounded growth after ACKs; leftover `pipeline.done` that never uploads |
 | `scan-artifacts` | Volume size + `scan_artifacts` row count | Unbounded growth that retention cannot explain |
@@ -66,11 +67,14 @@ Sample at soak start, at least twice per day, and at soak end. Prefer `docker co
 | Tenant isolation | Spot-check viewer/staff scoped lists vs another tenant’s ids | Any cross-tenant leakage |
 | Recovery | Operator notes | Any production recovery beyond expected operations (recreate one replica, restart one Agent, normal backup) |
 
-Starter SQL (read-only; run via `sudo docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"`):
+Starter samples (read-only). Expand `$POSTGRES_USER` / `$POSTGRES_DB` **inside** the postgres container; they come from Compose `.env` and are often blank in the secdock host shell. API `:8000` is not published to host loopback — probe health from an `api` container, not `curl http://127.0.0.1:8000`. (`docker compose exec api` with `--scale api=2` hits one replica; that is enough for this baseline.)
 
-```sql
+```bash
+sudo docker compose exec -T postgres \
+  sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
 SELECT status, count(*) FROM scan_jobs GROUP BY status ORDER BY 1;
 SELECT status, count(*) FROM event_alert_queue GROUP BY status ORDER BY 1;
+SELECT status, count(*) FROM alert_deliveries GROUP BY status ORDER BY 1;
 SELECT count(*) AS pg_sessions FROM pg_stat_activity;
 SELECT pg_size_pretty(pg_database_size(current_database())) AS db_size;
 SELECT objid, granted, pid
@@ -79,12 +83,11 @@ SELECT objid, granted, pid
 SELECT id, name, last_heartbeat, status
   FROM agents
  ORDER BY id;
-```
+SQL
 
-Confirm health without printing secrets:
+sudo docker compose exec -T api python -c \
+'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/api/health").read().decode())'
 
-```bash
-curl -fsS http://127.0.0.1:8000/api/health
 sudo docker compose ps
 sudo docker inspect "$(sudo docker compose ps -q scheduler)" \
   --format '{{json .HostConfig.LogConfig}}'
@@ -98,7 +101,7 @@ All of the following must hold for the soak window:
 
 - No data loss
 - No cross-tenant leakage
-- No permanently stuck scan / job / event queue
+- No permanently stuck scan / job / event / delivery queue
 - No duplicate processing caused by the two APIs
 - Scheduler remains single-active (advisory lock `91304701`, do not scale scheduler)
 - Agents remain healthy and reconnect cleanly
