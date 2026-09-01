@@ -5,5 +5,6 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "node",
+    environmentMatchGlobs: [["src/**/*.test.tsx", "jsdom"]],
   },
 });

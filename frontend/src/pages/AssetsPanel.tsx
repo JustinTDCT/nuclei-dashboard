@@ -97,7 +97,16 @@ export function AssetsPanel({ tenantId }: { tenantId: number }) {
         </div>
         <div>
           <label>Search</label>
-          <input value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                setOffset(0);
+                load(0);
+              }
+            }}
+          />
         </div>
         <button className="text-cyan-400 text-sm" onClick={() => { setOffset(0); load(0); }}>
           Search
